@@ -1,0 +1,105 @@
+{
+  "files": [
+    {
+      "name": "April 2021 eStatement.pdf",
+      "pages": 15,
+      "periods": 1,
+      "reconciled": 1,
+      "transactions": 284,
+      "guarantee_a": 1,
+      "guarantee_b": 0,
+      "unplaced": 0,
+      "seconds": 8.8,
+      "engines": {
+        "tesseract": 15
+      },
+      "continuity": "0/0",
+      "failures": [],
+      "header": "8/8",
+      "header_misses": []
+    },
+    {
+      "name": "Binder 2.pdf",
+      "pages": 99,
+      "periods": 10,
+      "reconciled": 2,
+      "transactions": 1642,
+      "guarantee_a": 2,
+      "guarantee_b": 0,
+      "unplaced": 81,
+      "seconds": 114.1,
+      "engines": {
+        "tesseract": 140,
+        "tesseract-psm6": 41
+      },
+      "continuity": "4/7",
+      "failures": [
+        "2025-05-01: дельта 25234.51, невязка 154916.24 (chain_break)",
+        "2024-06-01: дельта -136464.79, невязка 272929.58 (chain_break)",
+        "2024-07-01: дельта -11798.31, невязка 23736.44 (chain_break)",
+        "2024-08-01: дельта -0.10, невязка 0.20 (unexplained)",
+        "2024-09-01: дельта -21821.02, невязка 43642.04 (chain_break)",
+        "2024-10-01: дельта 2422.16, невязка 118708.74 (chain_break)",
+        "2024-11-01: дельта -12768.12, невязка 31490.06 (chain_break, digit_transposition)",
+        "2024-12-01: дельта -960.00, невязка 1920.00 (chain_break)"
+      ],
+      "header": "89/100",
+      "header_misses": [
+        "2025-04-01: account_last4 = None, эталон 4664",
+        "2024-06-01: account_last4 = None, эталон 4664",
+        "2024-07-01: account_last4 = None, эталон 4664",
+        "2024-08-01: account_last4 = None, эталон 4664",
+        "2024-08-01: deposits_total = 1178227.49, эталон 1178227.39",
+        "2024-08-01: ending_balance = 517532.62, эталон 517532.52",
+        "2024-09-01: account_last4 = None, эталон 4664",
+        "2024-09-01: account_last4 = None, эталон 4623",
+        "2024-10-01: account_last4 = None, эталон 4664",
+        "2024-11-01: account_last4 = None, эталон 4664",
+        "2024-12-01: account_last4 = None, эталон 4664"
+      ]
+    },
+    {
+      "name": "Great Lakes Commerce Bank 2025.pdf",
+      "pages": 6,
+      "periods": 1,
+      "reconciled": 1,
+      "transactions": 292,
+      "guarantee_a": 1,
+      "guarantee_b": 0,
+      "unplaced": 0,
+      "seconds": 0.1,
+      "engines": {
+        "textlayer": 6
+      },
+      "continuity": "0/0",
+      "failures": [],
+      "header": "8/8",
+      "header_misses": []
+    },
+    {
+      "name": "Image Statement Jan 31 2025.pdf",
+      "pages": 4,
+      "periods": 1,
+      "reconciled": 1,
+      "transactions": 10,
+      "guarantee_a": 0,
+      "guarantee_b": 1,
+      "unplaced": 0,
+      "seconds": 5.1,
+      "engines": {
+        "tesseract": 5,
+        "tesseract-psm6": 1
+      },
+      "continuity": "0/0",
+      "failures": [],
+      "header": "8/8",
+      "header_misses": []
+    }
+  ],
+  "totals": {
+    "periods": 13,
+    "reconciled": 5,
+    "transactions": 2228,
+    "header": "113/124"
+  }
+}

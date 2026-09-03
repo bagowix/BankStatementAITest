@@ -1,0 +1,18 @@
+{
+  "file": "Great Lakes Commerce Bank 2025.pdf",
+  "verified": "2026-09-03, по изображению первой страницы каждой выписки",
+  "periods": [
+    {
+      "start": "2025-01-01",
+      "end": "2025-01-28",
+      "bank": "Great Lakes Commerce Bank",
+      "account_last4": "4071",
+      "beginning_balance": 2014882.47,
+      "deposits_total": 2180764.9,
+      "deposits_count": null,
+      "withdrawals_total": 2154309.25,
+      "withdrawals_count": null,
+      "ending_balance": 2041338.12
+    }
+  ]
+}

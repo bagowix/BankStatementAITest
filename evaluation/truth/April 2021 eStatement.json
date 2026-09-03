@@ -1,0 +1,18 @@
+{
+  "file": "April 2021 eStatement.pdf",
+  "verified": "2026-09-03, по изображению первой страницы каждой выписки",
+  "periods": [
+    {
+      "start": "2021-04-01",
+      "end": "2021-04-30",
+      "bank": "Fulton Bank",
+      "account_last4": "1858",
+      "beginning_balance": 1908989.6,
+      "deposits_total": 4351230.63,
+      "deposits_count": null,
+      "withdrawals_total": 4384606.59,
+      "withdrawals_count": null,
+      "ending_balance": 1875613.64
+    }
+  ]
+}

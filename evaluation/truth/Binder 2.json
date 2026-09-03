@@ -1,0 +1,126 @@
+{
+  "file": "Binder 2.pdf",
+  "verified": "2026-09-03, по изображению первой страницы каждой выписки",
+  "periods": [
+    {
+      "start": "2025-04-01",
+      "end": "2025-04-30",
+      "bank": "Ixonia Bank",
+      "account_last4": "4664",
+      "beginning_balance": 597068.7,
+      "deposits_total": 1214254.05,
+      "deposits_count": 81,
+      "withdrawals_total": 1302201.16,
+      "withdrawals_count": 111,
+      "ending_balance": 509121.59
+    },
+    {
+      "start": "2025-05-01",
+      "end": "2025-05-31",
+      "bank": "Ixonia Bank",
+      "account_last4": "4664",
+      "beginning_balance": 509121.59,
+      "deposits_total": 926416.11,
+      "deposits_count": 95,
+      "withdrawals_total": 1271197.35,
+      "withdrawals_count": 142,
+      "ending_balance": 164340.35
+    },
+    {
+      "start": "2024-06-01",
+      "end": "2024-06-30",
+      "bank": "Ixonia Bank",
+      "account_last4": "4664",
+      "beginning_balance": 439130.65,
+      "deposits_total": 1050851.95,
+      "deposits_count": 63,
+      "withdrawals_total": 1158172.87,
+      "withdrawals_count": 99,
+      "ending_balance": 331809.73
+    },
+    {
+      "start": "2024-07-01",
+      "end": "2024-07-31",
+      "bank": "Ixonia Bank",
+      "account_last4": "4664",
+      "beginning_balance": 331809.73,
+      "deposits_total": 848578.92,
+      "deposits_count": 84,
+      "withdrawals_total": 901281.55,
+      "withdrawals_count": 82,
+      "ending_balance": 279107.1
+    },
+    {
+      "start": "2024-08-01",
+      "end": "2024-08-31",
+      "bank": "Ixonia Bank",
+      "account_last4": "4664",
+      "beginning_balance": 279107.1,
+      "deposits_total": 1178227.39,
+      "deposits_count": 83,
+      "withdrawals_total": 939801.97,
+      "withdrawals_count": 88,
+      "ending_balance": 517532.52
+    },
+    {
+      "start": "2024-09-01",
+      "end": "2024-09-30",
+      "bank": "Ixonia Bank",
+      "account_last4": "4664",
+      "beginning_balance": 517532.52,
+      "deposits_total": 1085703.81,
+      "deposits_count": 71,
+      "withdrawals_total": 1143851.49,
+      "withdrawals_count": 118,
+      "ending_balance": 459384.84
+    },
+    {
+      "start": "2024-09-01",
+      "end": "2024-09-30",
+      "bank": "Ixonia Bank",
+      "account_last4": "4623",
+      "beginning_balance": -4.0,
+      "deposits_total": 336565.07,
+      "deposits_count": 13,
+      "withdrawals_total": 336565.07,
+      "withdrawals_count": 35,
+      "ending_balance": -4.0
+    },
+    {
+      "start": "2024-10-01",
+      "end": "2024-10-31",
+      "bank": "Ixonia Bank",
+      "account_last4": "4664",
+      "beginning_balance": 459384.84,
+      "deposits_total": 1187061.65,
+      "deposits_count": 83,
+      "withdrawals_total": 1168104.3,
+      "withdrawals_count": 96,
+      "ending_balance": 478342.19
+    },
+    {
+      "start": "2024-11-01",
+      "end": "2024-11-30",
+      "bank": "Ixonia Bank",
+      "account_last4": "4664",
+      "beginning_balance": 478342.19,
+      "deposits_total": 847969.53,
+      "deposits_count": 75,
+      "withdrawals_total": 1137901.02,
+      "withdrawals_count": 120,
+      "ending_balance": 188410.7
+    },
+    {
+      "start": "2024-12-01",
+      "end": "2024-12-31",
+      "bank": "Ixonia Bank",
+      "account_last4": "4664",
+      "beginning_balance": 188410.7,
+      "deposits_total": 1223865.12,
+      "deposits_count": 67,
+      "withdrawals_total": 835110.45,
+      "withdrawals_count": 65,
+      "ending_balance": 577165.37
+    }
+  ]
+}

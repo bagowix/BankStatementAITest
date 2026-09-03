@@ -1,0 +1,18 @@
+{
+  "file": "Image Statement Jan 31 2025.pdf",
+  "verified": "2026-09-03, по изображению первой страницы каждой выписки",
+  "periods": [
+    {
+      "start": "2025-01-01",
+      "end": "2025-01-31",
+      "bank": "Renasant Bank",
+      "account_last4": "6426",
+      "beginning_balance": -10.0,
+      "deposits_total": 32537.69,
+      "deposits_count": null,
+      "withdrawals_total": 32537.69,
+      "withdrawals_count": null,
+      "ending_balance": -10.0
+    }
+  ]
+}
