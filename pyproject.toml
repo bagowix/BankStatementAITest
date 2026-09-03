@@ -1,0 +1,141 @@
+[project]
+name = "bankstatement"
+version = "0.1.0"
+description = "Bank statement extraction agent: periods, totals and transactions, reconciled"
+requires-python = ">=3.12"
+dependencies = [
+    "pymupdf~=1.28.2",
+    "pytesseract~=0.3.13",
+    "pillow~=12.3.0",
+    "msgspec>=0.21.1",
+    "cyclopts>=4.23.3",
+    "dishka>=1.10",
+]
+
+[project.optional-dependencies]
+# Интерфейс не нужен для извлечения, поэтому вынесен: `uv sync` без него ставит
+# ядро, а сервер и его зависимости появляются только по требованию.
+ui = [
+    "fastapi~=0.120",
+    "uvicorn~=0.40",
+    "python-multipart~=0.0.20",
+    "jinja2~=3.1",
+    "taskiq~=0.12",
+]
+
+# Очередь и общее состояние. Нужны, только когда разбор уезжает в отдельный
+# воркер; в одном процессе стенд обходится памятью.
+queue = [
+    "taskiq-redis~=1.2",
+    "redis~=8.1",
+]
+
+# Ступень L2: чтение страницы vision-моделью. Включается переменной окружения
+# и ключом; без них лестница заканчивается на Tesseract, и эти пакеты не нужны.
+vision = [
+    "anthropic>=1.0",
+    "openai>=1.60",
+]
+
+[dependency-groups]
+# Со всеми группами: проверка типов и тесты покрывают и веб-слой, и очередь,
+# поэтому обычный `uv sync` обязан давать полное окружение. Пользователю пакета
+# группы по-прежнему необязательны — это разные вещи.
+dev = [
+    "bankstatement[ui,queue,vision]",
+    "pytest~=9.0",
+    "pytest-cov~=7.0",
+    "ruff~=0.16",
+    "mypy~=1.19",
+    "poethepoet~=0.45",
+    "httpx~=0.28",
+    "fakeredis>=2.37.1",
+    "pre-commit~=4.4",
+]
+
+[project.scripts]
+bankstatement = "bankstatement.cli:app"
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
+# Ключи платной ступени и режим стенда читаются из .env (файл в .gitignore):
+# так ключ лежит в одном месте, а не экспортируется в каждом терминале.
+[tool.poe]
+envfile = ".env"
+
+[tool.poe.tasks]
+extract = "python -m bankstatement.cli extract"
+evaluate = "python -m bankstatement.cli evaluate"
+ui = "uvicorn bankstatement.web.app:app --reload --port 8000"
+worker = "taskiq worker bankstatement.worker.broker:broker bankstatement.worker.tasks --use-process-pool --log-level INFO"
+# Тесты не должны видеть платную ступень, даже если она включена в .env.
+tests = { cmd = "pytest", env = { BANKSTATEMENT_VISION = "" } }
+lint = "ruff check ."
+fmt = "ruff format ."
+mypy = "mypy src"
+check = ["lint", "mypy"]
+hooks = "pre-commit install"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "G", "N", "C4", "PTH", "TID"]
+# RUF001-003 помечают кириллицу как «неоднозначный юникод»; русский в комментариях
+# здесь принят, и правило даёт только шум.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+# disallow_any_explicit не включаем: он срабатывает на внутренностях сторонних
+# библиотек, а не на нашем коде. Запрет Any в своём коде держится правилом в
+# AGENTS.md и ревью.
+
+[[tool.mypy.overrides]]
+module = ["pymupdf.*", "pytesseract.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# PyMuPDF не поставляет полные аннотации; оборачивать каждый его вызов ради
+# strict-режима — шум без пользы. Ограничиваем послабление модулями, которые
+# действительно с ним работают.
+module = ["bankstatement.recognize.*", "bankstatement.ingest", "bankstatement.web.preview"]
+disallow_untyped_calls = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+# PyMuPDF тянет SWIG-обёртку, которая шумит на импорте; к нашему коду отношения не имеет.
+filterwarnings = [
+    "ignore:builtin type Swig.*:DeprecationWarning",
+    "ignore:builtin type swig.*:DeprecationWarning",
+    # starlette советует httpx2 для TestClient; переход не наш выбор и на код не влияет.
+    "ignore:Using `httpx` with `starlette.testclient`.*",
+]
+markers = [
+    "ocr: требует бинарь tesseract",
+    "samples: требует PDF-файлы в samples/",
+    "ui: требует зависимости группы ui",
+]
+
+[tool.coverage.report]
+fail_under = 95
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bankstatement"]

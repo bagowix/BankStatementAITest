@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Ни одна работа не пишет в репозиторий, поэтому прав на чтение достаточно.
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      # Экшены закреплены по SHA, а не по тегу: тег перемещаемый, и подмена
+      # содержимого под ним не потребует изменения этого файла.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Без бинаря Tesseract образцы-картинки прочитаются пустыми, и тесты под
+      # маркером `samples` начнут падать — а это ровно то, ради чего они есть.
+      - name: Install Tesseract
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      # Группа dev тянет за собой обе необязательные группы: без них тесты
+      # веб-слоя и воркера молча пропустились бы, а проверка типов покраснела бы
+      # на отсутствии пакета вместо кода.
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Ruff format
+        run: uv run ruff format --check
+
+      - name: Ruff lint
+        run: uv run ruff check
+
+      - name: Mypy
+        run: uv run mypy src
+
+      # Порог покрытия (95%) задан в pyproject, отдельного флага не нужно.
+      - name: Tests
+        run: uv run pytest --cov=src/bankstatement

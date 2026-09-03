@@ -182,11 +182,9 @@ dmypy.json
 cython_debug/
 
 # PyCharm
-#   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#   and can be added to the global gitignore or merged into this file.  For a more nuclear
-#   option (not recommended) you can uncomment the following to ignore the entire idea folder.
-# .idea/
+#   Настройки IDE не относятся к проекту. PyCharm заводит их сам в
+#   .git/info/exclude, но этот файл локальный и в репозиторий не уезжает.
+.idea/
 
 # Abstra
 #   Abstra is an AI-powered process automation framework.
@@ -195,9 +193,9 @@ cython_debug/
 .abstra/
 
 # Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
+#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore
 #   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, 
+#   and can be added to the global gitignore or merged into this file. However, if you prefer,
 #   you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 # Temporary file for partial code execution
@@ -216,3 +214,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Внешние образцы для прогонов обобщения: скачаны из чужих репозиториев и с
+# сайтов банков, в репозиторий не уезжают.
+samples/ext-*
+
+# Реальные выписки в репозиторий не входят: положите свои PDF сюда локально.
+samples/*.pdf

@@ -1,0 +1,49 @@
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-ast
+      - id: check-toml
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: detect-private-key
+      # Оставленный в коде breakpoint() уедет в репозиторий незамеченным:
+      # ruff ловит его не во всех формах, а тесты на нём просто повиснут.
+      - id: debug-statements
+      - id: end-of-file-fixer
+        exclude: ^src/bankstatement/web/static/htmx\.min\.js$
+      - id: trailing-whitespace
+        exclude: ^src/bankstatement/web/static/htmx\.min\.js$
+      - id: mixed-line-ending
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [--verbose]
+
+  - repo: local
+    hooks:
+      # mypy запускается через uv, а не изолированным окружением pre-commit:
+      # strict-режим смотрит на зависимости, и без них он даст другой ответ,
+      # чем CI.
+      - id: mypy
+        name: mypy
+        entry: uv run mypy src
+        pass_filenames: false
+        language: system
+        types: [python]
