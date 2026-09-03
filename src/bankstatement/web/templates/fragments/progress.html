@@ -1,0 +1,47 @@
+<section class="running"
+         hx-get="/jobs/{{ job.id }}/status?shown={{ shown }}"
+         hx-trigger="load delay:700ms"
+         hx-swap="outerHTML">
+  <div class="progress card">
+    <div class="progress-head">
+      <h2>{{ job.name }}</h2>
+      <span class="muted">{{ '%.0f'|format(job.elapsed) }} с</span>
+    </div>
+
+    <div class="bar {{ 'indeterminate' if job.phase.value == 'reconciling' else '' }}">
+      {% if job.pages_total %}<i style="width: {{ job.working_percent }}%"></i>{% endif %}
+      <span style="width: {{ job.percent }}%"></span>
+    </div>
+
+    <p class="muted">
+      {{ phase_text[job.phase] }}
+      {% if job.pages_total %}
+        · прочитано {{ job.pages_done }} из {{ job.pages_total }} стр.
+        {%- if job.pages_in_flight %}, читается ещё {{ job.pages_in_flight }}{% endif %}
+      {% endif %}
+    </p>
+
+    {% if job.stalled %}
+    <p class="stalled">
+      <b>Воркер не отвечает.</b> Отметок о работе нет уже несколько минут. Документ не потерян: он
+      остался неподтверждённым в очереди и вернётся в работу, когда в неё придёт следующая задача.
+    </p>
+    {% endif %}
+
+    <p class="hint">
+      {%- if shown -%}
+        Готовые выписки уже ниже — их можно проверять, не дожидаясь остальных.
+      {%- elif job.phase.value == 'reconciling' -%}
+        Страницы прочитаны; идёт разбор операций и сверка с итогами документа.
+      {%- else -%}
+        Страницы читаются одновременно, поэтому счётчик растёт пачками.
+      {%- endif -%}
+    </p>
+  </div>
+</section>
+
+{% for period in fresh %}
+<div hx-swap-oob="beforeend:#periods">
+  {% include "fragments/period.html" %}
+</div>
+{% endfor %}

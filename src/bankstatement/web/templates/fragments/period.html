@@ -1,0 +1,149 @@
+{% set verdict = period.reconciliation %}
+{% set ok = verdict.status == RECONCILED %}
+{% set pid = job.id ~ '-' ~ (period.pages[0] if period.pages else loop_index|default(0)) %}
+<article class="card period" id="p-{{ pid }}">
+  <header class="period-head {{ 'good' if ok else 'bad' }}">
+    <span class="badge">{{ '✓ сошлось' if ok else '✗ не сошлось' }}</span>
+    <span class="period-span">
+      {% if period.account.period %}{{ period.account.period.start }} — {{ period.account.period.end }}{% else %}период не определён{% endif %}
+    </span>
+    <span class="muted">
+      {{ period.account.bank or 'банк не определён' }} ····{{ period.account.account_last4 or '????' }}
+      {% if period.pages %}· стр. {{ period.pages[0] }}–{{ period.pages[-1] }}{% endif %}
+    </span>
+  </header>
+
+  <p class="check {{ 'good' if ok else 'bad' }}">
+    {% if ok %}
+      {{ '{:,.2f}'.format(period.summary.beginning_balance) if period.summary.beginning_balance is not none else '?' }}
+      + {{ '{:,.2f}'.format(period.summary.deposits_total) if period.summary.deposits_total is not none else '?' }}
+      − {{ '{:,.2f}'.format(period.summary.withdrawals_total) if period.summary.withdrawals_total is not none else '?' }}
+      = {{ '{:,.2f}'.format(period.summary.ending_balance) if period.summary.ending_balance is not none else '?' }}
+      <b>— сходится копейка в копейку</b>
+    {% else %}
+      <b>Не хватает {{ '{:,.2f}'.format(verdict.delta.copy_abs()) }}</b>
+      до равенства «остаток на начало + приход − расход = остаток на конец»
+    {% endif %}
+  </p>
+
+  <p class="guarantee">{{ guarantee_text[verdict.guarantee] }}</p>
+
+  <div class="totals">
+    <div title="Сколько было на счёте в первый день периода">
+      <small>остаток на начало</small>
+      <b>{{ '{:,.2f}'.format(period.summary.beginning_balance) if period.summary.beginning_balance is not none else '—' }}</b>
+    </div>
+    <div title="Сколько денег пришло на счёт за период">
+      <small>приход</small>
+      <b class="plus">{{ '{:,.2f}'.format(period.summary.deposits_total) if period.summary.deposits_total is not none else '—' }}{% if period.summary.deposits_count %} <em>({{ period.summary.deposits_count }} шт.)</em>{% endif %}</b>
+    </div>
+    <div title="Сколько денег ушло со счёта за период">
+      <small>расход</small>
+      <b class="minus">{{ '{:,.2f}'.format(period.summary.withdrawals_total) if period.summary.withdrawals_total is not none else '—' }}{% if period.summary.withdrawals_count %} <em>({{ period.summary.withdrawals_count }} шт.)</em>{% endif %}</b>
+    </div>
+    <div title="Сколько осталось на счёте в последний день периода">
+      <small>остаток на конец</small>
+      <b>{{ '{:,.2f}'.format(period.summary.ending_balance) if period.summary.ending_balance is not none else '—' }}</b>
+    </div>
+  </div>
+
+  {% if not ok %}
+  <div class="diagnosis">
+    <p class="lead">Что это значит: часть операций не удалось прочитать или они прочитаны неверно —
+      сумма извлечённых строк не даёт напечатанный остаток на конец.</p>
+
+    <ul>
+      {% for d in verdict.diagnoses %}
+      <li>
+        <span class="kind">{{ diagnosis_text.get(d.kind, d.kind) }}</span>
+        {% if d.rows %}
+        <span class="jump">
+          {% for row in d.rows %}<a href="#r-{{ pid }}-{{ row }}" onclick="openRow(this)">строка {{ row + 1 }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+        </span>
+        {% endif %}
+        <details class="tech"><summary>подробности</summary>
+          <p class="mono">{{ d.detail }}</p>
+          {% if d.candidates %}<ul class="candidates">{% for c in d.candidates %}<li class="mono">{{ c }}</li>{% endfor %}</ul>{% endif %}
+        </details>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% set losses = period.losses.unplaced if period.losses else [] %}
+  {% set actual_losses = losses|selectattr('kind', 'equalto', 'lost')|list %}
+
+  <details class="rows">
+    <summary>{{ period.transactions|length }} операций{% if period.losses.placed %} ({{ period.losses.placed }} размещено){% endif %}</summary>
+    <table>
+      <thead>
+        <tr>
+          <th>№</th><th>дата</th><th>описание</th>
+          <th class="num">приход</th><th class="num">расход</th><th class="num">остаток</th><th>стр.</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in period.transactions %}
+        <tr id="r-{{ pid }}-{{ loop.index0 }}">
+          <td class="idx">{{ loop.index }}</td>
+          <td class="mono">{{ t.date }}</td>
+          <td>{{ t.description }}</td>
+          <td class="num plus" {% if t.source and t.source.repaired %}title="было напечатано: {{ t.source.printed }}"{% endif %}>{{ '{:,.2f}'.format(t.deposit) if t.deposit is not none else '' }}</td>
+          <td class="num minus" {% if t.source and t.source.repaired %}title="было напечатано: {{ t.source.printed }}"{% endif %}>{{ '{:,.2f}'.format(t.withdrawal) if t.withdrawal is not none else '' }}</td>
+          <td class="num mono">{{ '{:,.2f}'.format(t.balance) if t.balance is not none else '' }}</td>
+          <td>
+            {% if t.source and t.source.bbox %}
+            <button class="src" type="button"
+                    data-crop="/jobs/{{ job.id }}/crop?page={{ t.source.page }}&x0={{ t.source.bbox[0] }}&y0={{ t.source.bbox[1] }}&x1={{ t.source.bbox[2] }}&y1={{ t.source.bbox[3] }}"
+                    onclick="showSource(this)"
+                    data-engine="{{ t.source.engine }}"
+                    data-confidence="{{ '%.0f'|format(t.source.confidence) if t.source.confidence is not none else '—' }}"
+                    title="показать в документе">{{ t.source.page }}</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+
+  {% if actual_losses %}
+  <details class="rows losses">
+    <summary class="warning">⚠ Не удалось разместить {{ actual_losses|length }} строк</summary>
+    <table>
+      <thead>
+        <tr>
+          <th>№</th><th>дата</th><th>описание</th>
+          <th class="num">суммы</th><th>причина</th><th>стр.</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for loss in actual_losses %}
+        <tr>
+          <td class="idx">{{ loop.index }}</td>
+          <td class="mono">{{ loss.date or '—' }}</td>
+          <td>{{ loss.description }}</td>
+          <td class="num mono">
+            {% for amt in loss.amounts %}
+            <div>{{ '{:,.2f}'.format(amt) }}</div>
+            {% endfor %}
+          </td>
+          <td class="reason">{{ diagnosis_text.get(loss.reason, loss.reason) }}</td>
+          <td>
+            {% if loss.source and loss.source.bbox %}
+            <button class="src" type="button"
+                    data-crop="/jobs/{{ job.id }}/crop?page={{ loss.source.page }}&x0={{ loss.source.bbox[0] }}&y0={{ loss.source.bbox[1] }}&x1={{ loss.source.bbox[2] }}&y1={{ loss.source.bbox[3] }}"
+                    onclick="showSource(this)"
+                    data-engine="{{ loss.source.engine }}"
+                    data-confidence="{{ '%.0f'|format(loss.source.confidence) if loss.source.confidence is not none else '—' }}"
+                    title="показать в документе">{{ loss.source.page }}</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+</article>

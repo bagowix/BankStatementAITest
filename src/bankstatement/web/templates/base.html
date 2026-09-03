@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Извлечение банковских выписок{% endblock %}</title>
+  <link rel="stylesheet" href="/static/styles.css?v={{ static_version }}">
+  <script src="/static/htmx.min.js?v={{ static_version }}" defer></script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/">
+      <span class="mark">Σ</span>
+      <span>
+        <strong>Извлечение банковских выписок</strong>
+        <small>результат считается верным только когда сошлась арифметика документа</small>
+      </span>
+    </a>
+    <a class="ghost" href="/api">API</a>
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+
+  <dialog id="source-view">
+    <header>
+      <b>Строка в исходном документе</b>
+      <span class="muted" id="source-meta"></span>
+      <button type="button" onclick="document.getElementById('source-view').close()">✕</button>
+    </header>
+    <img id="source-image" alt="фрагмент выписки">
+  </dialog>
+
+  <script>
+    // Окно провенанса одно на страницу: фрагменты подменяются htmx-ом, и
+    // диалог внутри них исчезал бы вместе с ними прямо во время просмотра.
+    function showSource(button) {
+      const dialog = document.getElementById('source-view');
+      document.getElementById('source-image').src = button.dataset.crop;
+      document.getElementById('source-meta').textContent =
+        `стр. ${button.textContent.trim()} · ${button.dataset.engine} · уверенность ${button.dataset.confidence}`;
+      dialog.showModal();
+    }
+
+    // Клик мимо содержимого закрывает окно: без этого фон выглядит кликабельным,
+    // но съедает нажатия.
+    document.getElementById('source-view').addEventListener('click', (event) => {
+      if (event.target.id === 'source-view') event.target.close();
+    });
+
+    // Ссылка из диагноза ведёт к строке, но та лежит в свёрнутой таблице.
+    // Раскрываем её сами и подсвечиваем цель — иначе ссылка приводит в пустоту.
+    function openRow(link) {
+      const row = document.querySelector(link.getAttribute('href'));
+      if (!row) return;
+      row.closest('details')?.setAttribute('open', '');
+      document.querySelectorAll('tr.target').forEach((tr) => tr.classList.remove('target'));
+      row.classList.add('target');
+      setTimeout(() => row.scrollIntoView({block: 'center', behavior: 'smooth'}), 0);
+    }
+
+    // htmx по умолчанию не подставляет ответы 4xx, и отказ выглядел бы как
+    // «ничего не произошло». Коды при этом остаются честными: то же API читают
+    // не только браузеры.
+    document.body.addEventListener('htmx:responseError', (event) => {
+      const target = document.getElementById('work');
+      if (!target) return;
+      let detail = 'не удалось принять файл';
+      try { detail = JSON.parse(event.detail.xhr.responseText).detail || detail; } catch (_) {}
+
+      // Текст ответа собираем узлами, а не разметкой: в него попадает имя файла,
+      // которое дал пользователь, и склейка строк сделала бы из этого XSS.
+      const card = document.createElement('section');
+      card.className = 'card verdict bad';
+      const title = document.createElement('h2');
+      title.textContent = 'Файл не принят';
+      const text = document.createElement('p');
+      text.textContent = detail;
+      card.append(title, text);
+      target.replaceChildren(card);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ job.name }}{% endblock %}
+{% block content %}
+{% if job.state.value in ('queued', 'running') %}
+  {# Ссылку открывают и в середине разбора: страница должна продолжать следить сама. #}
+  {% include "fragments/progress.html" %}
+{% else %}
+<section class="result">
+  {% include "fragments/verdict_head.html" %}
+</section>
+{% endif %}
+
+<div id="periods">
+  {% for period in periods %}
+  {% include "fragments/period.html" %}
+  {% endfor %}
+</div>
+{% endblock %}

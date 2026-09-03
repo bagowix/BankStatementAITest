@@ -1,0 +1,77 @@
+{% if job.state.value == 'failed' %}
+  <div class="card verdict bad">
+    <h2>Разбор не выполнен</h2>
+    <p class="mono">{{ job.error }}</p>
+  </div>
+{% elif result %}
+{% set opinion = result.opinion.value %}
+{% set headline, meaning = opinion_text[result.opinion] %}
+<header class="result-head">
+  <div class="opinion {{ opinion }}">
+    <span class="opinion-mark" aria-hidden="true">{{ '✓' if opinion == 'clean' else '!' }}</span>
+    <div>
+      <h2>{{ headline }}</h2>
+      <p class="muted">{{ meaning }}</p>
+      {% if result.truncated %}<p class="muted"><strong>Разбор прерван по времени:</strong> показаны только выписки, готовые к этому моменту.</p>{% endif %}
+    </div>
+  </div>
+  <a class="ghost" href="/jobs/{{ job.id }}/json">Скачать JSON</a>
+</header>
+
+<dl class="scope">
+  <div><dt>документ</dt><dd>{{ job.name }}</dd></div>
+  <div><dt>выписок</dt><dd>{{ reconciled }} из {{ periods|length }} сошлись</dd></div>
+  <div><dt>страниц</dt><dd>{{ result.pages_total }}</dd></div>
+  <div><dt>операций</dt><dd>{{ '{:,}'.format(result.transactions_total) }}</dd></div>
+  <div><dt>разобрано за</dt><dd>{{ '%.1f'|format(job.elapsed) }} с</dd></div>
+</dl>
+
+{% if result.failures %}
+<section class="findings card">
+  <h3>
+    Требуют проверки: {{ result.failures|length }}
+    {%- if result.unexplained %} · нераскрыто {{ '{:,.2f}'.format(result.unexplained) }}{% endif %}
+  </h3>
+  <p class="muted small">Сначала крупные: расхождение в копейку и расхождение в тысячи — разная работа.</p>
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr><th>выписка</th><th class="num">расхождение</th><th>причина</th><th>стр.</th></tr>
+      </thead>
+      <tbody>
+        {% for period in result.failures %}
+        {% set fid = job.id ~ '-' ~ (period.pages[0] if period.pages else 0) %}
+        <tr>
+          <td>
+            <a href="#p-{{ fid }}">
+              {% if period.account.period %}{{ period.account.period.start }} — {{ period.account.period.end }}
+              {%- else %}период не определён{% endif %}
+            </a>
+          </td>
+          <td class="num mono">
+            {%- if period.reconciliation.delta -%}
+              {{ '{:,.2f}'.format(period.reconciliation.delta) }}
+            {%- else -%}
+              <span class="muted">суммы сошлись</span>
+            {%- endif -%}
+          </td>
+          <td>
+            {% for d in period.reconciliation.diagnoses %}
+              {{ diagnosis_text.get(d.kind, d.kind) }}{% if not loop.last %}; {% endif %}
+            {% else %}
+              причина не определена
+            {% endfor %}
+          </td>
+          <td class="mono">{% if period.pages %}{{ period.pages[0] }}–{{ period.pages[-1] }}{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+<p class="muted small engines">
+  {% for engine, pages in (result.engine_stats or {}).items() %}{{ engine }}: {{ pages }} стр.{% if not loop.last %} · {% endif %}{% endfor %}
+</p>
+{% endif %}

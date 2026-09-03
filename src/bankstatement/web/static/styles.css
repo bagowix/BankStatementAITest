@@ -1,0 +1,318 @@
+/* Один файл без сборки и без внешних шрифтов: стенд должен открываться офлайн.
+   Палитра и типографика: фиолетовый #48219e, Inter 600,
+   скругление 10px, белый лист с едва различимой сеткой. Inter берётся, если он
+   есть в системе; иначе системный гротеск, и вид почти не меняется. */
+:root {
+  --ink: #0f172a;
+  --muted: #6b7280;
+  --faint: #9ca3af;
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --tint: #f7f5fd;
+  --line: #e8e6f0;
+  --grid: rgba(72, 33, 158, 0.055);
+
+  --brand: #48219e;
+  --brand-soft: #f4f0fb;
+  --brand-ink: #ffffff;
+  --lilac: #c4a5f5;
+
+  --good: #197a52;
+  --good-soft: #e7f6ee;
+  --warn: #c2410c;
+  --warn-soft: #fdf0e8;
+
+  --shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 8px 24px -12px rgba(72, 33, 158, .18);
+  --radius: 12px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #ece9f5; --muted: #a7a3b8; --faint: #7d7891;
+    --bg: #12101a; --panel: #1a1725; --tint: #1f1b2d; --line: #2e2941;
+    --grid: rgba(196, 165, 245, .05);
+    --brand: #b191f5; --brand-soft: #241d38; --brand-ink: #14101f;
+    --good: #63d19b; --good-soft: #16301f; --warn: #f0a06f; --warn-soft: #33210f;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -16px rgba(0, 0, 0, .7);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* Клавиатурная навигация должна быть видна: по стенду ходят и без мыши. */
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+body {
+  margin: 0;
+  color: var(--ink);
+  font: 400 15px/1.55 var(--sans);
+  letter-spacing: -0.005em;
+  background: var(--bg);
+}
+/* Сетка живёт только вверху и тает книзу: сплошным полотном она спорит с
+   таблицами операций, ради которых страница и открывается. */
+body::before {
+  content: ''; position: fixed; inset: 0 0 auto; height: 520px; pointer-events: none; z-index: 0;
+  background:
+    linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 34px 34px,
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 34px 34px;
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, transparent 100%);
+}
+main, .top { position: relative; z-index: 1; }
+main { max-width: 1140px; margin: 0 auto; padding: 30px 20px 90px; }
+h1, h2 { margin: 0 0 8px; font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); font-size: 13px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+.plus { color: var(--good); }
+.minus { color: var(--warn); }
+
+/* шапка */
+.top {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 13px 22px; border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+}
+.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit; }
+.brand strong { font-weight: 600; letter-spacing: -0.02em; }
+.brand small { display: block; color: var(--muted); font-weight: 400; font-size: 12.5px; }
+.mark {
+  display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
+  background: linear-gradient(140deg, var(--brand), #7b4fd6);
+  color: var(--brand-ink); font-size: 17px; font-weight: 600;
+  box-shadow: 0 4px 14px -6px rgba(72, 33, 158, .7);
+}
+.ghost {
+  color: var(--muted); text-decoration: none; border: 1px solid var(--line);
+  padding: 7px 14px; border-radius: 10px; font-size: 13px; font-weight: 500;
+  background: var(--panel); transition: .15s ease;
+}
+.ghost:hover { color: var(--brand); border-color: var(--brand); }
+
+/* приём файла */
+.dropzone { margin: 30px 0 22px; }
+.pick {
+  display: grid; place-items: center; gap: 7px; padding: 52px 20px; cursor: pointer;
+  border: 1.5px dashed var(--line); border-radius: 18px; text-align: center;
+  background: linear-gradient(180deg, var(--tint), var(--panel));
+  transition: .18s ease;
+}
+.pick:hover { border-color: var(--brand); box-shadow: var(--shadow); transform: translateY(-1px); }
+.pick input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.pick-title { font-weight: 600; font-size: 16px; letter-spacing: -0.02em; }
+.pick-hint { color: var(--muted); font-size: 13px; }
+
+.samples h2, .recent h2 {
+  font-size: 12px; color: var(--faint); font-weight: 500; margin-bottom: 10px;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  padding: 8px 14px; border-radius: 999px; font: 500 13px var(--sans); cursor: pointer;
+  transition: .15s ease;
+}
+.chip:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+.recent { margin-top: 30px; }
+.recent ul { list-style: none; padding: 0; margin: 0; }
+.recent li { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.recent a { color: var(--brand); text-decoration: none; font-weight: 500; }
+.recent a:hover { text-decoration: underline; }
+
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 20px; margin: 16px 0; box-shadow: var(--shadow);
+}
+
+/* прогресс */
+.progress .bar {
+  height: 8px; background: var(--brand-soft); border-radius: 999px; overflow: hidden; margin: 14px 0 10px;
+}
+.progress .bar { position: relative; }
+.progress .bar span, .progress .bar i {
+  position: absolute; inset: 0 auto 0 0; display: block; height: 100%; border-radius: 999px;
+  transition: width .45s cubic-bezier(.4, 0, .2, 1);
+}
+.progress .bar span { background: linear-gradient(90deg, var(--brand), var(--lilac)); }
+/* Бледная зона — страницы, которые читаются прямо сейчас. Без неё полминуты
+   параллельного чтения выглядят простоем. */
+.progress .bar i { background: var(--lilac); opacity: .35; }
+.hint { color: var(--faint); font-size: 12px; margin: 4px 0 0; }
+/* Пока идёт сведение, доли работы нет: показываем движение, а не выдуманный
+   процент. Врать полосой хуже, чем признать неизвестность. */
+.progress .bar.indeterminate { position: relative; }
+.progress .bar.indeterminate span { width: 40% !important; animation: sweep 1.3s ease-in-out infinite; }
+@keyframes sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
+/* результат */
+.result-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin: 30px 0 4px; }
+.result-head h2 { font-size: 20px; }
+.period-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.badge { padding: 5px 11px; border-radius: 999px; font-size: 12.5px; font-weight: 600; letter-spacing: -0.01em; }
+.period-head.good .badge { background: var(--good-soft); color: var(--good); }
+.period-head.bad .badge { background: var(--warn-soft); color: var(--warn); }
+.period-span { font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.guarantee {
+  display: inline-block; color: var(--brand); background: var(--brand-soft);
+  font-size: 12.5px; margin: 0 0 16px; padding: 5px 11px; border-radius: 8px;
+}
+
+.totals { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.totals div {
+  border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px;
+  display: flex; flex-direction: column; gap: 3px; background: var(--tint);
+}
+.totals small { color: var(--faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; }
+.totals b { font-family: var(--mono); font-size: 15px; font-variant-numeric: tabular-nums; }
+.totals em { color: var(--faint); font-style: normal; font-size: 12px; }
+
+/* Проверка документа одной строкой: её читают первой, поэтому она крупная. */
+.check {
+  margin: 0 0 12px; padding: 10px 13px; border-radius: 10px; font-size: 14px;
+  font-variant-numeric: tabular-nums; font-family: var(--mono);
+}
+.check.good { background: var(--good-soft); color: var(--good); }
+.check.bad { background: var(--warn-soft); color: var(--warn); font-family: var(--sans); }
+.check b { font-weight: 600; }
+
+.diagnosis {
+  margin-top: 16px; padding: 14px 16px; border-radius: 10px;
+  background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 22%, transparent);
+}
+.diagnosis .lead { margin: 0 0 10px; font-size: 13px; }
+.diagnosis ul { margin: 0; padding-left: 18px; font-size: 13px; }
+.diagnosis li { margin-bottom: 8px; }
+.diagnosis .kind { display: inline; }
+.diagnosis .jump a {
+  color: var(--brand); text-decoration: none; border-bottom: 1px dashed currentColor; font-size: 12.5px;
+}
+.diagnosis .tech { margin-top: 4px; }
+.diagnosis .tech summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.candidates { margin: 4px 0 8px; color: var(--muted); }
+
+/* Строка, к которой привела ссылка из диагноза. */
+.rows tbody tr.target td { background: color-mix(in srgb, var(--warn) 18%, transparent); }
+.rows td.idx, .rows th:first-child { color: var(--faint); font-family: var(--mono); font-size: 12px; }
+
+.small { font-size: 12px; }
+.reading-guide {
+  margin: 26px 0 0; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--tint); font-size: 13px; color: var(--muted);
+}
+.reading-guide h2 { font-size: 13px; color: var(--ink); margin-bottom: 8px; }
+.reading-guide p { margin: 0 0 8px; }
+.reading-guide code {
+  font-family: var(--mono); font-size: 12px; color: var(--brand);
+  background: var(--brand-soft); padding: 1px 6px; border-radius: 5px;
+}
+
+.rows { margin-top: 18px; }
+.rows summary { cursor: pointer; color: var(--brand); font-size: 13px; font-weight: 500; }
+.rows.losses summary.warning { color: var(--warn); }
+.rows table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+.rows th {
+  text-align: left; color: var(--faint); font-weight: 500; font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: .05em; padding: 7px 8px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 60px; background: var(--panel);
+}
+.rows th.num { text-align: right; }
+.rows td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.rows tbody tr:hover td { background: var(--brand-soft); }
+.src {
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  border-radius: 7px; padding: 2px 8px; cursor: pointer; font-family: var(--mono); font-size: 12px;
+  transition: .15s ease;
+}
+.src:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+
+.ready-note {
+  margin: 22px 0 6px; font-size: 12px; color: var(--faint);
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.ready-note b { color: var(--brand); }
+
+.card.verdict.bad { border-color: color-mix(in srgb, var(--warn) 35%, transparent); background: var(--warn-soft); }
+.card.verdict.bad h2 { color: var(--warn); }
+
+.stalled {
+  margin: 12px 0 0; padding: 10px 13px; border-radius: 10px; font-size: 13.5px;
+  background: var(--warn-soft); color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 22%, transparent);
+}
+.stalled b { font-weight: 600; }
+
+/* заключение: вывод раньше подробностей — так устроен аудиторский отчёт */
+.opinion { display: flex; align-items: flex-start; gap: 13px; }
+.opinion h2 { margin: 0 0 4px; font-size: 22px; letter-spacing: -0.02em; }
+.opinion p { margin: 0; font-size: 14px; max-width: 62ch; }
+.opinion-mark {
+  flex: none; width: 32px; height: 32px; border-radius: 50%; margin-top: 2px;
+  display: grid; place-items: center; font-size: 17px; font-weight: 700;
+}
+.opinion.clean .opinion-mark { background: var(--good-soft); color: var(--good); }
+.opinion.qualified .opinion-mark,
+.opinion.adverse .opinion-mark,
+.opinion.disclaimer .opinion-mark { background: var(--warn-soft); color: var(--warn); }
+.opinion.clean h2 { color: var(--good); }
+.opinion.qualified h2, .opinion.adverse h2, .opinion.disclaimer h2 { color: var(--warn); }
+
+.scope { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 18px 0 6px; }
+.scope div { display: flex; flex-direction: column; gap: 2px; }
+.scope dt { color: var(--faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; }
+.scope dd { margin: 0; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.findings { margin-top: 16px; }
+.findings h3 { margin: 0 0 3px; font-size: 15px; color: var(--warn); }
+.findings > .small { margin: 0 0 12px; }
+.findings table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.findings th {
+  text-align: left; padding: 6px 10px 8px; border-bottom: 1px solid var(--line);
+  color: var(--faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
+}
+.findings td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.findings tr:last-child td { border-bottom: none; }
+.findings .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--warn); white-space: nowrap; }
+.findings a { color: var(--brand); font-weight: 600; white-space: nowrap; }
+
+.engines { margin: 14px 0 0; }
+
+/* окно провенанса */
+dialog {
+  border: 1px solid var(--line); border-radius: 14px; padding: 0;
+  /* Вырезка со скана 318 dpi по пикселям крупнее экрана, поэтому окно
+     ограничено по обеим сторонам, а не только по ширине. */
+  max-width: min(940px, 92vw); max-height: 88vh; overflow: auto;
+  background: var(--panel); color: var(--ink); box-shadow: 0 24px 70px -20px rgba(15, 23, 42, .45);
+}
+dialog::backdrop { background: rgba(15, 23, 42, .5); backdrop-filter: blur(2px); }
+dialog header {
+  position: sticky; top: 0; background: var(--panel); z-index: 1;
+  display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--line);
+}
+dialog header span { flex: 1; font-size: 12px; }
+dialog header button {
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  cursor: pointer; font-size: 14px; border-radius: 8px; padding: 2px 9px;
+}
+dialog header button:hover { color: var(--brand); border-color: var(--brand); }
+dialog img { display: block; max-width: 100%; height: auto; padding: 16px; }
+
+@media (max-width: 760px) {
+  .totals { grid-template-columns: repeat(2, 1fr); }
+  .result-head { flex-direction: column; }
+  .rows th { position: static; }
+}

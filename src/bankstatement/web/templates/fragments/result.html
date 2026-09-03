@@ -1,0 +1,9 @@
+<section class="result">
+  {% include "fragments/verdict_head.html" %}
+</section>
+
+{% for period in fresh %}
+<div hx-swap-oob="beforeend:#periods">
+  {% include "fragments/period.html" %}
+</div>
+{% endfor %}

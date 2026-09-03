@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<form class="dropzone" hx-post="/jobs" hx-target="#work" hx-swap="innerHTML" hx-encoding="multipart/form-data">
+  <label class="pick">
+    <input type="file" name="files" accept="application/pdf" multiple onchange="this.form.requestSubmit()">
+    <span class="pick-title">Перетащите выписки или выберите файлы</span>
+    <span class="pick-hint">можно пачкой · электронный PDF, скан, фотокопия, подшивка из нескольких выписок</span>
+  </label>
+</form>
+
+{% if samples %}
+<section class="samples">
+  <h2>Или откройте образец</h2>
+  <div class="chips">
+    {% for name in samples %}
+    <form hx-post="/jobs" hx-target="#work" hx-swap="innerHTML">
+      <input type="hidden" name="sample" value="{{ name }}">
+      <button class="chip" type="submit">{{ name }}</button>
+    </form>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="reading-guide">
+  <h2>Как читать результат</h2>
+  <p><b>Остаток на начало</b> — сколько было на счёте в первый день периода,
+     <b>остаток на конец</b> — сколько осталось в последний.</p>
+  <p>Выписка проверяет сама себя: <code>остаток на начало + приход − расход = остаток на конец</code>.
+     Если равенство сходится до копейки, значит все операции прочитаны и ни одна не потеряна.
+     Совпадение начального и конечного остатка само по себе ничего не значит — важно именно равенство целиком.</p>
+  <p>Периоду, который не сошёлся, показывается размер расхождения и его вероятная причина
+     со ссылкой на конкретную строку.</p>
+</section>
+
+<div id="work">
+  {% if jobs %}
+  <section class="recent">
+    <h2>Недавние разборы</h2>
+    <ul>
+      {% for job in jobs %}
+      <li><a href="/jobs/{{ job.id }}">{{ job.name }}</a> <span class="muted">{{ job.state.value }}</span></li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}
