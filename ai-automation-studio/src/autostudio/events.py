@@ -10,7 +10,7 @@ SQLite вызывается синхронно: запись — доли мил
 
 import datetime as dt
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Final
@@ -59,7 +59,7 @@ class EventLog:
             conn.executescript(_SCHEMA)
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self) -> Generator[sqlite3.Connection]:
         with closing(sqlite3.connect(self._path)) as conn, conn:
             yield conn
 

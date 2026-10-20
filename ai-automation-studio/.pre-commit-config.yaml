@@ -38,9 +38,11 @@ repos:
 
   - repo: local
     hooks:
-      - id: mypy
-        name: mypy
-        entry: uv run mypy src
+      # pyrefly через uv, а не изолированным окружением pre-commit: strict-проверка
+      # смотрит на зависимости проекта, и без них она даст другой ответ, чем CI.
+      - id: pyrefly
+        name: pyrefly (strict)
+        entry: uv run pyrefly check
         pass_filenames: false
         language: system
         types: [python]

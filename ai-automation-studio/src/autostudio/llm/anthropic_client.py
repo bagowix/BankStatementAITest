@@ -6,6 +6,7 @@ from typing import Final
 import anthropic
 import msgspec
 from anthropic.types import JSONOutputFormatParam, MessageParam, OutputConfigParam
+from anthropic.types.beta import BetaMessageParam, BetaOutputConfigParam
 
 from autostudio.errors import LLMError
 from autostudio.llm.base import LLMUsage, decode_output, output_schema
@@ -105,12 +106,19 @@ class AnthropicClient:
         )
 
     async def _beta_call(self, system: str, prompt: str, output_config: OutputConfigParam) -> _Reply:
+        # Beta-эндпоинт типизирован своими TypedDict; поля те же, поэтому копируем явно.
+        beta_config: BetaOutputConfigParam = {}
+        if 'format' in output_config and output_config['format'] is not None:
+            beta_config['format'] = {'type': 'json_schema', 'schema': output_config['format']['schema']}
+        if 'effort' in output_config:
+            beta_config['effort'] = output_config['effort']
+        messages: list[BetaMessageParam] = [{'role': 'user', 'content': prompt}]
         message = await self._client.beta.messages.create(
             model=self._model,
             max_tokens=_MAX_TOKENS,
             system=system,
-            messages=[{'role': 'user', 'content': prompt}],
-            output_config=output_config,  # type: ignore[arg-type]
+            messages=messages,
+            output_config=beta_config,
             betas=[_FALLBACK_BETA],
             fallbacks='default',
         )

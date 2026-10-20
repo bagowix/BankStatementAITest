@@ -16,7 +16,7 @@
 ```bash
 uv sync
 uv run poe tests          # тесты + покрытие (ключи провайдеров обнуляются)
-uv run poe check          # format-check, ruff, mypy strict, bandit
+uv run poe check          # ruff format --check, ruff check, pyrefly (preset strict)
 uv run autostudio demo-all
 uv run autostudio booking demo
 uv run autostudio report examples/booking/client.toml --month 2026-10

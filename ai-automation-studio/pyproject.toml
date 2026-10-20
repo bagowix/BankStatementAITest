@@ -39,10 +39,9 @@ dev = [
     "pytest-cov~=7.1",
     "respx~=0.23",
     "ruff~=0.17",
-    "mypy~=2.4",
     "poethepoet~=0.49",
     "pre-commit~=4.7",
-    "bandit~=1.9",
+    "pyrefly>=1.4",
 ]
 
 [project.scripts]
@@ -62,9 +61,8 @@ tests = { cmd = "pytest --cov=autostudio --cov-report=term-missing", env = { AUT
 lint = "ruff check ."
 fmt = "ruff format ."
 format-check = "ruff format --check ."
-mypy = "mypy src"
-security = "bandit -q -c pyproject.toml -r src"
-check = ["format-check", "lint", "mypy", "security"]
+typecheck = "pyrefly check"
+check = ["format-check", "lint", "typecheck"]
 hooks = "pre-commit install"
 demo = "autostudio demo"
 
@@ -86,23 +84,12 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 # В тестах assert — это и есть проверка, а фиктивные токены не секреты.
 "tests/*" = ["E501", "S101", "S105", "S106", "S108"]
 
-[tool.mypy]
-python_version = "3.12"
-strict = true
-warn_unreachable = true
 
-[[tool.mypy.overrides]]
-module = ["google.oauth2.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-# google-auth не аннотирует фабрики Credentials; послабление — только для модуля,
-# который с ним работает.
-module = ["autostudio.sinks.gsheets"]
-disallow_untyped_calls = false
-
-[tool.bandit]
-exclude_dirs = ["tests"]
+[tool.pyrefly]
+# Строгий пресет pyrefly: запрет неявного Any, @override, неиспользуемые ignore и др.
+preset = "strict"
+project-includes = ["src"]
+python-version = "3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

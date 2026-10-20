@@ -22,13 +22,14 @@
   httpx, selectolax (HTML), aiogram 3 (Telegram), gspread (Google Sheets), stdlib sqlite3/imaplib/email
 - Модели: OpenAI Responses API или Anthropic Messages API за протоколом `LLMClient`;
   без ключа — `FakeLLM` с эвристиками пакета
-- pytest + pytest-asyncio (auto), respx, Ruff, mypy strict, bandit
+- pytest + pytest-asyncio (auto), respx; Ruff (линт и формат, включая правила безопасности `S`) и pyrefly
+  в strict-пресете — других линтеров и тайпчекеров в проекте нет
 
 ## Useful commands
 
 - `uv sync` — окружение разработки (все extras)
 - `uv run poe tests` — тесты с покрытием (ключи провайдеров обнуляются)
-- `uv run poe check` — format-check + ruff + mypy + bandit
+- `uv run poe check` — `ruff format --check`, `ruff check`, `pyrefly check` (strict)
 - `uv run autostudio demo-all` — офлайн-демо всех пакетов (без сети и ключей)
 - `uv run autostudio <package> --help` — команды пакета (`check`, `run`, `demo`, …)
 - `uv run autostudio report clients/<id>/<pkg>.toml --month 2026-10 --format html --out report.html`
@@ -124,7 +125,7 @@
 
 - Новые зависимости не добавлять без крайней необходимости (и тогда — через `uv add`).
 - Работая параллельно с другими агентами, запускайте ruff/format только на своих путях:
-  `uv run ruff check src/autostudio/<pkg> tests/<pkg>`; `uv run mypy src` можно всегда.
+  `uv run ruff check src/autostudio/<pkg> tests/<pkg>`; `uv run pyrefly check` можно всегда.
 - Не трогайте ядро и чужие пакеты; если ядру чего-то не хватает — опишите это в ответе.
 - Коммиты — Conventional Commits (`feat(booking): описание`), русский в коммитах и комментариях — норма.
 - Комментарии объясняют «почему», а не «что».
@@ -141,7 +142,10 @@
 
 ## Style Notes
 
-- Ruff (line-length 120, одинарные кавычки), mypy strict без подавлений там, где можно типизировать.
+- Ruff (line-length 120, одинарные кавычки), pyrefly strict без подавлений там, где можно типизировать;
+  подавление — только `# pyrefly: ignore[<код>]` с причиной рядом.
+- Генераторные контекст-менеджеры аннотируются `Generator[T]`, не `Iterator[T]` (перегрузка
+  `contextmanager` с `Iterator` помечена в typeshed устаревшей).
 - `X | None`, `list[]`, `dict[]`; без `Any` и `object` в своём коде, без getattr/setattr/hasattr.
 - Константы модуля — `Final[...]`; docstrings — Google style (`Args:`/`Returns:`/`Raises:`).
 - Без `from __future__ import annotations`.
