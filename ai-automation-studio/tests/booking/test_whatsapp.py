@@ -317,6 +317,28 @@ async def test__account_block_on_templates_only__service_success_keeps_alarm_tem
 
 
 @respx.mock
+async def test__account_locked_on_both_kinds__recovery_only_after_each_kind_succeeds(app):
+    locked = graph_error(400, 131031, 'Business Account locked')
+    respx.post(URL).mock(side_effect=[locked, locked, OK, OK])
+    contact(app, key='wa:old')
+    app.store.set_consent('wa:old', subscribed=True, now=app.clock())
+    app.clock.advance(dt.timedelta(hours=30))
+    contact(app, user_id='GE.2', phone='995599000222', key='wa:new')
+    async with httpx.AsyncClient() as http:
+        sender = make_sender(app, http)
+        with pytest.raises(DeliveryError):
+            await sender.send('wa:old', reminder())
+        with pytest.raises(DeliveryError):
+            await sender.send('wa:new', Outgoing(text='reply in window'))
+        await sender.send('wa:new', Outgoing(text='reply in window'))
+        assert len(app.operator.texts) == 1  # шаблоны ещё не проверены — «✅» рано
+        await sender.send('wa:old', reminder())
+    [alarm, recovery] = app.operator.texts
+    assert '131031' in alarm and 'апелляц' in alarm
+    assert recovery == '✅ Test Barbers / booking: WhatsApp снова отправляет сообщения'
+
+
+@respx.mock
 @pytest.mark.parametrize(
     'response',
     [httpx.Response(503, text='<html>Service Unavailable</html>'), httpx.Response(429), httpx.Response(502, json={})],
