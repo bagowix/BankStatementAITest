@@ -13,6 +13,7 @@
 | Что | Где | Состояние |
 |---|---|---|
 | Проверка ресерча: 8 тем, у каждой независимый проверяющий | `docs/research/DECISION_BRIEF.md` | готово; деньги, налоги и площадки в основном НП: их сайты не открылись из среды проверки |
+| Приватный репозиторий `bagowix/ai-automation-studio` | GitHub, ветка `main` | готово |
 | Ядро: конфиг клиента, модели (OpenAI / Anthropic / офлайн-эвристики), Google Sheets, уведомления, журнал событий, месячный отчёт клиенту, мониторинг запусков | `src/autostudio/` | готово, тесты зелёные |
 | Пакет **booking**: бот записи в Telegram с ИИ | `src/autostudio/booking/`, `docs/packages/booking.md` | см. раздел 9 |
 | Пакет **prices**: мониторинг цен конкурентов | `src/autostudio/prices/`, `docs/packages/prices.md` | см. раздел 9 |
@@ -21,30 +22,22 @@
 | Продажи: офферы и цены, Upwork, Fiverr, скрипты холодных сообщений, сценарии демо, опросники, лендинг | `docs/sales/`, `site/` | готово, заполни плейсхолдеры (раздел 8) |
 | Шаблоны договора, SLA поддержки, DPA | `docs/legal/` | черновики — **покажи юристу** |
 
-## 1. Перенести проект в PycharmProjects (5 минут)
+## 1. Забрать проект в PycharmProjects (2 минуты)
 
-Я работал в облачной среде, а не на твоём компьютере, и создать репозиторий в твоём аккаунте GitHub мне
-не дали права интеграции. Поэтому проект лежит в папке `ai-automation-studio/` ветки
-`claude/dazzling-davinci-3eqtrs` публичного репозитория `BankStatementAITest`.
+Проект живёт в твоём приватном репозитории `bagowix/ai-automation-studio` (ветка `main`).
 
 ```bash
-# 1. Создай ПРИВАТНЫЙ пустой репозиторий: https://github.com/new  →  ai-automation-studio, Private, без README
-# 2. Забери папку проекта с отдельной историей
 cd ~/PycharmProjects
-git clone --branch claude/dazzling-davinci-3eqtrs https://github.com/bagowix/BankStatementAITest.git _tmp-bst
-cd _tmp-bst && git subtree split --prefix=ai-automation-studio -b studio && cd ..
-git clone --branch studio _tmp-bst ai-automation-studio && rm -rf _tmp-bst
+git clone git@github.com:bagowix/ai-automation-studio.git
 cd ai-automation-studio
-git branch -m studio main
-git remote set-url origin git@github.com:bagowix/ai-automation-studio.git
-git push -u origin main
-# 3. Окружение
-uv sync && uv run poe hooks && uv run poe check && uv run poe tests
+uv sync && uv run poe hooks
+uv run poe check && uv run poe tests
 uv run autostudio demo-all
 ```
 
-После переноса удали ветку `claude/dazzling-davinci-3eqtrs` из `BankStatementAITest`: тот репозиторий
-публичный, а это твой бизнес. Секретов в ветке нет, но офферам и ценам там не место.
+Пока шла работа, копия проекта лежала в папке `ai-automation-studio/` ветки
+`claude/dazzling-davinci-3eqtrs` публичного репозитория `BankStatementAITest`. Удали эту ветку: секретов в
+ней нет, но офферам и ценам не место в публичном репозитории.
 
 ## 2. Решения, которые принимаешь ты (до первого клиента)
 
