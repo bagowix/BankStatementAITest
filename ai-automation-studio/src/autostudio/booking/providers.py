@@ -27,7 +27,7 @@ from autostudio.booking.texts import Texts
 from autostudio.booking.views import Views
 from autostudio.clientconf import client_data_dir, require_env
 from autostudio.clock import Clock
-from autostudio.errors import ConfigError
+from autostudio.errors import ConfigError, LLMError
 from autostudio.events import EventLog
 from autostudio.llm import LLMClient, make_llm
 from autostudio.notify import Notifier, make_notifier
@@ -64,8 +64,19 @@ class BookingProvider(Provider):
         return make_notifier(config.notify, http)
 
     @provide
-    def llm(self, settings: Settings) -> LLMClient:
-        return make_llm(settings, booking_fake_llm())
+    async def llm(
+        self, settings: Settings, config: BookingConfig, operator: OperatorAlerts
+    ) -> AsyncIterator[LLMClient]:
+        notifier = operator.notifier
+
+        async def degraded(error: LLMError) -> None:
+            # Ядро шлёт этот сигнал не чаще раза в час: бот тем временем работает на эвристиках.
+            if notifier is not None:
+                await notifier.send(f'⚠️ {config.client.name} / booking: модель недоступна, бот на правилах: {error}')
+
+        client = make_llm(settings, booking_fake_llm(), on_fallback=degraded)
+        yield client
+        await client.aclose()
 
     @provide
     def texts(self, config: BookingConfig) -> Texts:

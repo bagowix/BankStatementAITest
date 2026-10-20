@@ -7,7 +7,6 @@
 
 import datetime as dt
 import re
-import shutil
 from collections import Counter
 from email import message_from_bytes
 from email.header import decode_header, make_header
@@ -33,6 +32,16 @@ DEMO_MAILBOX: Final = 'info@demotours.example'
 # показать, как код выбрасывает поле, которого в письме нет.
 _HALLUCINATED_PHONE: Final = '+1 415 555 0134'
 _SLUG: Final = re.compile(r'\W+', re.UNICODE)
+# Демо пишет в каталог пользователя (`--out ~/Desktop/demo` для записи видео), поэтому
+# удаляет только свои файлы — по точным именам — и только в каталоге со своей меткой.
+_MARKER: Final = '.autostudio-demo'
+_SHEET_FILE: Final = 'Inbox.csv'
+_DRAFTS_DIR: Final = 'drafts'
+_STATE_DIR: Final = 'state'
+_DRAFT_FILE: Final = re.compile(r'^\d{2}-[\w-]*\.eml$')
+_STATE_FILES: Final = frozenset(
+    f'{name}.sqlite{suffix}' for name in ('inbox', 'events') for suffix in ('', '-journal', '-wal', '-shm')
+)
 
 
 class _Recorder:
@@ -62,11 +71,53 @@ def _forgetful(system: str, prompt: str) -> Triage:
     return result
 
 
-def _reset(out_dir: Path) -> None:
-    # Демо всегда начинается с чистого ящика: удаляем только то, что создаёт само.
-    for sub in ('state', 'drafts'):
-        shutil.rmtree(out_dir / sub, ignore_errors=True)
-    (out_dir / 'Inbox.csv').unlink(missing_ok=True)
+def _own_files(out_dir: Path) -> list[Path]:
+    files: list[Path] = []
+    sheet = out_dir / _SHEET_FILE
+    if sheet.is_file():
+        files.append(sheet)
+    drafts, state = out_dir / _DRAFTS_DIR, out_dir / _STATE_DIR
+    if drafts.is_dir():
+        files += [path for path in drafts.iterdir() if path.is_file() and _DRAFT_FILE.match(path.name)]
+    if state.is_dir():
+        files += [path for path in state.iterdir() if path.is_file() and path.name in _STATE_FILES]
+    return files
+
+
+def _demo_made(out_dir: Path) -> bool:
+    # Каталог прошлой версии демо (без метки) узнаётся по содержимому: в нём только то,
+    # что демо создаёт само. Любой посторонний файл — и каталог не наш.
+    own = set(_own_files(out_dir))
+    for entry in out_dir.iterdir():
+        if entry.name == _SHEET_FILE and entry in own:
+            continue
+        if entry.name in (_DRAFTS_DIR, _STATE_DIR) and entry.is_dir() and all(p in own for p in entry.iterdir()):
+            continue
+        return False
+    return True
+
+
+def prepare_out_dir(out_dir: Path) -> None:
+    """Готовит каталог демо: чистый ящик каждый раз, но без риска для чужих файлов.
+
+    Args:
+        out_dir: Каталог выгрузок демо.
+
+    Raises:
+        ConfigError: Каталог не пуст, не помечен демо и содержит посторонние файлы.
+    """
+    if out_dir.exists() and not out_dir.is_dir():
+        raise ConfigError(f'{out_dir} — файл, а нужен каталог для демо (--out)')
+    if out_dir.is_dir() and not (out_dir / _MARKER).exists() and any(out_dir.iterdir()) and not _demo_made(out_dir):
+        raise ConfigError(f'{out_dir} не пуст и создан не демо — укажите пустой или новый каталог (--out)')
+    for path in _own_files(out_dir):
+        path.unlink()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / _MARKER).write_text(
+        'Каталог офлайн-демо `autostudio inbox demo`: при повторном запуске демо перезаписывает '
+        'Inbox.csv, drafts/NN-*.eml и state/*.sqlite. Другие файлы не трогаются.\n',
+        encoding='utf-8',
+    )
 
 
 def _draft_subject(raw: bytes) -> str:
@@ -75,7 +126,7 @@ def _draft_subject(raw: bytes) -> str:
 
 
 def _write_drafts(box: FakeMailBox, out_dir: Path) -> list[Path]:
-    target = out_dir / 'drafts'
+    target = out_dir / _DRAFTS_DIR
     target.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for index, draft in enumerate(box.appended, start=1):
@@ -101,6 +152,8 @@ def _actions(result: RunResult, index: int) -> str:
         parts.append('owner pinged')
     if outcome.copied_to:
         parts.append(f'copied → {outcome.copied_to}')
+    if outcome.quiet:
+        parts.append('older than a day: logged only')
     if outcome.injection:
         parts.append('BLOCKED: injection, operator alerted')
     if outcome.corrected:
@@ -172,7 +225,7 @@ async def run_demo(out_dir: Path) -> str:
     config = msgspec.structs.replace(
         base, sink=SinkConfig(backend='csv', csv_dir=out_dir), notify=NotifyConfig(console=True)
     )
-    _reset(out_dir)
+    prepare_out_dir(out_dir)
 
     section = config.inbox
     extra = [section.drafts_folder, *(c.move_to for c in section.categories if c.move_to)]
@@ -190,8 +243,8 @@ async def run_demo(out_dir: Path) -> str:
         sink=CsvSink(out_dir),
         notifier=owner,
         operator=operator,
-        store=InboxStore(out_dir / 'state' / 'inbox.sqlite'),
-        events=EventLog(out_dir / 'state' / 'events.sqlite'),
+        store=InboxStore(out_dir / _STATE_DIR / 'inbox.sqlite'),
+        events=EventLog(out_dir / _STATE_DIR / 'events.sqlite'),
     )
     first = await run_once(config, deps, DEMO_NOW)
     second = await run_once(config, deps, DEMO_NOW + dt.timedelta(minutes=15))

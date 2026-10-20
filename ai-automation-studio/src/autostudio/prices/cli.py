@@ -13,7 +13,8 @@ from dishka import Provider, make_async_container
 from autostudio.clientconf import load_client_config
 from autostudio.clock import Clock
 from autostudio.errors import AutoStudioError, ConfigError
-from autostudio.llm import make_llm
+from autostudio.llm import LLMClient, make_llm
+from autostudio.prices import texts
 from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product
 from autostudio.prices.demo import run_demo
 from autostudio.prices.extract import (
@@ -36,6 +37,9 @@ from autostudio.settings import LLMProvider, Settings
 app = cyclopts.App(name='prices', help='Монитор цен конкурентов → Google Sheets + уведомления.')
 
 _CONTACT_ENV: Final = 'AUTOSTUDIO_PRICES_CONTACT_EMAIL'
+# Зарезервированные домены (RFC 2606/6761): адреса из образца, которые не ведут никуда.
+_RESERVED_SUFFIXES: Final = ('.example', '.test', '.invalid', '.localhost')
+_RESERVED_DOMAINS: Final = frozenset({'example.com', 'example.org', 'example.net'})
 _HOUR_S: Final = 3600.0
 _MIN_EVERY_HOURS: Final = 1.0
 _MAX_EVERY_HOURS: Final = 24.0 * 7
@@ -76,7 +80,12 @@ def environment_report(config: PricesConfig, environ: Mapping[str, str]) -> tupl
         problems.append(str(exc))
     else:
         if config.prices.llm_fallback and settings.llm_provider is LLMProvider.FAKE:
-            notes.append('llm_fallback включён, но AUTOSTUDIO_LLM_PROVIDER=fake: вместо модели — эвристика без ИИ')
+            # Эвристика в боевом запуске не работает (её «цена» выглядела бы ответом ИИ), так что
+            # ступень модели молча выключилась бы — это ошибка конфигурации, а не замечание.
+            problems.append(
+                'llm_fallback включён, но AUTOSTUDIO_LLM_PROVIDER=fake: ступень модели в боевом запуске выключится '
+                '— задайте openai/anthropic и ключ или llm_fallback = false'
+            )
     if config.sink.backend == 'google':
         path = environ.get(config.sink.credentials_env, '')
         if not path:
@@ -94,33 +103,94 @@ def environment_report(config: PricesConfig, environ: Mapping[str, str]) -> tupl
     return problems, notes
 
 
+def _reserved(host: str) -> bool:
+    name = host.lower().rstrip('.')
+    return name.endswith(_RESERVED_SUFFIXES) or any(
+        name == domain or name.endswith(f'.{domain}') for domain in _RESERVED_DOMAINS
+    )
+
+
+def readiness_report(config: PricesConfig) -> list[str]:
+    """Что в конфиге не даст клиенту пользы, хотя запуск и пройдёт (образец не дозаполнен).
+
+    Args:
+        config: Конфиг клиента.
+
+    Returns:
+        Замечания (с `check --strict` — проблемы).
+    """
+    out: list[str] = []
+    section = config.prices
+    if config.sink.backend == 'csv':
+        out.append(f'sink.backend = "csv": таблица пишется в {config.sink.csv_dir}, клиент её не увидит без Google')
+    if _reserved(section.contact_email.rsplit('@', 1)[-1]):
+        out.append(
+            f'prices.contact_email = {section.contact_email}: адрес из образца — владельцы сайтов не смогут написать'
+        )
+    demo = [
+        f'{product.id} / {offer.competitor}'
+        for product in section.products
+        for offer in product.offers
+        if _reserved(httpx.URL(offer.url).host)
+    ]
+    if demo:
+        out.append(
+            f'ссылок на демо-доменах (*.example и т.п.): {len(demo)}, например {demo[0]} — это не страницы конкурентов'
+        )
+    for product in section.products:
+        if not product.offers:
+            out.append(f'product {product.id}: нет ни одной ссылки конкурента — товар не проверяется')
+        if product.own_price is None:
+            out.append(f'product {product.id}: нет own_price — сравнения «дешевле вас» не будет')
+    if config.client.language not in texts.LANGUAGES:
+        out.append(
+            f'client.language = "{config.client.language}": перевода нет, таблица и сообщения будут на английском'
+        )
+    return out
+
+
 @app.command
-def check(config: Path) -> None:
+def check(config: Path, *, strict: bool = False) -> None:
     """Проверяет конфиг и окружение без сети и без записи; печатает таблицу ссылок.
 
     Args:
         config: TOML-конфиг клиента.
+        strict: Считать проблемой и то, что не даст клиенту пользы (csv, адреса из образца,
+            товары без ссылок и без своей цены) — перед первым боевым запуском.
     """
     loaded = load_client_config(config, PricesConfig)
     print(offer_table(loaded))
     print(f'\n{len(loaded.prices.products)} товаров, {loaded.prices.offer_count} ссылок, клиент {loaded.client.id}')
     problems, notes = environment_report(loaded, os.environ)
+    readiness = readiness_report(loaded)
+    if strict:
+        problems += readiness
+    else:
+        notes += readiness
     for note in notes:
         print(f'! {note}')
     for problem in problems:
         print(f'✗ {problem}')
     if problems:
-        raise ConfigError(f'окружение не готово: {len(problems)} проблем(ы), см. выше')
-    print('✓ конфиг и окружение в порядке')
+        raise ConfigError(f'не готово к боевому запуску: {len(problems)} проблем(ы), см. выше')
+    if readiness:
+        print(f'✓ конфиг и окружение читаются; к боевому запуску замечаний: {len(readiness)} (см. «!»; check --strict)')
+    else:
+        print('✓ конфиг и окружение в порядке')
 
 
 def summary(result: RunResult) -> str:
     """Одна строка итога запуска для лога cron/systemd."""
+    if result.skipped:
+        return 'prices: пропущено — предыдущий проход по этому клиенту ещё идёт'
     failures = ', '.join(f'{reason} {count}' for reason, count in sorted(result.failures.items()))
+    tokens = result.llm_input_tokens + result.llm_output_tokens
     return (
         f'prices: прочитано {result.checked}, не прочитано {result.failed}'
         + (f' ({failures})' if failures else '')
         + f', событий {len(result.changes)}, страниц модели {result.llm_pages}'
+        # Себестоимость клиента для оператора: токены модели за проход.
+        + (f', токенов модели {result.llm_input_tokens} вх. / {result.llm_output_tokens} вых.' if tokens else '')
     )
 
 
@@ -230,16 +300,13 @@ async def probe_report(
         out.append(f'✗ загрузка: {page.reason} {page.detail}'.rstrip())
         return '\n'.join(out)
     out.append(f'✓ загрузка: HTTP {page.status}, {len(page.html):,} символов, итоговый адрес {redact(page.final_url)}')
-    for report in explain(page.html, offer, allow_free=section.allow_free):
+    for report in explain(page.html, offer, allow_free=section.allow_free, page_url=page.final_url):
         out.append(f'  {report.rung:<10} {_show(report.reading, report.note)}')
     if use_llm:
-        llm = make_llm(settings or Settings.from_env(os.environ), fake=make_fake_llm())
-        guess = await read_with_llm(page.html, offer, product_name='product on this page', llm=llm)
-        shown = _show(guess) if isinstance(guess, PriceReading) else f'✗ {guess.reason}: {guess.detail}'
-        out.append(f'  {"llm":<10} {shown} (модель {llm.model}, токенов на входе {llm.usage.input_tokens})')
+        out.append(await _probe_model(page.html, offer, settings or Settings.from_env(os.environ)))
     else:
         out.append(f'  {"llm":<10} — (не спрашивали: добавьте --llm)')
-    final = extract_price(page.html, offer, allow_free=section.allow_free)
+    final = extract_price(page.html, offer, allow_free=section.allow_free, page_url=page.final_url)
     verdict = _show(final) if isinstance(final, PriceReading) else f'✗ {final.reason}'
     out.append(f'Итог бесплатного каскада: {verdict}')
     suggestions = suggest_selectors(page.html)
@@ -263,6 +330,20 @@ async def probe_report(
     if offer.currency:
         out.append(f'  currency = "{offer.currency}"')
     return '\n'.join(out)
+
+
+async def _probe_model(html: str, offer: Offer, settings: Settings) -> str:
+    # Оператору честно: с провайдером fake отвечает эвристика, а не ИИ. Настоящая модель —
+    # без запасной эвристики, иначе сбой ключа выглядел бы как ответ модели.
+    fake = settings.llm_provider is LLMProvider.FAKE
+    llm: LLMClient = make_fake_llm() if fake else make_llm(settings)
+    try:
+        guess = await read_with_llm(html, offer, product_name='product on this page', llm=llm)
+    finally:
+        await llm.aclose()
+    shown = _show(guess) if isinstance(guess, PriceReading) else f'✗ {guess.reason}: {guess.detail}'
+    who = 'эвристика fake — не ИИ, в боевой запуск не попадает' if fake else f'модель {llm.model}'
+    return f'  {"llm":<10} {shown} ({who}, токенов на входе {llm.usage.input_tokens})'
 
 
 @app.command

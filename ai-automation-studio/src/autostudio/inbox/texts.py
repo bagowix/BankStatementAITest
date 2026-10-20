@@ -20,10 +20,25 @@ _TEXTS: Final[dict[str, dict[str, str]]] = {
         'flag_prefilter': 'sorted by rules, no AI',
         'flag_manual': 'needs manual review',
         'flag_dropped': 'unverified fields removed: {fields}',
+        'flag_low_confidence': 'AI was unsure — please check the category',
+        'flag_quiet': 'older than a day at go-live — no draft or alert',
+        'flag_failed_notify': 'alert to you was not delivered — please reply yourself',
+        'flag_failed_draft': 'reply draft could not be saved — please reply yourself',
+        'flag_failed_model': 'reply draft not prepared (AI unavailable) — please reply yourself',
+        'flag_failed_copy': 'could not copy to folder {folder}',
+        'flag_failed_other': 'not every step finished — please check this email yourself',
+        'flag_vanished': 'left the folder before processing finished',
+        'flag_operator_failed': 'security alert to the operator was not delivered',
+        'field_category': 'category',
+        'field_phone': 'phone',
+        'field_email': 'email',
+        'field_budget': 'budget',
+        'field_sender_name': 'name',
+        'field_company': 'company',
         'urgency_low': 'low',
         'urgency_normal': 'normal',
         'urgency_high': 'high',
-        'hot_title': '🔥 New {category} ({urgency}) from {who}',
+        'hot_title': '{icon} {category} from {who} ({urgency} urgency)',
         'hot_phone': 'Phone: {phone}',
         'hot_budget': 'Budget: {budget}',
         'hot_draft': 'A reply draft is waiting in Drafts.',
@@ -44,10 +59,25 @@ _TEXTS: Final[dict[str, dict[str, str]]] = {
         'flag_prefilter': 'разобрано правилами, без ИИ',
         'flag_manual': 'нужна ручная проверка',
         'flag_dropped': 'удалены непроверенные поля: {fields}',
+        'flag_low_confidence': 'ИИ не уверен — проверьте категорию',
+        'flag_quiet': 'письмо старше суток на момент подключения — без черновика и сигнала',
+        'flag_failed_notify': 'сообщение вам не доставлено — ответьте, пожалуйста, сами',
+        'flag_failed_draft': 'черновик не сохранился в ящике — ответьте, пожалуйста, сами',
+        'flag_failed_model': 'черновик не подготовлен (ИИ недоступен) — ответьте, пожалуйста, сами',
+        'flag_failed_copy': 'не удалось скопировать в папку {folder}',
+        'flag_failed_other': 'не все шаги выполнены — проверьте письмо сами',
+        'flag_vanished': 'письмо ушло из папки до конца обработки',
+        'flag_operator_failed': 'сигнал оператору о подозрительном письме не доставлен',
+        'field_category': 'категория',
+        'field_phone': 'телефон',
+        'field_email': 'e-mail',
+        'field_budget': 'бюджет',
+        'field_sender_name': 'имя',
+        'field_company': 'компания',
         'urgency_low': 'низкая',
         'urgency_normal': 'обычная',
         'urgency_high': 'высокая',
-        'hot_title': '🔥 Новое письмо «{category}» (срочность: {urgency}) от {who}',
+        'hot_title': '{icon} {category} от {who} (срочность: {urgency})',
         'hot_phone': 'Телефон: {phone}',
         'hot_budget': 'Бюджет: {budget}',
         'hot_draft': 'Черновик ответа ждёт в «Черновиках».',
@@ -95,6 +125,12 @@ def sheet_header(language: str) -> list[str]:
     return list(_HEADERS[lang(language)])
 
 
+def field_names(language: str, fields: list[str]) -> str:
+    """Названия полей разбора для отметки в таблице: `phone` → «телефон» у русскоязычного владельца."""
+    known = _TEXTS[lang(language)]
+    return ', '.join(known.get(f'field_{field}', field) for field in fields)
+
+
 def operator_injection(client: str, domain: str, subject: str, markers: list[str]) -> str:
     """Сигнал оператору о письме с подозрением на prompt-инъекцию (без текста письма)."""
     found = '; '.join(markers[:3]) or 'модель пометила письмо'
@@ -109,4 +145,12 @@ def operator_gave_up(client: str, uid: int, error: str) -> str:
     return (
         f'⚠️ {client} / inbox: письмо UID {uid} не разобрано после повторов ({error[:200]}). '
         'В таблице — строка «нужна ручная проверка».'
+    )
+
+
+def operator_degraded(client: str, uid: int, step: str, error: str) -> str:
+    """Сигнал оператору: письмо разобрано, но один шаг (уведомление, черновик, копия) так и не прошёл."""
+    return (
+        f'⚠️ {client} / inbox: письмо UID {uid} разобрано, но шаг «{step}» не выполнен ({error[:200]}). '
+        'Разбор записан в таблицу с пометкой — проверьте канал или папку.'
     )

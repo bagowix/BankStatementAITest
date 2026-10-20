@@ -11,6 +11,7 @@
 """
 
 import datetime as dt
+import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from enum import StrEnum
@@ -18,11 +19,13 @@ from typing import Final, Literal
 from zoneinfo import ZoneInfo
 
 import msgspec
+import phonenumbers
 
 from autostudio.booking.config import MINUTES_PER_DAY, BookingConfig, BookingSection, Interval, Staff
 from autostudio.errors import AutoStudioError
 
-type Source = Literal['buttons', 'ai']
+# `admin` — запись «с улицы» или по телефону, которую внёс администратор через бота.
+type Source = Literal['buttons', 'ai', 'admin']
 
 
 class BookingStatus(StrEnum):
@@ -54,6 +57,10 @@ class BookingInactiveError(BookingError):
 
 class CancellationTooLateError(BookingError):
     """До визита меньше, чем позволяет политика отмены, — покупатель не может отменить сам."""
+
+
+class TooManyBookingsError(BookingError):
+    """У покупателя уже столько предстоящих записей, сколько разрешено (`max_active_per_customer`)."""
 
 
 class Slot(msgspec.Struct, frozen=True, kw_only=True):
@@ -88,7 +95,8 @@ class Booking(msgspec.Struct, frozen=True, kw_only=True):
         created_at: Когда создана.
         scheduled_at: Когда назначено текущее время (создание или перенос) — от него
             зависит, какие напоминания ещё уместны.
-        source: `buttons` или `ai` (слот предложен по сообщению в свободной форме).
+        source: `buttons`, `ai` (слот предложен по сообщению в свободной форме) или `admin`
+            (запись внёс администратор; напоминаний нет — у гостя нет чата с ботом).
         language: Язык покупателя — на нём придут напоминания.
     """
 
@@ -281,11 +289,19 @@ def free_slots(
     duration = dt.timedelta(minutes=service.duration_min)
     buffer = dt.timedelta(minutes=section.buffer_min)
     earliest = now + dt.timedelta(minutes=section.min_lead_min)
-    active = [booking for booking in bookings if booking.active and booking.id != ignore_booking]
+    day_start, day_end = day_bounds(day, zone)
+    # Сюда приходят записи на весь горизонт, а функцию зовут на каждый день и каждое нажатие:
+    # без отсева по дню проверка каждого начала шла бы по всем записям мастера, и полный
+    # календарь большой команды считался бы секундами в цикле событий.
     busy: dict[str, list[tuple[dt.datetime, dt.datetime]]] = {}
-    for booking in active:
-        busy.setdefault(booking.staff_id, []).append((booking.start, booking.end))
-    load = Counter(booking.staff_id for booking in active if booking.start.astimezone(zone).date() == day)
+    load: Counter[str] = Counter()
+    for booking in bookings:
+        if not booking.active or booking.id == ignore_booking:
+            continue
+        if booking.end + buffer > day_start and booking.start < day_end + buffer:
+            busy.setdefault(booking.staff_id, []).append((booking.start, booking.end))
+        if day_start <= booking.start < day_end:
+            load[booking.staff_id] += 1
     order = {member.id: index for index, member in enumerate(section.staff)}
     step = section.slot_step_min
     offers: dict[dt.datetime, Staff] = {}
@@ -459,6 +475,17 @@ def nearest_slots(
     return sorted(picked, key=lambda slot: slot.start)
 
 
+def will_remind(config: BookingConfig, booking: Booking, now: dt.datetime) -> bool:
+    """Придёт ли по свежей записи хоть одно напоминание (то же правило, что в `due_reminders`).
+
+    Запись за час до визита не получит «напоминание за сутки и за 2 часа» — и бот не
+    должен его обещать.
+    """
+    if booking.source == 'admin':
+        return False
+    return any(booking.start - dt.timedelta(minutes=minutes) >= now for minutes in config.booking.reminders_min_before)
+
+
 def is_open_at(config: BookingConfig, moment: dt.datetime) -> bool:
     """Открыт ли бизнес в этот момент (для метрики «записались, пока вы были закрыты»)."""
     zone = config.client.zone
@@ -470,44 +497,91 @@ def is_open_at(config: BookingConfig, moment: dt.datetime) -> bool:
 
 
 _NAME_PUNCT: Final = frozenset(" .'’-")
-_PHONE_CHARS: Final = frozenset('0123456789+-() .')
+_PHONE_MAX: Final = 32
 NAME_MAX: Final = 60
+NAME_MAX_WORDS: Final = 3
+# Вводные слова, с которых люди начинают ответ на «как вас записать?»: «Меня зовут Анна»
+# должно стать «Анна», а не именем записи, которое владелец увидит в расписании.
+_NAME_LEAD_IN: Final = re.compile(
+    r"^(?:меня\s+зовут|зовут|мо[её]\s+имя|имя\s*:|запишите\s+(?:на|как)|это|я|"
+    r"my\s+name\s+is|my\s+name'?s|name\s*:|i\s*['’]\s*m|i\s+am|this\s+is|it\s*['’]\s*s|it\s+is)\s+",
+    re.IGNORECASE,
+)
 
 
 def clean_name(text: str) -> str | None:
-    """Имя для записи: буквы любого алфавита, пробел, точка, апостроф, дефис; 2–60 символов.
+    """Имя для записи: буквы любого алфавита, пробел, точка, апостроф, дефис; 2–60 символов, до 3 слов.
+
+    Вводные слова («меня зовут», «my name is», «это») отбрасываются, имя целиком в
+    нижнем регистре пишется с заглавных букв.
 
     Args:
         text: Что прислал покупатель.
 
     Returns:
-        Нормализованное имя или None, если это не похоже на имя (цифры, ссылки, команды).
+        Нормализованное имя или None, если это не похоже на имя (цифры, ссылки, команды, фраза).
     """
-    name = ' '.join(text.split())
-    if not 2 <= len(name) <= NAME_MAX or not name[0].isalpha():
+    name = _NAME_LEAD_IN.sub('', ' '.join(text.split())).rstrip('!.,')
+    if not 2 <= len(name) <= NAME_MAX or not name[0].isalpha() or len(name.split()) > NAME_MAX_WORDS:
         return None
     if any(not (char.isalpha() or char in _NAME_PUNCT) for char in name):
         return None
-    return name if sum(char.isalpha() for char in name) >= 2 else None
+    if sum(char.isalpha() for char in name) < 2:
+        return None
+    return name.title() if name.islower() else name
 
 
-def clean_phone(text: str, *, international: bool = False) -> str | None:
-    """Телефон: цифры (7–15, как в E.164) и необязательный `+` в начале.
+def clean_phone(text: str, *, region: str, shared: bool = False) -> str | None:
+    """Телефон в E.164 (`+995599123456`) через libphonenumber.
+
+    Набранный руками номер (и чужая карточка контакта) проверяется строго
+    (`is_valid_number`): опечатка в номере — это клиент, до которого владелец не дозвонится.
+    Собственный номер покупателя из «Отправить мой номер» Telegram берёт из его аккаунта,
+    поэтому для него достаточно проверки формата: так проходят номера новых диапазонов,
+    которых ещё нет в базе libphonenumber.
 
     Args:
         text: Номер, набранный покупателем или из контакта Telegram.
-        international: Номер из контакта Telegram — он всегда с кодом страны, `+` дописывается.
+        region: Страна для номеров без кода (`GE`: «599 123 456» → +995599123456).
+        shared: Собственный номер отправителя из Telegram (адаптер сверил `contact.user_id`).
 
     Returns:
-        `+995555123456` / `555123456` или None.
+        Номер в E.164 или None.
     """
     raw = text.strip()
-    if not raw or any(char not in _PHONE_CHARS for char in raw) or '+' in raw[1:]:
+    if not raw or len(raw) > _PHONE_MAX:
         return None
-    digits = ''.join(char for char in raw if char.isdigit())
-    if not 7 <= len(digits) <= 15:
-        return None
-    return f'+{digits}' if raw.startswith('+') or international else digits
+    candidates = [raw]
+    if not raw.startswith('+'):
+        # Telegram отдаёт номер контакта без «+», а люди так же набирают международный номер:
+        # «995599123456». Сначала — как местный, затем — как международный.
+        candidates = [f'+{raw}'] if shared else [raw, f'+{raw}']
+    for candidate in candidates:
+        try:
+            number = phonenumbers.parse(candidate, region)
+        except phonenumbers.NumberParseException:
+            continue
+        ok = phonenumbers.is_possible_number(number) if shared else phonenumbers.is_valid_number(number)
+        if ok:
+            return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
+    return None
+
+
+def example_phone(region: str) -> str:
+    """Пример мобильного номера страны для подсказки (`+995 555 12 34 56` для GE)."""
+    number = phonenumbers.example_number_for_type(region, phonenumbers.PhoneNumberType.MOBILE)
+    if number is None:  # pragma: no cover - у всех стран из SUPPORTED_REGIONS есть пример
+        return '+1 201 555 0123'
+    return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+
+
+def format_phone(value: str) -> str:
+    """Телефон для людей: `+995 599 12 34 56` (в Telegram по нему можно нажать и позвонить)."""
+    try:
+        number = phonenumbers.parse(value, None)
+    except phonenumbers.NumberParseException:
+        return value
+    return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
 
 
 def minutes_until(moment: dt.datetime, now: dt.datetime) -> float:

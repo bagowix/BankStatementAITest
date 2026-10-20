@@ -18,7 +18,7 @@ from typing import Final
 
 from autostudio.booking.callbacks import BOOKING, join
 from autostudio.booking.config import BookingConfig
-from autostudio.booking.domain import Booking, day_bounds, local_today
+from autostudio.booking.domain import Booking, day_bounds, format_phone, local_today
 from autostudio.booking.messages import Button, DeliveryError, Outgoing, RecipientGoneError, Sender
 from autostudio.booking.service import PACKAGE, SCHEDULE_TAB
 from autostudio.booking.store import BookingStore
@@ -107,7 +107,7 @@ def schedule_rows(bookings: list[Booking], texts: Texts, language: str) -> list[
             texts.staff_name(booking.staff_id),
             texts.service_name(booking.service_id, language),
             booking.name,
-            booking.phone,
+            format_phone(booking.phone),
             booking.id,
         ]
         for booking in bookings

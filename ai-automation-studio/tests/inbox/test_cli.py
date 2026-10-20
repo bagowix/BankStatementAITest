@@ -49,6 +49,8 @@ def env(monkeypatch, tmp_path):
 def server(env):
     srv = FakeImapServer(messages={1: make_email(subject='Tour price', body='What is the price?')})
     env.setattr(imap, '_default_connector', lambda host, port, timeout: srv)
+    # Боевой запуск на заглушке — только если она выбрана явно.
+    env.setenv('AUTOSTUDIO_LLM_PROVIDER', 'fake')
     return srv
 
 
@@ -166,7 +168,7 @@ def test__provider_hint__by_host(host, needle):
 def test__run__one_shot__processes_and_logs_run_ok(server, tmp_path, capsys):
     cli.run(_config(tmp_path))
     out = capsys.readouterr().out
-    assert 'inbox: новых 1' in out and 'черновиков 1' in out and '🔥 New lead' in out
+    assert 'inbox: новых 1' in out and 'черновиков 1' in out and '📩 New inquiry from Jane Doe' in out
     mailbox, flags, _, message = server.appended[0]
     assert (mailbox, flags) == ('"Drafts"', '(\\Draft \\Seen)') and b'In-Reply-To: <m1@client.example>' in message
     assert server.flags[1] == set()  # письмо клиента осталось непрочитанным

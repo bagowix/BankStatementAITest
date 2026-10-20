@@ -168,7 +168,7 @@ async def test__run__corrupt_email__run_continues_retried_then_given_up(tmp_path
 
 async def test__run__llm_down_for_everything__breaker_aborts_attempts_not_counted(tmp_path):
     def down(system: str, prompt: str) -> Triage:
-        raise LLMError('quota exceeded')
+        raise LLMError('OpenAI 429: quota exceeded', status_code=429)
 
     h = Harness(tmp_path, llm=FakeLLM({Triage: down}))
     for index in range(5):
@@ -176,7 +176,7 @@ async def test__run__llm_down_for_everything__breaker_aborts_attempts_not_counte
     for minute in range(MAX_ATTEMPTS + 1):
         result = await run_once(h.config, h.deps, _later(minute))
         assert result.aborted is not None and not result.ok and result.failed == 3 and result.given_up == 0
-    assert h.store.record_failure('INBOX', 1, 1, 'probe') == 1  # счётчик не рос
+    assert h.store.record_failure('INBOX', 1, 1, 'probe', now=NOW) == 1  # счётчик не рос
     assert h.sheet() == []
 
 
@@ -358,7 +358,7 @@ async def test__run__russian_owner__sheet_and_notification_in_russian(tmp_path):
     await run_once(h.config, h.deps, NOW)
     header, row = h.sheet()
     assert header[0] == 'Получено' and row[4] == 'обычная' and row[13] == 'да'
-    assert h.owner.sent[0].startswith('🔥 Новое письмо «lead»')
+    assert h.owner.sent[0].startswith('📩 Новый запрос от Jane Doe <jane@client.example> (срочность: обычная)')
 
 
 def test__hot_lead_message__without_phone_and_draft():
@@ -370,7 +370,7 @@ def test__hot_lead_message__without_phone_and_draft():
     triage = TriageResult(category='lead', confidence=1, summary='Wants a tour.', budget='$500', urgency='high')
     text = hot_lead_message('en', parsed, triage, config.inbox.category('lead'), drafted=False)
     assert text.splitlines() == [
-        '🔥 New lead (high) from Jane Doe <jane@client.example>',
+        '🔥 New inquiry from Jane Doe <jane@client.example> (high urgency)',
         'Wants a tour.',
         'Budget: $500',
         'No draft was prepared — please reply yourself.',

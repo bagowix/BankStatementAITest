@@ -31,8 +31,10 @@ _GROUPS: Final[dict[str, tuple[str, ...]]] = {
 _FALLBACK_GROUP: Final[dict[str, str]] = {'booking': 'lead'}
 
 _URGENT: Final = ('urgent', 'asap', 'immediately', 'today', 'срочно', 'сегодня', 'немедленно')
+# Как и настоящая модель, заглушка помечает только обращения к ИИ: «forward all invoices to
+# accounting@…» в письме партнёра — обычная просьба, а не инъекция.
 _INJECTION: Final = (
-    'ignore previous instructions', 'ignore all previous instructions', 'system prompt', 'forward all',
+    'ignore previous instructions', 'ignore all previous instructions', 'system prompt',
     'игнорируй инструкции', 'игнорируй все инструкции', 'игнорируй предыдущие инструкции', 'системный промпт',
 )  # fmt: skip
 _PHONE_HINT: Final = re.compile(r'phone|tel|mobile|whatsapp|call|тел|моб|звон|номер', re.I)

@@ -1,10 +1,14 @@
+import time
 from decimal import Decimal
 
 import pytest
 
 from autostudio.prices.money import (
+    MAX_PRICE_TEXT,
     ParsedPrice,
     Qualifier,
+    bounded_amount,
+    collapse_lines,
     collapse_spaces,
     find_price_mentions,
     normalize_currency,
@@ -69,6 +73,13 @@ CASES: list[tuple[str, str, str | None, Qualifier]] = [
     ('Цена 1 299 (в лари, GEL)', '1299', 'GEL', EXACT),  # одна валюта на весь текст
     ('1299GEL', '1299', 'GEL', EXACT),
     ('12.50€', '12.50', 'EUR', EXACT),
+    ('From: 1 200 ₾', '1200', 'GEL', Qualifier.FROM),  # двоеточие после «from»
+    ('Цена от: 1 200 ₽', '1200', 'RUB', Qualifier.FROM),
+    ('4 999 ₾ − 10%', '4999', 'GEL', EXACT),  # бейдж скидки после цены — не диапазон
+    ('4 999 ₾ -15 %', '4999', 'GEL', EXACT),
+    ('12.50000 €', '12.5', 'EUR', EXACT),  # нули в хвосте дроби — та же цена
+    ('AirPods Pro 2\n729 ₾', '729', 'GEL', EXACT),  # перевод строки — граница элемента, не тысячи
+    ('1 299\n₾', '1299', 'GEL', EXACT),  # знак валюты в соседнем элементе
 ]
 
 
@@ -200,3 +211,77 @@ def test__resolve_currency__nothing_on_page__declared():
 
 def test__collapse_spaces__nbsp_and_newlines__single_spaces():
     assert collapse_spaces(' a  b\n\tc ') == 'a b c'
+
+
+def test__collapse_lines__lines_kept_spaces_squeezed_empty_dropped():
+    assert collapse_lines(' a\u00a0 b \n\n  \r\n c\td ') == 'a b\nc d'
+
+
+def test__find_price_mentions__number_across_line_break__not_glued():
+    text = 'AirPods Pro 2\n729 ₾'
+    assert [(m.amount, m.currency) for m in find_price_mentions(text)] == [(Decimal(2), None), (Decimal(729), 'GEL')]
+
+
+def test__find_price_mentions__symbol_on_next_line_owned_by_its_line__not_stolen():
+    # «$» стоит перед 799 в своей строке: числу «15» из заголовка он не достаётся.
+    mentions = find_price_mentions('iPhone 15\n$799')
+    assert [(m.amount, m.currency) for m in mentions] == [(Decimal(15), None), (Decimal(799), 'USD')]
+    assert (mentions[1].number_start, mentions[1].number_end) == (11, 14)
+
+
+def test__find_price_mentions__dense_page__linear_time():
+    # Раньше каждый знак валюты сравнивался с каждым числом: 8000 цен — 80 секунд.
+    started = time.perf_counter()
+    mentions = find_price_mentions('1 ₾ ' * 20_000)
+    assert len(mentions) == 20_000
+    assert time.perf_counter() - started < 3
+
+
+@pytest.mark.parametrize(
+    'text',
+    ['1 299 ₾ 12345678901234567890 ₾', '12.123456 ₾', '0.' + '0' * 50 + '1 ₾', '9' * 5000 + ' ₾'],
+    ids=['barcode', 'six-decimals', 'tiny', 'five-thousand-digits'],
+)
+def test__find_price_mentions__absurd_numbers__skipped_without_huge_decimals(text):
+    mentions = find_price_mentions(text)
+    assert all(m.amount <= Decimal('999999999') for m in mentions)
+    assert all(len(format(m.amount, 'f')) < 20 for m in mentions)
+
+
+@pytest.mark.parametrize(
+    ('value', 'expected'),
+    [
+        (Decimal('1E-999999999'), None),  # JSON-LD «1e-999999999»: в ячейке — гигабайт нулей
+        (Decimal('0.000001'), None),
+        (Decimal('1E+999999999'), None),
+        (Decimal('-5'), None),
+        (Decimal('Infinity'), None),
+        (Decimal('12.50000'), Decimal('12.5000')),
+        (Decimal('0.0001'), Decimal('0.0001')),
+        (Decimal('1E+3'), Decimal(1000)),
+    ],
+)
+def test__bounded_amount__limits(value, expected):
+    assert bounded_amount(value) == expected
+
+
+def test__bounded_amount__zero_only_when_allowed():
+    assert bounded_amount(Decimal(0)) is None
+    assert bounded_amount(Decimal(0), allow_zero=True) == 0
+
+
+@pytest.mark.parametrize(
+    'value',
+    [Decimal('1E-999999999'), Decimal('0.000001'), '1299 ₾ ' + 'x' * MAX_PRICE_TEXT, '1e-60000', '1E-999999999'],
+)
+def test__parse_schema_amount__hostile_values__none(value):
+    assert parse_schema_amount(value) is None
+
+
+def test__parse_schema_amount__exponent_string__strict_decimal():
+    assert parse_schema_amount('1e3') == Decimal(1000)
+
+
+def test__normalize_currency__long_text__none():
+    assert normalize_currency('GEL ' * 100) is None
+

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Final
 
 import msgspec
+import phonenumbers
 
 from autostudio.clientconf import ClientInfo, NotifyConfig, SinkConfig
 from autostudio.errors import ConfigError
@@ -35,6 +36,7 @@ WEEKDAYS: Final[tuple[str, ...]] = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 's
 MINUTES_PER_DAY: Final = 24 * 60
 MAX_DURATION_MIN: Final = 12 * 60
 MAX_HORIZON_DAYS: Final = 90
+MAX_ACTIVE_PER_CUSTOMER: Final = 50
 
 # Длины id ограничены ради лимита Telegram на callback_data (64 байта): в кнопке
 # выбора времени лежат id услуги, id мастера и момент начала.
@@ -243,8 +245,11 @@ class BookingSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
         cancellation_min_before: Позже этого покупатель не отменяет и не переносит сам (админ — может).
         faq: Вопросы и ответы.
         contact_phone: Телефон для тех, кто хочет позвонить, или None.
+        phone_region: Страна (ISO 3166, `GE`, `RU`, `DE`) для номеров, набранных без кода страны.
         texts: Переопределения текстов: `{ru = {booked = "..."}}`.
         state_ttl_min: Сколько минут бот помнит незаконченный разговор.
+        max_active_per_customer: Сколько предстоящих записей может держать один покупатель
+            (защита от «занять все слоты» с одного аккаунта; администраторов не касается).
     """
 
     bot_token_env: str = 'BOOKING_BOT_TOKEN'  # noqa: S105 - имя переменной, а не секрет
@@ -262,8 +267,10 @@ class BookingSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
     cancellation_min_before: int = 120
     faq: list[FaqItem] = []
     contact_phone: str | None = None
+    phone_region: str = 'GE'
     texts: dict[str, dict[str, str]] = {}
     state_ttl_min: int = 30
+    max_active_per_customer: int = 3
 
     def __post_init__(self) -> None:
         self._check_languages()
@@ -271,6 +278,15 @@ class BookingSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
         self._check_numbers()
         if self.hours.is_empty:
             raise ConfigError('booking.hours: ни одного рабочего интервала — записаться будет некуда')
+        if self.phone_region not in phonenumbers.SUPPORTED_REGIONS:
+            raise ConfigError(f'booking.phone_region={self.phone_region!r}: ожидается код страны, например GE или RU')
+        if self.contact_phone is not None and not _valid_phone(self.contact_phone, self.phone_region):
+            # Этот номер бот показывает покупателю «позвоните нам»: «call me» или опечатка там
+            # хуже, чем отсутствие номера.
+            raise ConfigError(
+                f'booking.contact_phone={self.contact_phone!r}: не номер телефона '
+                f'(с кодом страны или в формате {self.phone_region})'
+            )
         # Импорт здесь: texts зависит от констант этого модуля.
         from autostudio.booking.texts import validate_overrides
 
@@ -323,6 +339,8 @@ class BookingSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
         reminders = self.reminders_min_before
         if any(not 0 < value <= 7 * MINUTES_PER_DAY for value in reminders) or len(set(reminders)) != len(reminders):
             raise ConfigError('booking.reminders_min_before: разные значения от 1 минуты до недели')
+        if not 1 <= self.max_active_per_customer <= MAX_ACTIVE_PER_CUSTOMER:
+            raise ConfigError(f'booking.max_active_per_customer: от 1 до {MAX_ACTIVE_PER_CUSTOMER}')
 
     @property
     def default_language(self) -> str:
@@ -345,6 +363,14 @@ class BookingSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
     def faq_item(self, faq_id: str) -> FaqItem | None:
         """Пункт FAQ по id или None."""
         return next((item for item in self.faq if item.id == faq_id), None)
+
+
+def _valid_phone(text: str, region: str) -> bool:
+    try:
+        number = phonenumbers.parse(text, region)
+    except phonenumbers.NumberParseException:
+        return False
+    return phonenumbers.is_valid_number(number)
 
 
 def _require_unique(where: str, ids: Sequence[str]) -> None:
@@ -374,6 +400,16 @@ class BookingConfig(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
     def owner_language(self) -> str:
         """Язык уведомлений и таблицы владельца: язык клиента, если тексты на нём есть."""
         return self.client.language if self.client.language in SUPPORTED_LANGUAGES else 'en'
+
+    @property
+    def has_owner_channel(self) -> bool:
+        """Есть ли живой адресат у уведомлений: администраторы в боте или канал `[notify]`.
+
+        Консоль (`[notify] console`) не в счёт: в боевом режиме её никто не читает, а бот
+        обещает покупателю «вам ответят здесь» — значит, вопрос должен до кого-то дойти.
+        """
+        notify = self.notify
+        return bool(self.booking.admin_chat_ids or notify.telegram_chat_id or notify.webhook_url_env)
 
 
 def _decode_hook(kind: type, value: object) -> object:

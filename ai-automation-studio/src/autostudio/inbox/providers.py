@@ -5,6 +5,7 @@
 """
 
 import os
+from collections.abc import AsyncIterator
 
 import httpx
 from dishka import Provider, Scope, from_context, provide
@@ -19,8 +20,28 @@ from autostudio.inbox.store import InboxStore
 from autostudio.llm import LLMClient, make_llm
 from autostudio.notify import Notifier, make_notifier
 from autostudio.providers import OperatorAlerts
-from autostudio.settings import Settings
+from autostudio.settings import LLMProvider, Settings
 from autostudio.sinks import TableSink, make_sink
+
+
+def build_llm(settings: Settings) -> LLMClient:
+    """Модель для разбора почты — без запасного выхода на эвристики у настоящего провайдера.
+
+    Ядро умеет подменять упавшую модель эвристиками пакета. Для почты это вредно: при
+    лимите расходов или сбое провайдера письма молча сортировались бы по ключевым словам,
+    а в «Черновики» клиента ложились бы шаблоны. Поэтому сбой модели доходит до пайплайна:
+    письмо ждёт, запуск сообщает об ошибке, оператор узнаёт. Эвристики работают, только
+    когда заглушка выбрана явно (`AUTOSTUDIO_LLM_PROVIDER=fake`).
+
+    Args:
+        settings: Настройки процесса.
+
+    Returns:
+        Клиент модели.
+    """
+    if settings.llm_provider is LLMProvider.FAKE:
+        return make_llm(settings, fake=make_fake_llm())
+    return make_llm(settings)
 
 
 class InboxProvider(Provider):
@@ -46,8 +67,11 @@ class InboxProvider(Provider):
         return imap
 
     @provide
-    def llm(self, settings: Settings) -> LLMClient:
-        return make_llm(settings, fake=make_fake_llm())
+    async def llm(self, settings: Settings) -> AsyncIterator[LLMClient]:
+        # Асинхронный HTTP-клиент провайдера закрывает тот, кто его создал, — контейнер.
+        client = build_llm(settings)
+        yield client
+        await client.aclose()
 
     @provide
     def sink(self, config: InboxConfig) -> TableSink:

@@ -22,7 +22,7 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 import msgspec
-from selectolax.lexbor import LexborHTMLParser, LexborNode
+from selectolax.lexbor import LexborHTMLParser, LexborNode, SelectolaxError
 
 from autostudio.inbox.errors import MailParseError
 
@@ -31,17 +31,31 @@ _SIGNATURE_LIMIT: Final = 600
 _ATTACHMENT_LIMIT: Final = 20
 _QUOTE_LIMIT: Final = 3000
 _REFERENCES_KEPT: Final = 10
+_HIDDEN_LIMIT: Final = 4000
+# HTML длиннее этого обрезается до разбора (Gmail сам обрезает письма больше ~100 КБ): видимый текст
+# умещается с запасом, а мегабайты вложенных тегов не должны занимать процессор надолго.
+_HTML_LIMIT: Final = 300_000
+_STYLE_LIMIT: Final = 50_000
+_SELECTOR_LIMIT: Final = 50
+# До поиска цитаты и подписи текст режется до этого множителя лимита: всё дальше
+# `max_body_chars` всё равно отрезается, а эвристики цитат не должны жевать 2 МБ.
+_SPLIT_FACTOR: Final = 4
+_SPLIT_MIN: Final = 20_000
 
 # Квантификаторы ограничены: текст письма чужой, и регулярка не должна уходить в
 # квадратичный перебор на длинной строке без «@».
 _ADDRESS: Final = re.compile(r'[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){1,8}', re.UNICODE)
 _MSGID: Final = re.compile(r'<[^<>\s]+>')
 _WS: Final = re.compile(r'\s+')
+_FOLD: Final = re.compile(r'\r?\n[ \t]+')
 _HIGH_RUN: Final = re.compile(rb'[\x80-\xff]{3,}')
 # Самые частые строчные русские буквы: в настоящем тексте их много, а при чтении
 # не той однобайтовой кодировкой вместо них получаются заглавные и псевдографика.
 _RU_COMMON: Final = frozenset('оеаинтсрвлкмдпуяызьбгчйхжшюцщэф')
 
+# RFC 3834: автоответ — `auto-replied`; `auto-notified` — уведомления sieve. А вот
+# `auto-generated` ставят и формы сайтов, и платформы бронирования — это может быть лид.
+_AUTO_REPLY_KINDS: Final = frozenset({'auto-replied', 'auto-notified'})
 _AUTO_SUBJECT: Final = re.compile(
     r'^\s*(out of office|automatic reply|auto[- ]?reply|autoreply|auto:|'
     r'автоответ|автоматический ответ|нет на месте|не в офисе)',
@@ -67,8 +81,9 @@ _OUTLOOK_FROM: Final = re.compile(r'^\s*\*?(from|от|von):\*?\s', re.I)
 # Заголовок цитаты Outlook — «From:» и следом «Sent:». Одно «From:/Subject:» бывает и в
 # письмах форм сайта («From: John / Subject: Booking»), их резать нельзя; «Date:»
 # засчитываем, только если в ней год и время.
+# Квантификаторы ограничены: `.*\d{4}.*` на длинной строке из цифр перебирал бы квадратично.
 _OUTLOOK_NEXT: Final = re.compile(
-    r'^\s*\*?((sent|отправлено|gesendet|envoyé)\s*:|(date|дата)\s*:.*\d{4}.*\d{1,2}:\d{2})', re.I
+    r'^\s*\*?((sent|отправлено|gesendet|envoyé)\s*:|(date|дата)\s*:.{0,80}?\d{4}.{0,80}?\d{1,2}:\d{2})', re.I
 )
 _MOBILE_FOOTER: Final = re.compile(
     r'^\s*(sent from my\b|sent from mail for\b|get outlook for\b|sent with\b|'
@@ -80,10 +95,24 @@ _HEADER_LINE_LIMIT: Final = 300
 _SUBJECT_LIMIT: Final = 500
 _NAME_LIMIT: Final = 200
 
-_DROP_TAGS: Final = 'script, style, head, title, noscript, template, svg, iframe, object, blockquote, [hidden]'
+_DROP_TAGS: Final = 'script, style, head, title, noscript, template, svg, iframe, object, blockquote'
 _BREAK: Final = '\u2029'
 _INLINE_WS: Final = re.compile(r'[^\S\u2029]+')
-_HIDDEN_STYLE: Final = re.compile(r'display\s*:\s*none|visibility\s*:\s*hidden', re.I)
+_CSS_SPACE: Final = re.compile(r'\s+')
+# Способы спрятать текст от человека, оставив его модели: display/visibility, «невидимый»
+# шрифт и прозрачность, нулевой блок с обрезкой, mso-hide (Outlook), цвет текста = цвет фона.
+_HIDDEN_CSS: Final = re.compile(
+    r'(?:^|;)(?:display:none|visibility:hidden|mso-hide:all'
+    r'|opacity:0(?:\.0+)?|font-size:0(?:\.0+)?(?:px|pt|em|rem|%)?)(?:;|!|$)'
+)
+_ZERO_BOX: Final = re.compile(r'(?:^|;)(?:max-)?(?:height|width):0(?:px)?(?:;|!|$)')
+_COLOR: Final = re.compile(r'(?:^|;)color:(#?\w+)')
+_BACKGROUND: Final = re.compile(r'(?:^|;)background(?:-color)?:(#?\w+)')
+_SHORT_HEX: Final = re.compile(r'#[0-9a-f]{3}')
+_LONG_HEX: Final = re.compile(r'#[0-9a-f]{6}')
+_NAMED_COLORS: Final[dict[str, str]] = {'white': '#ffffff', 'black': '#000000'}
+_PLAIN_SELECTOR: Final = re.compile(r'^[\w.#\-\s>\[\]="\']{1,100}$')
+_NO_REPLY: Final = re.compile(r'^(?:no-?reply|do-?not-?reply|donotreply|mailer-daemon|bounces?)\b', re.I)
 _BLOCK_TAGS: Final = frozenset(
     {
         'p', 'div', 'li', 'ul', 'ol', 'tr', 'table', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article',
@@ -108,9 +137,13 @@ class ParsedEmail(msgspec.Struct, frozen=True, kw_only=True):
         date_fallback: Дата взята из момента разбора, а не из заголовка.
         text: Видимый текст без цитат и подписи, обрезанный до лимита.
         signature: Подпись отправителя (там часто телефон) — отдельно от текста.
+        hidden_text: Текст HTML, спрятанный от человека (стилями, классами, атрибутом hidden).
+            Модели он не показывается, но правила ищут в нём prompt-инъекцию.
         truncated: Текст обрезан по лимиту.
         attachments: Имена вложений — только имена, содержимое не читается.
         is_auto_reply: Автоответ, «нет на месте» или уведомление о недоставке.
+        is_auto_generated: Машинное уведомление (`Auto-Submitted: auto-generated`): формы
+            сайтов и платформы бронирования — его разбирает модель, а не правила.
         is_bulk: Рассылка (List-Unsubscribe, List-Id, Precedence: bulk/list/junk).
         in_reply_to: Message-ID письма, на которое это отвечает.
         references: Цепочка Message-ID переписки.
@@ -127,9 +160,11 @@ class ParsedEmail(msgspec.Struct, frozen=True, kw_only=True):
     date_fallback: bool = False
     text: str = ''
     signature: str = ''
+    hidden_text: str = ''
     truncated: bool = False
     attachments: list[str] = msgspec.field(default_factory=list)
     is_auto_reply: bool = False
+    is_auto_generated: bool = False
     is_bulk: bool = False
     in_reply_to: str | None = None
     references: list[str] = msgspec.field(default_factory=list)
@@ -142,6 +177,12 @@ class ParsedEmail(msgspec.Struct, frozen=True, kw_only=True):
     @property
     def sender_domain(self) -> str:
         return self.from_addr.rpartition('@')[2]
+
+    @property
+    def replyable(self) -> bool:
+        """Есть ли живой адрес для ответа: не пустой, ASCII (черновик собирается в 7bit) и не no-reply."""
+        address = self.reply_address
+        return bool(address) and address.isascii() and not _NO_REPLY.match(address.partition('@')[0])
 
 
 def parse_email(raw: bytes, *, now: dt.datetime, max_body_chars: int = 8000) -> ParsedEmail:
@@ -170,8 +211,8 @@ def parse_email(raw: bytes, *, now: dt.datetime, max_body_chars: int = 8000) -> 
     date, date_fallback = _parse_date(msg.get('Date'), now)
     message_id, generated = _message_id(msg, raw)
 
-    body_text = _body_text(msg)
-    text, signature = split_reply(body_text)
+    body_text, hidden_text = _body_text(msg)
+    text, signature = split_reply(body_text[: max(_SPLIT_FACTOR * max_body_chars, _SPLIT_MIN)])
     truncated = len(text) > max_body_chars
     if truncated:
         hidden = len(text) - max_body_chars
@@ -189,9 +230,11 @@ def parse_email(raw: bytes, *, now: dt.datetime, max_body_chars: int = 8000) -> 
         date_fallback=date_fallback,
         text=text,
         signature=signature[:_SIGNATURE_LIMIT].rstrip(),
+        hidden_text=hidden_text[:_HIDDEN_LIMIT],
         truncated=truncated,
         attachments=_attachment_names(msg),
         is_auto_reply=_is_auto_reply(msg, from_addr, subject),
+        is_auto_generated=_auto_submitted(msg) not in ('', 'no', *_AUTO_REPLY_KINDS),
         is_bulk=_is_bulk(msg),
         in_reply_to=next(iter(_MSGID.findall(_header(msg, 'In-Reply-To'))), None),
         references=_MSGID.findall(_header(msg, 'References'))[-_REFERENCES_KEPT:],
@@ -255,10 +298,13 @@ def decode_header_value(value: str | Header | None) -> str:
     """
     if value is None:
         return ''
+    # Сначала разворачиваем перенос строки заголовка: decode_header обрезает пробел в начале
+    # каждой строки продолжения, и «=?…?=\r\n 2026» склеивалось бы в «тура2026».
+    unfolded = _FOLD.sub(' ', value) if isinstance(value, str) else value
     try:
-        fragments = decode_header(value)
+        fragments = decode_header(unfolded)
     except (HeaderParseError, ValueError, LookupError):
-        return _unescape(str(value))
+        return _unescape(str(unfolded))
     parts: list[str] = []
     for fragment, charset in fragments:
         parts.append(_unescape(fragment) if isinstance(fragment, str) else decode_bytes(fragment, charset))
@@ -277,6 +323,11 @@ def _one_line(text: str) -> str:
     return _WS.sub(' ', text).strip()
 
 
+def _raw_header(value: str | Header | None) -> str:
+    # Заголовок без раскодирования — как стабильный материал для хеша, а не для показа.
+    return '' if value is None else str(value)
+
+
 def _header(msg: Message, name: str) -> str:
     return _one_line(decode_header_value(msg.get(name)))
 
@@ -287,7 +338,7 @@ def _header(msg: Message, name: str) -> str:
 def _addresses(values: Sequence[str | Header]) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     for value in values:
-        raw = _one_line(str(value) if isinstance(value, str) else decode_header_value(value))
+        raw = _one_line(value if isinstance(value, str) else decode_header_value(value))
         pairs = [(name, addr) for name, addr in getaddresses([raw]) if '@' in addr]
         if not pairs:
             # Строгий разбор Python отказывается от странных заголовков; адрес всё равно берём.
@@ -301,7 +352,8 @@ def _first_address(values: Sequence[str | Header]) -> tuple[str, str]:
     return pairs[0] if pairs else ('', '')
 
 
-def _parse_date(value: str | None, now: dt.datetime) -> tuple[dt.datetime, bool]:
+def _parse_date(value: str | Header | None, now: dt.datetime) -> tuple[dt.datetime, bool]:
+    # compat32 отдаёт заголовок с сырыми 8-битными байтами объектом Header, а не строкой.
     if not value:
         return now.astimezone(dt.UTC), True
     try:
@@ -323,7 +375,7 @@ def _message_id(msg: Message, raw: bytes) -> tuple[str, bool]:
         return f'<{header.strip("<>")}>', False
     # Без Message-ID дедупликация держится на хеше заголовков и тела: тот же
     # набор байтов при повторной выборке даёт тот же идентификатор.
-    head = '\n'.join(str(msg.get(name, '')) for name in ('From', 'To', 'Subject', 'Date'))
+    head = '\n'.join(_raw_header(msg.get(name)) for name in ('From', 'To', 'Subject', 'Date'))
     body = raw.split(b'\r\n\r\n', 1)[-1] if b'\r\n\r\n' in raw else raw.split(b'\n\n', 1)[-1]
     digest = hashlib.sha256(head.encode('utf-8', 'surrogateescape') + b'\0' + body).hexdigest()[:40]
     return f'<{digest}@{GENERATED_ID_DOMAIN}>', True
@@ -344,7 +396,7 @@ def _part_text(part: Message) -> str:
     return decode_bytes(payload, part.get_content_charset())
 
 
-def _body_text(msg: Message) -> str:
+def _body_text(msg: Message) -> tuple[str, str]:
     plain = ''
     html = ''
     for part in msg.walk():
@@ -355,10 +407,13 @@ def _body_text(msg: Message) -> str:
             plain = _part_text(part)
         elif kind == 'text/html' and not html.strip():
             html = _part_text(part)
+    # Скрытый текст ищем и тогда, когда есть text/plain: модель видит plain, а инъекцию
+    # могли спрятать в HTML-версии того же письма.
+    visible_html, hidden = html_parts(html) if html.strip() else ('', '')
     # Бывает пустой text/plain рядом с настоящим HTML — тогда берём HTML.
     if plain.strip():
-        return _normalize_text(plain)
-    return html_to_text(html) if html.strip() else ''
+        return _normalize_text(plain), hidden
+    return visible_html, hidden
 
 
 def _normalize_text(text: str) -> str:
@@ -374,17 +429,128 @@ def _normalize_text(text: str) -> str:
 def _outermost(nodes: list[LexborNode]) -> list[LexborNode]:
     # Удаление узла освобождает и его потомков: вложенное совпадение (script внутри
     # скрытого div) трогать после этого нельзя, поэтому удаляем только внешние.
+    # Для каждого предка запоминается, лежит ли он под отмеченным узлом: каждый узел
+    # дерева проходится один раз, а не по разу на совпадение (иначе — квадрат от вложенности).
     marked = {node.mem_id for node in nodes}
+    covered: dict[int, bool] = {}
     seen: set[int] = set()
     outer: list[LexborNode] = []
     for node in nodes:
+        if node.mem_id in seen:
+            continue
+        seen.add(node.mem_id)
+        path: list[int] = []
         parent = node.parent
-        while parent is not None and parent.mem_id not in marked:
+        while parent is not None and parent.mem_id not in covered:
+            path.append(parent.mem_id)
             parent = parent.parent
-        if parent is None and node.mem_id not in seen:
-            seen.add(node.mem_id)
+        inside = covered[parent.mem_id] if parent is not None else False
+        for mem_id in reversed(path):
+            inside = inside or mem_id in marked
+            covered[mem_id] = inside
+        if not inside:
             outer.append(node)
+        covered[node.mem_id] = True
     return outer
+
+
+def _is_hidden_style(style: str) -> bool:
+    compact = _CSS_SPACE.sub('', style.lower())
+    if _HIDDEN_CSS.search(compact):
+        return True
+    if _ZERO_BOX.search(compact) and 'overflow:hidden' in compact:
+        return True
+    color, background = _COLOR.search(compact), _BACKGROUND.search(compact)
+    if color is None or background is None:
+        return False
+    shade = _rgb(color.group(1))
+    return bool(shade) and shade == _rgb(background.group(1))
+
+
+def _rgb(value: str) -> str:
+    value = _NAMED_COLORS.get(value, value)
+    if _SHORT_HEX.fullmatch(value):
+        value = '#' + ''.join(ch * 2 for ch in value[1:])
+    return value if _LONG_HEX.fullmatch(value) else ''
+
+
+def _hidden_selectors(css: str) -> list[str]:
+    # Линейный проход со счётчиком скобок вместо регулярки по CSS: чужой CSS бывает битым,
+    # а регулярка с вложенными повторами на нём перебирает квадратично. Правила внутри
+    # @media не берём: «скрыто на телефоне» не значит «скрыто от человека».
+    found: list[str] = []
+    stack: list[bool] = []
+    open_at = 0
+    start = 0
+    head = ''
+    for index, char in enumerate(css):
+        if char == '{':
+            head = css[start:index].strip()
+            is_at = head.startswith('@')
+            stack.append(is_at)
+            open_at += is_at
+            start = index + 1
+        elif char == '}':
+            if stack:
+                is_at = stack.pop()
+                open_at -= is_at
+                if not is_at and not open_at and _is_hidden_style(css[start:index]):
+                    found += [sel.strip() for sel in head.split(',') if _PLAIN_SELECTOR.match(sel.strip())]
+            start = index + 1
+            if len(found) >= _SELECTOR_LIMIT:
+                break
+    return found[:_SELECTOR_LIMIT]
+
+
+def _hidden_nodes(tree: LexborHTMLParser) -> list[LexborNode]:
+    nodes = [node for node in tree.css('[style]') if _is_hidden_style(node.attributes.get('style') or '')]
+    nodes += tree.css('[hidden]')
+    css = ''.join(node.text(deep=True) for node in tree.css('style'))[:_STYLE_LIMIT]
+    for selector in _hidden_selectors(css):
+        try:
+            nodes += tree.css(selector)
+        except SelectolaxError:
+            continue
+    return nodes
+
+
+def html_parts(html: str) -> tuple[str, str]:
+    """Видимый и спрятанный текст HTML-письма.
+
+    Видимый — без скриптов, стилей, цитат и скрытых блоков; спрятанный — то, что
+    стилями, классами или атрибутом `hidden` убрано от глаз человека. Модель видит
+    только первый, а во втором правила ищут prompt-инъекцию.
+
+    Args:
+        html: HTML письма.
+
+    Returns:
+        Видимый текст (строки на границах блоков) и спрятанный текст.
+    """
+    tree = LexborHTMLParser(html[:_HTML_LIMIT])
+    hidden_nodes = _hidden_nodes(tree)
+    hidden_ids = {node.mem_id for node in hidden_nodes}
+    hidden: list[str] = []
+    for node in _outermost([*hidden_nodes, *tree.css(_DROP_TAGS)]):
+        if node.mem_id in hidden_ids:
+            hidden.append(_INLINE_WS.sub(' ', node.text(deep=True)).strip())
+        if node.tag in _BLOCK_TAGS or node.tag == 'blockquote':
+            # Убранный блок (цитата, скрытый div) всё равно разделял строки текста.
+            node.insert_after(_BREAK)
+        node.decompose()
+    root = tree.body or tree.root
+    if root is None:
+        return '', ''
+    # Границы блоков помечаются символом-разделителем абзацев: пробелы и переводы
+    # строк исходного HTML схлопываются в пробел, а разделитель становится строкой.
+    for node in root.css(','.join(sorted(_BLOCK_TAGS))):
+        node.insert_before(_BREAK)
+        node.insert_after(_BREAK)
+    for node in root.css('td, th'):
+        node.insert_after(' ')
+    flat = _INLINE_WS.sub(' ', root.text(deep=True))
+    lines = [line.strip() for line in flat.split(_BREAK)]
+    return '\n'.join(line for line in lines if line), '\n'.join(text for text in hidden if text)
 
 
 def html_to_text(html: str) -> str:
@@ -396,26 +562,7 @@ def html_to_text(html: str) -> str:
     Returns:
         Текст с переводами строк на границах блоков.
     """
-    tree = LexborHTMLParser(html)
-    hidden = [node for node in tree.css('[style]') if _HIDDEN_STYLE.search(node.attributes.get('style') or '')]
-    for node in _outermost([*tree.css(_DROP_TAGS), *hidden]):
-        if node.tag in _BLOCK_TAGS or node.tag == 'blockquote':
-            # Убранный блок (цитата, скрытый div) всё равно разделял строки текста.
-            node.insert_after(_BREAK)
-        node.decompose()
-    root = tree.body or tree.root
-    if root is None:
-        return ''
-    # Границы блоков помечаются символом-разделителем абзацев: пробелы и переводы
-    # строк исходного HTML схлопываются в пробел, а разделитель становится строкой.
-    for node in root.css(','.join(sorted(_BLOCK_TAGS))):
-        node.insert_before(_BREAK)
-        node.insert_after(_BREAK)
-    for node in root.css('td, th'):
-        node.insert_after(' ')
-    flat = _INLINE_WS.sub(' ', root.text(deep=True))
-    lines = [line.strip() for line in flat.split(_BREAK)]
-    return '\n'.join(line for line in lines if line)
+    return html_parts(html)[0]
 
 
 def _is_quote_header(line: str, following: list[str]) -> bool:
@@ -489,9 +636,13 @@ def _attachment_names(msg: Message) -> list[str]:
     return names
 
 
+def _auto_submitted(msg: Message) -> str:
+    # Значение бывает с параметрами: «auto-replied; owner-email=…».
+    return _header(msg, 'Auto-Submitted').lower().partition(';')[0].strip()
+
+
 def _is_auto_reply(msg: Message, from_addr: str, subject: str) -> bool:
-    auto_submitted = _header(msg, 'Auto-Submitted').lower()
-    if auto_submitted and auto_submitted != 'no':
+    if _auto_submitted(msg) in _AUTO_REPLY_KINDS:
         return True
     if any(msg.get(name) is not None for name in ('X-Autoreply', 'X-Autorespond', 'X-Autoresponder')):
         return True
@@ -573,9 +724,12 @@ def compose_reply(
     seed = f'{original.message_id}|{now.isoformat()}'.encode()
     # Message-ID детерминирован: повтор того же запуска даёт тот же черновик, а не новый.
     msg['Message-ID'] = f'<draft-{hashlib.sha256(seed).hexdigest()[:24]}@{domain}>'
-    if not original.message_id_generated:
+    # Не-ASCII Message-ID (адреса EAI или просто враждебный ввод) не кодируется в 7bit и
+    # ронял сборку черновика — цепочку держат только ASCII-идентификаторы.
+    if not original.message_id_generated and original.message_id.isascii():
         msg['In-Reply-To'] = original.message_id
-        msg['References'] = ' '.join([*original.references[-(_REFERENCES_KEPT - 1) :], original.message_id])
+        chain = [ref for ref in original.references[-(_REFERENCES_KEPT - 1) :] if ref.isascii()]
+        msg['References'] = ' '.join([*chain, original.message_id])
     msg['X-Autostudio-Draft'] = 'inbox; review before sending'
     text = body.rstrip() + '\n\n' + _quoted(original, language, zone) + '\n'
     msg.set_content(text)

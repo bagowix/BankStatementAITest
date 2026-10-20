@@ -12,7 +12,7 @@ from typing import Final
 
 from autostudio.booking import callbacks as cb
 from autostudio.booking.config import BookingConfig
-from autostudio.booking.domain import Booking, BookingError, day_bounds, local_today
+from autostudio.booking.domain import Booking, BookingError, day_bounds, format_phone, local_today
 from autostudio.booking.messages import Button, Incoming, Outgoing
 from autostudio.booking.service import BookingService
 from autostudio.booking.texts import Texts
@@ -52,7 +52,7 @@ def render_agenda(
                 staff=texts.staff_name(booking.staff_id),
                 service=texts.service_name(booking.service_id, language),
                 name=booking.name,
-                phone=booking.phone,
+                phone=format_phone(booking.phone),
                 id=booking.id,
             )
             for booking in sorted(todays, key=lambda item: (item.start, item.staff_id))
@@ -148,7 +148,7 @@ class AdminDesk:
                 when=t.when(booking.start, lang),
                 staff=t.staff_name(booking.staff_id),
                 name=booking.name,
-                phone=booking.phone,
+                phone=format_phone(booking.phone),
             ),
             buttons=[[Button(t.get(lang, 'btn_admin_cancel', id=booking.id), cb.join(cb.ADMIN_CANCEL, booking.id))]],
         )

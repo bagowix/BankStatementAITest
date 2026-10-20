@@ -1,6 +1,8 @@
 # Образец конфига клиента пакета inbox: турагентство в Тбилиси.
 # Секретов здесь нет — только имена переменных окружения (см. .env.example).
 # Проверка: uv run autostudio inbox check examples/inbox/client.toml --skip-env
+# Клиента заводит `autostudio new-client <id> --package inbox`: замените demo-inbox на id клиента
+# и в csv_dir ниже.
 
 [client]
 id = "demo-inbox"
@@ -9,12 +11,16 @@ timezone = "Asia/Tbilisi"
 language = "en"            # язык таблицы и уведомлений владельцу: en или ru
 
 [notify]
-# telegram_chat_id = "123456789"           # чат владельца; токен — в AUTOSTUDIO_NOTIFY_BOT_TOKEN
-console = true
+# Чат владельца для сигналов о горячих лидах (Standard и выше). Как узнать chat_id — в
+# docs/packages/inbox.md, «Запуск в работу». Токен бота — в AUTOSTUDIO_NOTIFY_BOT_TOKEN.
+# telegram_chat_id = "123456789"
+console = false            # true — печатать сигналы в лог сервера (только для отладки)
 
 [sink]
 backend = "csv"            # "google" + spreadsheet_id для Google Sheets
-csv_dir = "var/out/demo-inbox"
+# В Docker пишется только том /data (каталог /app доступен лишь на чтение);
+# для локального запуска можно указать, например, "var/out/demo-inbox".
+csv_dir = "/data/demo-inbox/out"
 # spreadsheet_id = "1AbC...xyz"
 
 [inbox]
@@ -24,6 +30,8 @@ username_env = "INBOX_IMAP_USER"
 password_env = "INBOX_IMAP_PASSWORD"       # пароль ПРИЛОЖЕНИЯ, не основной
 folder = "INBOX"
 drafts_folder = "[Gmail]/Drafts"           # в Gmail; check --connect подскажет точное имя
+# Первый запуск заносит в таблицу письма за эти дни. Письма старше суток только
+# записываются — без черновиков и сигналов: на них, скорее всего, уже ответили.
 first_run_since_days = 3
 max_per_run = 50
 max_body_chars = 8000
@@ -49,33 +57,59 @@ facts = [
     "Office hours: Monday to Saturday, 10:00–19:00 Tbilisi time (GMT+4).",
 ]
 
+# Подпись и факты на других языках: черновик на русском заканчивается русской подписью и
+# опирается на русский текст фактов (те же цены — числа проверяются по всем языкам).
+[inbox.company.signatures]
+ru = """С уважением,
+команда Demo Tours
++995 32 200 00 00 · demotours.example"""
+
+[inbox.company.facts_by_language]
+ru = [
+    "Однодневные групповые туры из Тбилиси: Казбеги и церковь Гергети — 120 GEL с человека; винный тур по Кахетии с дегустацией — 140 GEL с человека; Мцхета и Джвари — 70 GEL с человека.",
+    "Пешеходная экскурсия по старому Тбилиси — 60 GEL с человека, ежедневно в 11:00, гид на английском или русском.",
+    "Индивидуальные туры для групп до 15 человек: от 450 GEL в день за машину, водителя и гида; многодневные программы считаем отдельно, когда знаем даты и состав группы.",
+    "Как забронировать: напишите дату, число участников и тур; подтверждаем наличие мест в течение одного рабочего дня, предоплата 20% картой или переводом.",
+    "Бесплатная отмена не позднее чем за 72 часа до тура; при более поздней отмене предоплата не возвращается. Жалобы менеджер рассматривает в течение 2 рабочих дней.",
+    "Трансфер из отеля в центре Тбилиси включён во все туры. Обед не включён, если не указано иное.",
+    "Офис работает с понедельника по субботу, 10:00–19:00 по Тбилиси (GMT+4).",
+]
+
 [[inbox.categories]]
 id = "booking_request"
+label = { en = "Booking request", ru = "Заявка на бронирование" }
 description = "A customer wants to book or reserve a specific tour or date, or asks to confirm a booking."
+lead = true
 notify = true
 draft_reply = true
 
 [[inbox.categories]]
 id = "lead"
+label = { en = "Tour inquiry", ru = "Запрос о туре" }
 description = "A potential customer asks about prices, availability, programmes or a quote, without a firm booking yet."
+lead = true
 notify = true
 draft_reply = true
 
 [[inbox.categories]]
 id = "support"
+label = { en = "Customer issue", ru = "Вопрос или жалоба клиента" }
 description = "An existing customer: a question about their booking, a change, a complaint or a refund request."
 draft_reply = true
 
 [[inbox.categories]]
 id = "invoice"
+label = { en = "Invoice", ru = "Счёт" }
 description = "Invoices, bills, payment requests or receipts from hotels, drivers and other partners."
 move_to = "Invoices"
 
 [[inbox.categories]]
 id = "marketing"
+label = { en = "Newsletter or promotion", ru = "Рассылка или реклама" }
 description = "Newsletters, promotions, cold sales pitches, SEO or advertising offers and other bulk mail."
 move_to = "Newsletters"
 
 [[inbox.categories]]
 id = "other"
+label = { en = "Other", ru = "Прочее" }
 description = "Anything else: personal, internal, partner chatter, service notifications, unclear messages."

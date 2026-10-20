@@ -10,7 +10,9 @@
   пересечения: два покупателя, нажавшие «Подтвердить» на один слот одновременно
   (или два процесса бота по ошибке), не получат оба подтверждение;
 - напоминание сначала «застолбляется» строкой в `reminders`, потом отправляется: после
-  перезапуска процесса или при двух процессах одно напоминание не уходит дважды.
+  перезапуска процесса или при двух процессах одно напоминание не уходит дважды;
+- лимит предстоящих записей одного покупателя проверяется в той же транзакции, что и
+  вставка: два быстрых «Подтвердить» не обойдут его.
 """
 
 import datetime as dt
@@ -34,6 +36,7 @@ from autostudio.booking.domain import (
     Slot,
     SlotTakenError,
     Source,
+    TooManyBookingsError,
 )
 
 _SCHEMA: Final = """
@@ -93,9 +96,13 @@ _FOR_CUSTOMER: Final = (
     "SELECT * FROM bookings WHERE customer = ? AND status IN ('pending', 'confirmed') AND start_at > ? "
     'ORDER BY start_at'
 )
+_ACTIVE_COUNT: Final = (
+    "SELECT COUNT(*) FROM bookings WHERE customer = ? AND status IN ('pending', 'confirmed') AND start_at > ?"
+)
+# Записи, внесённые администратором (`admin`), без напоминаний: чат записи — администратора.
 _REMINDER_CANDIDATES: Final = (
-    "SELECT * FROM bookings WHERE status IN ('pending', 'confirmed') AND start_at > ? AND start_at <= ? "
-    'ORDER BY start_at'
+    "SELECT * FROM bookings WHERE status IN ('pending', 'confirmed') AND source != 'admin' "
+    'AND start_at > ? AND start_at <= ? ORDER BY start_at'
 )
 
 _SENT: Final = 'SELECT minutes_before FROM reminders WHERE booking_id = ?'
@@ -134,8 +141,8 @@ def _moment(value: _Value) -> dt.datetime:
 
 def _source(value: _Value) -> Source:
     text = _text(value)
-    if text == 'ai':
-        return 'ai'
+    if text in ('ai', 'admin'):
+        return 'ai' if text == 'ai' else 'admin'
     return 'buttons'
 
 
@@ -254,27 +261,37 @@ class BookingStore:
         language: str,
         now: dt.datetime,
         buffer: dt.timedelta,
+        max_active: int | None = None,
     ) -> Booking:
         """Создаёт запись, если слот всё ещё свободен у этого мастера.
 
         Args:
             slot: Проверенный слот (мастер назначен).
-            customer: Покупатель; имя и телефон обязательны.
+            customer: Чат, который ведёт запись (ему — напоминания и отмена кнопками), и имя с
+                телефоном для записи; имя и телефон обязательны. При записи администратором
+                «с улицы» ключ — чат администратора, а имя и телефон — гостя.
             source: Откуда пришла запись.
             language: Язык покупателя.
             now: Текущий момент.
             buffer: Пауза между записями мастера.
+            max_active: Не больше стольких предстоящих записей у этого чата; None — без лимита.
 
         Returns:
             Созданная запись.
 
         Raises:
             SlotTakenError: Время у мастера уже занято.
+            TooManyBookingsError: Лимит предстоящих записей исчерпан.
             BookingError: Нет имени или телефона.
         """
         if not customer.name or not customer.phone:
             raise BookingError('для записи нужны имя и телефон')
+        chat = customer.key
         with self._write() as conn:
+            if max_active is not None:
+                row = conn.execute(_ACTIVE_COUNT, (chat, _ts(now))).fetchone()
+                if row is not None and int(row[0]) >= max_active:
+                    raise TooManyBookingsError(chat)
             if self._clash(conn, slot, buffer, ''):
                 raise SlotTakenError(f'{slot.staff_id} {_ts(slot.start)}')
             booking_id = new_booking_id()
@@ -286,7 +303,7 @@ class BookingStore:
                 staff_id=slot.staff_id,
                 start=slot.start,
                 end=slot.end,
-                customer=customer.key,
+                customer=chat,
                 name=customer.name,
                 phone=customer.phone,
                 status=BookingStatus.CONFIRMED,
@@ -431,6 +448,12 @@ class BookingStore:
         """Предстоящие активные записи покупателя."""
         return self._bookings(_FOR_CUSTOMER, (customer, _ts(now)))
 
+    def active_count(self, customer: str, now: dt.datetime) -> int:
+        """Сколько предстоящих активных записей у покупателя."""
+        rows = self._rows(_ACTIVE_COUNT, (customer, _ts(now)))
+        value = rows[0][0] if rows else 0
+        return value if isinstance(value, int) else 0
+
     def due_reminders(self, now: dt.datetime, offsets: Sequence[int]) -> list[DueReminder]:
         """Напоминания, которые пора отправить.
 
@@ -462,28 +485,37 @@ class BookingStore:
                 out.append(DueReminder(booking=booking, minutes_before=due[0], covers=tuple(due)))
         return out
 
-    def claim_reminder(self, reminder: DueReminder, now: dt.datetime) -> bool:
+    def claim_reminder(self, reminder: DueReminder, now: dt.datetime) -> Booking | None:
         """Застолбляет напоминание перед отправкой.
+
+        Запись перечитывается в той же транзакции: если её успели отменить или перенести
+        после `due_reminders` (покупатель нажал «Перенести», пока цикл отправлял другие
+        напоминания), отметка не ставится — иначе покупатель получил бы старое время, а
+        напоминание о новом считалось бы уже отправленным.
 
         Args:
             reminder: Что отправляем.
             now: Текущий момент.
 
         Returns:
-            True — можно отправлять; False — его уже застолбил другой процесс или запись отменили.
+            Актуальная запись — по ней и строится текст; None — напоминание уже застолбил
+            другой процесс, запись отменили или перенесли (новое время посчитает следующий проход).
         """
+        due = reminder.booking
         try:
             with self._write() as conn:
-                current = self._get(conn, reminder.booking.id)
+                current = self._get(conn, due.id)
                 if current is None or not current.active:
-                    return False
+                    return None
+                if (current.start, current.staff_id, current.scheduled_at) != (due.start, due.staff_id, due.scheduled_at):
+                    return None
                 for minutes in reminder.covers:
-                    if not conn.execute(_CLAIM, (reminder.booking.id, minutes, _ts(now))).rowcount:
+                    if not conn.execute(_CLAIM, (due.id, minutes, _ts(now))).rowcount:
                         # Другой процесс успел первым: исключение откатит всё вставленное выше.
-                        raise _AlreadyClaimedError(reminder.booking.id)
+                        raise _AlreadyClaimedError(due.id)
         except _AlreadyClaimedError:
-            return False
-        return True
+            return None
+        return current
 
     def release_reminder(self, reminder: DueReminder) -> None:
         """Снимает отметку, если отправка не удалась временно: напоминание уйдёт в следующий проход."""
@@ -498,6 +530,28 @@ class BookingStore:
             return None
         found, name, phone, language = rows[0][:4]
         return Customer(key=_text(found), name=_optional(name), phone=_optional(phone), language=_optional(language))
+
+    def find_customer(self, ref: str) -> str | None:
+        """Ключ покупателя по ключу целиком (`tg:123`) или по номеру чата без префикса (`123`).
+
+        Администратор набирает ключ руками в `/reply`: без префикса канала его всё равно
+        стоит понять, но только если такой покупатель один.
+
+        Args:
+            ref: Что набрал администратор.
+
+        Returns:
+            Ключ известного покупателя или None.
+        """
+        ref = ref.strip()
+        if not ref:
+            return None
+        if self._rows('SELECT key FROM customers WHERE key = ?', (ref,)):
+            return ref
+        if ':' in ref:
+            return None
+        rows = self._rows("SELECT key FROM customers WHERE substr(key, instr(key, ':') + 1) = ? LIMIT 2", (ref,))
+        return _text(rows[0][0]) if len(rows) == 1 else None
 
     def save_customer(self, customer: Customer, now: dt.datetime) -> None:
         """Запоминает покупателя (поля None не затирают известные)."""

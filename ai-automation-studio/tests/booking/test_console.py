@@ -12,7 +12,7 @@ def scripted(lines):
     return read
 
 
-def test__render__buttons_numbered_and_routing_labels():
+def test__render__buttons_and_recipients__numbered_and_labelled():
     text, buttons = render(Outgoing(text='Pick', buttons=[[Button('A', 'a'), Button('B', 'b')]]), 'console:op', 3)
     assert text == '🤖 Pick\n   [3] A   [4] B' and [b.data for b in buttons] == ['a', 'b']
     assert render(Outgoing(text='New booking', to=ADMINS), 'console:op', 1)[0].startswith('[→ администраторам]')
@@ -21,7 +21,7 @@ def test__render__buttons_numbered_and_routing_labels():
     assert '/share <телефон>' in contact and 'Cancel' in contact
 
 
-async def test__repl__book_through_numbers_and_share(app: App):
+async def test__repl__numbers_and_share__booking_created(app: App):
     out: list[str] = []
     lines = ['1', '1', '1', '2', '9', 'Anna', '/share 995555123456', '1', '/quit']
     handled = await repl(app.engine, read=scripted(lines), write=out.append, language='en')
@@ -32,7 +32,7 @@ async def test__repl__book_through_numbers_and_share(app: App):
     assert len(bookings) == 1 and bookings[0].start == local(WED, 12)
 
 
-async def test__repl__admin_mode_and_eof(app: App):
+async def test__repl__admin_mode_until_eof__agenda_shown(app: App):
     out: list[str] = []
     handled = await repl(app.engine, admin=True, read=scripted(['/week', '', '99']), write=out.append)
     assert handled == 3 and any('📋' in line for line in out)

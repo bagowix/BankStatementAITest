@@ -46,17 +46,28 @@ METRICS: Final[list[MetricSpec]] = [
     ),
 ]
 
+# Английские строки — отдельно для одного и для многих: «1 emails were blocked» в отчёте,
+# за который клиент платит, выглядит небрежно. Русские построены как «Название: число» —
+# так склонение не нужно вовсе.
 _TEXT: Final[dict[str, dict[str, str]]] = {
     'en': {
+        'leads_one': '1 new lead found in the inbox{urgent}.',
+        'leads_one_urgent': ' (urgent)',
         'leads': '{n} new leads found in the inbox, {high} of them urgent.',
+        'drafts_one': 'A reply draft was ready for the one email that needed an answer (100%).',
         'drafts': 'Reply drafts were ready for {drafts} of {needed} emails that needed an answer ({share}%).',
         'hours': 'About {hours} h of manual email work saved (estimate).',
+        'injections_one': '1 email with hidden instructions to the AI was blocked — no action was taken on it.',
         'injections': '{n} emails with hidden instructions to the AI were blocked — no action was taken on them.',
     },
     'ru': {
+        'leads_one': 'Найдено новых лидов: 1{urgent}.',
+        'leads_one_urgent': ', срочный',
         'leads': 'Найдено новых лидов: {n}, из них срочных: {high}.',
-        'drafts': 'Черновики ответа были готовы для {drafts} из {needed} писем, которые ждали ответа ({share}%).',
+        'drafts_one': 'Писем, ждавших ответа: 1; черновик был готов (100%).',
+        'drafts': 'Писем, ждавших ответа: {needed}; черновик был готов для {drafts} ({share}%).',
         'hours': 'Сэкономлено около {hours} ч ручной работы с почтой (оценка).',
+        'injections_one': 'Заблокировано писем со скрытыми инструкциями для ИИ: 1 — по нему ничего не делалось.',
         'injections': 'Заблокировано писем со скрытыми инструкциями для ИИ: {n} — по ним ничего не делалось.',
     },
 }
@@ -76,17 +87,24 @@ def highlights(events: Sequence[Event], language: str) -> list[str]:
     counts = Counter(event.kind for event in events)
     out: list[str] = []
     leads = [event for event in events if event.kind == 'inbox.lead_found']
-    if leads:
-        high = sum(event.payload.get('urgency') == 'high' for event in leads)
+    high = sum(event.payload.get('urgency') == 'high' for event in leads)
+    if len(leads) == 1:
+        out.append(t['leads_one'].format(urgent=t['leads_one_urgent'] if high else ''))
+    elif leads:
         out.append(t['leads'].format(n=len(leads), high=high))
     needed = sum(event.kind == 'inbox.triaged' and event.payload.get('needs_reply') == 'yes' for event in events)
     drafts = counts['inbox.draft_created']
-    if needed and drafts:
+    if needed == 1 and drafts:
+        out.append(t['drafts_one'])
+    elif needed and drafts:
         share = round(100 * min(drafts, needed) / needed)
         out.append(t['drafts'].format(drafts=drafts, needed=needed, share=share))
     minutes = sum(counts[spec.kind] * spec.minutes_saved for spec in METRICS)
     if minutes:
         out.append(t['hours'].format(hours=f'{minutes / 60:.1f}'))
-    if counts['inbox.injection_blocked']:
-        out.append(t['injections'].format(n=counts['inbox.injection_blocked']))
+    blocked = counts['inbox.injection_blocked']
+    if blocked == 1:
+        out.append(t['injections_one'])
+    elif blocked:
+        out.append(t['injections'].format(n=blocked))
     return out

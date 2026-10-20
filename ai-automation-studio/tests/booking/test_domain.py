@@ -14,6 +14,7 @@ from autostudio.booking.domain import (
     clean_phone,
     day_bounds,
     find_slot,
+    format_phone,
     free_slots,
     horizon_days,
     in_horizon,
@@ -196,7 +197,7 @@ def test__dst__interval_end_ambiguous_or_missing__earliest_reading_used():
     assert labels(free_slots(config, 'cut', SPRING, [], dt.datetime(2026, 3, 20, tzinfo=dt.UTC)), BERLIN) == ['01:00']
 
 
-def test__dst__working_hours_map_to_different_utc_before_and_after_switch():
+def test__dst__same_local_hours_across_switch__different_utc():
     config = berlin_config(fri=['09:00-18:00'], mon=['09:00-18:00'])
     now = dt.datetime(2026, 3, 20, tzinfo=dt.UTC)
     before = free_slots(config, 'cut', dt.date(2026, 3, 27), [], now)[0]
@@ -204,7 +205,7 @@ def test__dst__working_hours_map_to_different_utc_before_and_after_switch():
     assert before.start.hour == 8 and after.start.hour == 7  # 09:00 CET = 08:00Z, 09:00 CEST = 07:00Z
 
 
-def test__wall_to_utc__gap_none_and_midnight_next_day():
+def test__wall_to_utc__gap_and_midnight__none_and_next_day():
     zone = ZoneInfo(BERLIN)
     assert wall_to_utc(SPRING, 150, zone) is None
     assert boundary_to_utc(TUE, 1440, ZoneInfo('Asia/Tbilisi')) == dt.datetime(2026, 10, 20, 20, tzinfo=dt.UTC)
@@ -219,7 +220,7 @@ def test__find_slot__taken_or_off_grid__none(config):
     assert find_slot(config, 'haircut', 'giorgi', local(TUE, 13), [], START) is None  # внутри запаса времени
 
 
-def test__bookable_days__limit_start_day_and_full_day(config):
+def test__bookable_days__limit_start_day_staff__filtered(config):
     days = bookable_days(config, 'haircut', [], START, limit=3)
     assert days == [TUE, WED, dt.date(2026, 10, 22)]
     assert bookable_days(config, 'haircut', [], START, start_day=WED, limit=1) == [WED]
@@ -227,7 +228,7 @@ def test__bookable_days__limit_start_day_and_full_day(config):
     assert all(day.weekday() in (2, 3, 4, 5) for day in nika_days)
 
 
-def test__next_free_slots__window_and_limit(config):
+def test__next_free_slots__window_and_limit__matching_slots_in_order(config):
     after_five = next_free_slots(config, 'haircut', [], START, limit=3, window=TimeWindow(17 * 60, None))
     assert labels(after_five) == ['17:00', '17:15', '17:30']
     assert after_five[0].start.date() == TUE
@@ -236,7 +237,7 @@ def test__next_free_slots__window_and_limit(config):
     assert next_free_slots(config, 'haircut', [], START, limit=50, start_day=WED)[0].start == local(WED, 10)
 
 
-def test__nearest_slots__same_day_by_distance_then_next_days(config):
+def test__nearest_slots__taken_target__closest_same_day_first(config):
     taken = [booking(local(WED, 12), staff='giorgi')]
     near = nearest_slots(config, 'haircut', local(WED, 12), taken, START, limit=4, staff_id='giorgi')
     assert labels(near) == ['11:00', '11:15', '12:45', '13:00']
@@ -244,14 +245,14 @@ def test__nearest_slots__same_day_by_distance_then_next_days(config):
     assert len(late) == 3 and late == sorted(late, key=lambda s: s.start)
 
 
-def test__time_window__contains_and_exact():
+def test__time_window__bounds__inclusive_and_exact():
     assert TimeWindow(600, 600).exact and TimeWindow(600, 600).contains(600)
     assert not TimeWindow(600, 600).contains(615)
     assert TimeWindow(None, 720).contains(0) and not TimeWindow(1020, None).contains(1000)
     assert not TimeWindow(None, None).exact
 
 
-def test__is_open_at__hours_lunch_and_closed_dates(config):
+def test__is_open_at__lunch_night_closed_date__closed(config):
     assert is_open_at(config, local(TUE, 12, 30))
     assert not is_open_at(config, local(TUE, 14, 30))
     assert not is_open_at(config, local(TUE, 22, 40))
@@ -275,33 +276,43 @@ def test__is_open_at__hours_lunch_and_closed_dates(config):
         ('A.', None),
     ],
 )
-def test__clean_name__cases(raw, expected):
+def test__clean_name__inputs__normalized_or_rejected(raw, expected):
     assert clean_name(raw) == expected
 
 
 @pytest.mark.parametrize(
-    ('raw', 'international', 'expected'),
+    ('raw', 'region', 'shared', 'expected'),
     [
-        ('+995 555 12-34-56', False, '+995555123456'),
-        ('(555) 123 456', False, '555123456'),
-        ('995555123456', True, '+995555123456'),
-        ('12345', False, None),
-        ('+1234567890123456', False, None),
-        ('555 12+34', False, None),
-        ('call me', False, None),
-        ('', False, None),
+        ('+995 555 12-34-56', 'GE', False, '+995555123456'),
+        ('599 123 456', 'GE', False, '+995599123456'),
+        ('(555) 123 456', 'GE', False, '+995555123456'),
+        ('8 912 345 67 89', 'RU', False, '+79123456789'),
+        ('+49 30 12345678', 'GE', False, '+493012345678'),
+        ('995555123456', 'GE', True, '+995555123456'),
+        ('2 34 56 78', 'GE', False, None),  # неполный городской номер — опечатка
+        ('12345', 'GE', False, None),
+        ('+1234567890123456', 'GE', False, None),
+        ('555 12+34', 'GE', False, None),
+        ('call me', 'GE', False, None),
+        ('', 'GE', False, None),
+        ('1' * 40, 'GE', False, None),
     ],
 )
-def test__clean_phone__cases(raw, international, expected):
-    assert clean_phone(raw, international=international) == expected
+def test__clean_phone__inputs__normalized_or_rejected(raw, region, shared, expected):
+    assert clean_phone(raw, region=region, shared=shared) == expected
 
 
-def test__customer_complete__needs_name_and_phone():
+def test__format_phone__e164_and_legacy__readable_or_unchanged():
+    assert format_phone('+995599123456') == '+995 599 12 34 56'
+    assert format_phone('555123456') == '555123456'
+
+
+def test__customer_complete__missing_phone__incomplete():
     assert Customer(key='k', name='A', phone='1').complete
     assert not Customer(key='k', name='A').complete
 
 
-def test__helpers__minutes_until_and_day_bounds():
+def test__helpers__minutes_until_and_day_bounds__utc_values():
     assert minutes_until(START + dt.timedelta(hours=1), START) == 60
     start, end = day_bounds(TUE, ZoneInfo('Asia/Tbilisi'))
     assert start == dt.datetime(2026, 10, 19, 20, tzinfo=dt.UTC) and end - start == dt.timedelta(days=1)

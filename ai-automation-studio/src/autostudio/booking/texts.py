@@ -50,14 +50,17 @@ _EN: Final[dict[str, str]] = {
     'bad_name': 'Please send just your name, for example: Anna.',
     'ask_phone': "Thanks, {name}! What's your phone number? Tap the button below or type it.",
     'btn_share_phone': '📱 Share my number',
-    'bad_phone': "That doesn't look like a phone number. Example: +995 555 12 34 56",
+    'bad_phone': "That doesn't look like a phone number. Example: {example}",
     'got_contact': 'Got it ✅',
     'confirm': 'Please check your booking:\n• {service} — {price}\n• {when}\n• With {staff}\n• {name}, {phone}',
     'btn_confirm': '✅ Confirm',
     'btn_edit': '✏️ Change name or phone',
     'btn_abort': '✖️ Cancel',
-    'booked': (
-        "You're booked! ✅\n{service}, {when}, with {staff}.\nBooking #{id}. We'll send you a reminder. See you soon!"
+    'booked': "You're booked! ✅\n{service}, {when}, with {staff}.\nBooking #{id}. See you soon!",
+    'reminder_promise': "We'll send you a reminder before the visit.",
+    'too_many': (
+        'You already have {count} upcoming bookings — that is the most we can hold online. '
+        'To book another visit, cancel one in “My bookings” or contact us.'
     ),
     'already_booked': "You're already booked for this time: #{id}, {when}.",
     'slot_taken': 'Sorry, that time has just been taken. Nearest free times:',
@@ -89,6 +92,10 @@ _EN: Final[dict[str, str]] = {
     # Покупатель: вопросы и человек
     'ask_question': 'Sure — type your question.',
     'handoff': "Good question! I've passed it to our team — a person will reply here soon.",
+    'handoff_pending': "Thanks! We've already passed your message on — a person will reply here soon.",
+    'slow_down': "You're sending messages very quickly — please use the buttons below, or try again in a few minutes.",
+    'you_are_welcome': "You're welcome! See you soon 👋",
+    'hours_closed': 'closed',
     'human_prompt': "Write your message and I'll pass it to our team.",
     'human_sent': 'Thanks! Your message has been passed on — a person will reply here soon.',
     'not_understood': "Sorry, I didn't quite get that. Please use the buttons below.",
@@ -124,19 +131,28 @@ _EN: Final[dict[str, str]] = {
         'Cancel booking #{id}?\n{service} — {when}, {staff}\nCustomer: {name}, {phone}\nThe customer will be notified.'
     ),
     'btn_admin_cancel': 'Yes, cancel #{id}',
-    'admin_cancel_done': 'Booking #{id} cancelled; the customer has been notified.',
+    'admin_cancel_done': 'Booking #{id} cancelled.',
     'admin_not_found': 'Booking #{id} not found or already cancelled.',
     'admin_help': (
         'Admin commands:\n/today, /tomorrow, /week — schedule\n'
-        '/cancel_booking <id> — cancel a booking (the customer is notified)\n/reply <user> <text> — reply to a customer'
+        '/cancel_booking <id> — cancel a booking (the customer is notified)\n/reply <user> <text> — reply to a customer\n'
+        '📅 Book — book a walk-in or phone customer (the bot asks for their name and phone)'
     ),
-    'admin_reply_sent': 'Sent to {user}.',
+    'admin_reply_sent': 'Delivered to {user}.',
+    'admin_reply_failed': 'Not delivered to {user}: the customer has blocked the bot or the chat id is wrong.',
+    'admin_reply_unknown': 'No customer {user}. Copy the id from the notification, e.g. /reply tg:123456 <text>',
+    'admin_cancel_notified': 'The customer has been notified.',
+    'admin_cancel_not_notified': "Couldn't notify the customer in Telegram — please call them: {phone}",
+    'walkin_name': 'Booking a walk-in or phone customer: {slot}. What is the customer’s name?',
+    'walkin_phone': 'And the customer’s phone number?',
+    'walkin_booked': 'Booked ✅ #{id}: {name}, {service}, {when}, with {staff}. No reminder is sent for walk-in bookings.',
     'admin_usage_cancel': 'Usage: /cancel_booking <id>, e.g. /cancel_booking K7Q2MX',
     'admin_usage_reply': 'Usage: /reply <user> <text>',
     'actor_customer': 'the customer',
     'actor_admin': 'staff',
     'source_buttons': 'buttons',
     'source_ai': 'free-text message (AI)',
+    'source_admin': 'entered by staff',
     'action_created': 'created',
     'action_cancelled': 'cancelled',
     'action_rescheduled': 'rescheduled',
@@ -173,14 +189,17 @@ _RU: Final[dict[str, str]] = {
     'bad_name': 'Пожалуйста, напишите только имя, например: Анна.',
     'ask_phone': 'Спасибо, {name}! Ваш номер телефона? Нажмите кнопку ниже или напишите его.',
     'btn_share_phone': '📱 Отправить мой номер',
-    'bad_phone': 'Не похоже на номер телефона. Пример: +995 555 12 34 56',
+    'bad_phone': 'Не похоже на номер телефона. Пример: {example}',
     'got_contact': 'Принято ✅',
     'confirm': 'Проверьте, пожалуйста:\n• {service} — {price}\n• {when}\n• Специалист: {staff}\n• {name}, {phone}',
     'btn_confirm': '✅ Подтвердить',
     'btn_edit': '✏️ Изменить имя или телефон',
     'btn_abort': '✖️ Отмена',
-    'booked': (
-        'Вы записаны! ✅\n{service}, {when}, специалист: {staff}.\nЗапись №{id}. Мы пришлём напоминание. До встречи!'
+    'booked': 'Вы записаны! ✅\n{service}, {when}, специалист: {staff}.\nЗапись №{id}. До встречи!',
+    'reminder_promise': 'Перед визитом пришлём напоминание.',
+    'too_many': (
+        'У вас уже {count} предстоящих записей — больше онлайн не принимаем. '
+        'Чтобы записаться ещё, отмените одну в «Мои записи» или свяжитесь с нами.'
     ),
     'already_booked': 'Вы уже записаны на это время: №{id}, {when}.',
     'slot_taken': 'Увы, это время только что заняли. Ближайшее свободное:',
@@ -210,6 +229,10 @@ _RU: Final[dict[str, str]] = {
     'btn_manage': 'Изменить или отменить',
     'ask_question': 'Конечно — напишите ваш вопрос.',
     'handoff': 'Хороший вопрос! Передаём его администратору — вам ответят здесь в ближайшее время.',
+    'handoff_pending': 'Спасибо! Мы уже передали ваше сообщение — вам ответят здесь в ближайшее время.',
+    'slow_down': 'Слишком много сообщений подряд — воспользуйтесь кнопками ниже или напишите через несколько минут.',
+    'you_are_welcome': 'Пожалуйста! Ждём вас 👋',
+    'hours_closed': 'выходной',
     'human_prompt': 'Напишите сообщение — мы передадим его администратору.',
     'human_sent': 'Спасибо! Сообщение передано — вам ответят здесь в ближайшее время.',
     'not_understood': 'Извините, не удалось разобрать сообщение. Воспользуйтесь, пожалуйста, кнопками ниже.',
@@ -247,19 +270,28 @@ _RU: Final[dict[str, str]] = {
         'Отменить запись №{id}?\n{service} — {when}, {staff}\nКлиент: {name}, {phone}\nКлиент получит уведомление.'
     ),
     'btn_admin_cancel': 'Да, отменить №{id}',
-    'admin_cancel_done': 'Запись №{id} отменена, клиент уведомлён.',
+    'admin_cancel_done': 'Запись №{id} отменена.',
     'admin_not_found': 'Запись №{id} не найдена или уже отменена.',
     'admin_help': (
         'Команды администратора:\n/today, /tomorrow, /week — расписание\n'
-        '/cancel_booking <id> — отменить запись (клиент получит уведомление)\n/reply <user> <текст> — ответить клиенту'
+        '/cancel_booking <id> — отменить запись (клиент получит уведомление)\n/reply <user> <текст> — ответить клиенту\n'
+        '📅 Записаться — запись клиента с улицы или по телефону (бот спросит его имя и телефон)'
     ),
-    'admin_reply_sent': 'Отправлено: {user}.',
+    'admin_reply_sent': 'Доставлено: {user}.',
+    'admin_reply_failed': 'Не доставлено: {user} — клиент заблокировал бота или id чата неверный.',
+    'admin_reply_unknown': 'Клиент {user} не найден. Скопируйте id из уведомления, например /reply tg:123456 <текст>',
+    'admin_cancel_notified': 'Клиент уведомлён.',
+    'admin_cancel_not_notified': 'Не удалось уведомить клиента в Telegram — позвоните ему: {phone}',
+    'walkin_name': 'Запись клиента с улицы или по телефону: {slot}. Как зовут клиента?',
+    'walkin_phone': 'И телефон клиента?',
+    'walkin_booked': 'Записали ✅ №{id}: {name}, {service}, {when}, специалист: {staff}. Напоминание гостю не отправляется.',
     'admin_usage_cancel': 'Формат: /cancel_booking <id>, например /cancel_booking K7Q2MX',
     'admin_usage_reply': 'Формат: /reply <user> <текст>',
     'actor_customer': 'клиентом',
     'actor_admin': 'администратором',
     'source_buttons': 'кнопки',
     'source_ai': 'сообщение в свободной форме (ИИ)',
+    'source_admin': 'внёс администратор',
     'action_created': 'создана',
     'action_cancelled': 'отменена',
     'action_rescheduled': 'перенесена',

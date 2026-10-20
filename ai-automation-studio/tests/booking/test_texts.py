@@ -22,7 +22,7 @@ def test__default_texts__en_and_ru__same_keys_and_placeholders():
     assert len(SCHEDULE_HEADER['en']) == len(SCHEDULE_HEADER['ru'])
 
 
-def test__customer_texts__short_enough_for_a_phone_screen():
+def test__default_texts__length__fits_phone_screen():
     too_long = [key for lang in DEFAULT_TEXTS for key, text in DEFAULT_TEXTS[lang].items() if len(text) > 260]
     assert too_long == []
 
@@ -30,7 +30,7 @@ def test__customer_texts__short_enough_for_a_phone_screen():
 @pytest.mark.parametrize(
     ('amount', 'expected'), [('40', '40 GEL'), ('25.50', '25.50 GEL'), ('0.5', '0.50 GEL'), ('1299.00', '1299 GEL')]
 )
-def test__money__decimal_formatting(amount, expected):
+def test__money__decimal__formatted(amount, expected):
     assert Texts.money(Decimal(amount), 'GEL') == expected
 
 
@@ -38,7 +38,7 @@ def test__money__decimal_formatting(amount, expected):
     ('minutes', 'lang', 'expected'),
     [(45, 'en', '45 min'), (60, 'en', '1 h'), (90, 'en', '1 h 30 min'), (120, 'ru', '2 ч'), (75, 'ru', '1 ч 15 мин')],
 )
-def test__duration__labels(minutes, lang, expected):
+def test__duration__minutes__labels(minutes, lang, expected):
     assert Texts.duration(minutes, lang) == expected
 
 
@@ -46,16 +46,16 @@ def test__duration__labels(minutes, lang, expected):
     ('count', 'expected'),
     [(1, '1 день'), (2, '2 дня'), (5, '5 дней'), (11, '11 дней'), (14, '14 дней'), (21, '21 день')],
 )
-def test__days__russian_plural(count, expected):
+def test__days__russian__plural_forms(count, expected):
     assert Texts.days(count, 'ru') == expected
 
 
-def test__days__english_plural():
+def test__days__english__plural_forms():
     assert Texts.days(1, 'en') == '1 day' and Texts.days(14, 'en') == '14 days'
     assert plural_ru(112, ('a', 'b', 'c')) == 'c' and plural_ru(102, ('a', 'b', 'c')) == 'b'
 
 
-def test__dates__localized_labels(texts):
+def test__dates__languages__localized_labels(texts):
     assert texts.date(WED, 'en') == 'Wed 21 Oct'
     assert texts.date(WED, 'ru') == 'ср, 21 окт'
     assert texts.date(WED, 'ka') == 'Wed 21 Oct'
@@ -66,7 +66,7 @@ def test__dates__localized_labels(texts):
     assert texts.time(START) == '12:30'
 
 
-def test__resolve_language__telegram_codes(texts):
+def test__resolve_language__telegram_codes__supported_or_default(texts):
     assert texts.resolve_language('ru-RU') == 'ru'
     assert texts.resolve_language('EN') == 'en'
     assert texts.resolve_language('de') == 'en'
@@ -75,14 +75,14 @@ def test__resolve_language__telegram_codes(texts):
     assert Texts(ru_only.booking, ru_only.client.zone).resolve_language('en') == 'ru'
 
 
-def test__get__override_and_unknown_language_falls_back(config):
+def test__get__override_and_unknown_language__applied_and_fallback(config):
     custom = make_config(texts={'ru': {'booked': 'Записали! №{id}'}})
     texts = Texts(custom.booking, custom.client.zone)
     assert texts.get('ru', 'booked', id='X1', service='', when='', staff='') == 'Записали! №X1'
     assert texts.get('ka', 'ok_short') == 'OK'
 
 
-def test__names__unknown_ids_fall_back_to_id(texts):
+def test__names__unknown_ids__fall_back_to_id(texts):
     assert texts.service_name('haircut', 'ru') == 'Стрижка'
     assert texts.service_name('removed', 'ru') == 'removed'
     assert texts.staff_name('nika') == 'Nika' and texts.staff_name('gone') == 'gone'

@@ -10,9 +10,9 @@ from collections.abc import Callable, Sequence
 from typing import Final
 
 from autostudio.booking import callbacks as cb
-from autostudio.booking.callbacks import SlotRef
+from autostudio.booking.callbacks import RefSource, SlotRef
 from autostudio.booking.config import BookingConfig, Service
-from autostudio.booking.domain import Booking, Customer, Slot, Source
+from autostudio.booking.domain import Booking, Customer, Slot, example_phone, format_phone
 from autostudio.booking.messages import ADMINS, Button, Outgoing
 from autostudio.booking.texts import Texts
 
@@ -202,7 +202,7 @@ class Views:
         ]
         return chunk(buttons, 2)
 
-    def slot_ref_data(self, action: str, source: Source, staff_id: str | None) -> Callable[[Slot], str]:
+    def slot_ref_data(self, action: str, source: RefSource, staff_id: str | None) -> Callable[[Slot], str]:
         """Фабрика данных кнопок слота: мастер `None` остаётся «любым» до подтверждения."""
 
         def build(slot: Slot) -> str:
@@ -235,6 +235,21 @@ class Views:
             keyboard=[self._t(language, 'btn_abort')],
         )
 
+    def bad_phone(self, language: str) -> Outgoing:
+        """Подсказка с примером номера страны клиента (`phone_region`)."""
+        return Outgoing(text=self._t(language, 'bad_phone', example=example_phone(self._config.booking.phone_region)))
+
+    def ask_walkin_name(self, slot: Slot, language: str) -> Outgoing:
+        """Запись администратором «с улицы»: имя гостя, без кнопки «записать как <имя из Telegram>»."""
+        text = self._t(language, 'walkin_name', slot=self._texts.when(slot.start, language))
+        return Outgoing(text=text, buttons=[[Button(self._t(language, 'btn_abort'), cb.ABORT)]])
+
+    def ask_walkin_phone(self, language: str) -> Outgoing:
+        """Телефон гостя: без «Отправить мой номер» — это был бы номер администратора."""
+        return Outgoing(
+            text=self._t(language, 'walkin_phone'), buttons=[[Button(self._t(language, 'btn_abort'), cb.ABORT)]]
+        )
+
     def confirm(self, ref: SlotRef, slot: Slot, customer: Customer, language: str) -> Outgoing:
         """Проверка перед записью: что, когда, к кому, на кого."""
         texts = self._texts
@@ -248,7 +263,7 @@ class Views:
             when=texts.when(slot.start, language),
             staff=texts.staff_name(slot.staff_id),
             name=customer.name or '',
-            phone=customer.phone or '',
+            phone=format_phone(customer.phone or ''),
         )
         rows = [
             [Button(self._t(language, 'btn_confirm'), cb.slot_data(cb.CONFIRM, ref))],
@@ -257,19 +272,30 @@ class Views:
         ]
         return Outgoing(text=text, buttons=rows)
 
-    def booked(self, booking: Booking, language: str) -> Outgoing:
-        """Запись создана."""
+    def booked(self, booking: Booking, language: str, *, remind: bool) -> Outgoing:
+        """Запись создана; напоминание обещается, только если оно действительно придёт."""
         texts = self._texts
+        key = 'walkin_booked' if booking.source == 'admin' else 'booked'
         text = self._t(
             language,
-            'booked',
+            key,
             service=texts.service_name(booking.service_id, language),
             when=texts.when(booking.start, language),
             staff=texts.staff_name(booking.staff_id),
             id=booking.id,
+            name=booking.name,
         )
+        promise = self._t(language, 'reminder_promise') if remind else ''
+        if promise:
+            text = f'{text}\n{promise}'
         rows = [[Button(self._t(language, 'btn_my'), cb.MY), self.menu_button(language)]]
         return Outgoing(text=text, buttons=rows)
+
+    def too_many(self, count: int, language: str) -> list[Outgoing]:
+        """Лимит предстоящих записей покупателя исчерпан."""
+        text = self._with_phone(self._t(language, 'too_many', count=count), language)
+        rows = [[Button(self._t(language, 'btn_my'), cb.MY), self.menu_button(language)]]
+        return [Outgoing(text=text, buttons=rows)]
 
     def my_bookings(self, bookings: Sequence[Booking], language: str, intro_key: str = 'my_list') -> list[Outgoing]:
         """Список предстоящих записей покупателя (только его собственных)."""
@@ -326,7 +352,7 @@ class Views:
                 when=texts.when(booking.start, lang),
                 staff=texts.staff_name(booking.staff_id),
                 name=booking.name,
-                phone=booking.phone,
+                phone=format_phone(booking.phone),
                 source=self._t(lang, f'source_{booking.source}'),
             ),
         )
@@ -345,7 +371,7 @@ class Views:
                 when=texts.when(booking.start, lang),
                 staff=texts.staff_name(booking.staff_id),
                 name=booking.name,
-                phone=booking.phone,
+                phone=format_phone(booking.phone),
             ),
         )
 
@@ -364,6 +390,6 @@ class Views:
                 service=texts.service_name(new.service_id, lang),
                 staff=texts.staff_name(new.staff_id),
                 name=new.name,
-                phone=new.phone,
+                phone=format_phone(new.phone),
             ),
         )

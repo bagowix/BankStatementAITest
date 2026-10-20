@@ -10,17 +10,18 @@
 
 import datetime as dt
 from collections.abc import Sequence
-from typing import Final
+from typing import Final, Literal
 
 import msgspec
 
-from autostudio.booking.domain import Source
+# Откуда покупатель пришёл к слоту; `admin` в кнопки не попадает — его ставит движок.
+type RefSource = Literal['buttons', 'ai']
 
 ANY_STAFF: Final = '_'
 _TS_FORMAT: Final = '%Y%m%d%H%M'
 _DAY_FORMAT: Final = '%Y%m%d'
-_SOURCES: Final[dict[str, Source]] = {'b': 'buttons', 'a': 'ai'}
-_SOURCE_CODES: Final[dict[Source, str]] = {'buttons': 'b', 'ai': 'a'}
+_SOURCES: Final[dict[str, RefSource]] = {'b': 'buttons', 'a': 'ai'}
+_SOURCE_CODES: Final[dict[RefSource, str]] = {'buttons': 'b', 'ai': 'a'}
 
 # Коды действий. Короткие, потому что лимит 64 байта делят id услуги (до 24) и мастера (до 16).
 MENU: Final = 'm'
@@ -59,7 +60,7 @@ class SlotRef(msgspec.Struct, frozen=True, kw_only=True):
         start: Начало, UTC.
     """
 
-    source: Source
+    source: RefSource
     service_id: str
     staff_id: str | None
     start: dt.datetime

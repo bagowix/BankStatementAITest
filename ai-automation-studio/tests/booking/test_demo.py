@@ -8,7 +8,7 @@ from autostudio.errors import ConfigError
 from autostudio.registry import PACKAGES, demo_for, highlights_for, metrics_for
 
 
-async def test__run_demo__full_offline_scenario(tmp_path):
+async def test__run_demo__offline__full_scenario_and_files(tmp_path):
     summary = await run_demo(tmp_path)
     assert 'записей: 3 (из свободного текста: 1), отмен: 1' in summary
     assert 'ответов из FAQ: 1, передано человеку: 1' in summary
@@ -27,14 +27,14 @@ async def test__run_demo__full_offline_scenario(tmp_path):
     assert len((tmp_path / 'Schedule.csv').read_text(encoding='utf-8').splitlines()) == 3
 
 
-async def test__run_demo__repeatable(tmp_path):
+async def test__run_demo__twice__same_summary(tmp_path):
     first = await run_demo(tmp_path)
     second = await run_demo(tmp_path)
     strip = [line for line in first.splitlines() if 'файлы' not in line]
     assert strip == [line for line in second.splitlines() if 'файлы' not in line]
 
 
-def test__registry__booking_entries_resolve():
+def test__registry__booking_entry__all_paths_resolve():
     info = PACKAGES['booking']
     assert metrics_for(info) and highlights_for(info) is not None and demo_for(info) is run_demo
     assert (Path(__file__).resolve().parents[2] / info.example).exists()

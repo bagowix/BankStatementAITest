@@ -8,7 +8,11 @@
 - shop-c.example — голый HTML, где рядом стоят старая и новая цена: читает только
   селектор оператора; robots.txt закрывает раздел `/private/` — ссылка пропускается;
 - день 2: цены падают, конкурент становится дешевле клиента, товар кончается, а Shop C
-  меняет вёрстку — селектор ломается, цена берётся из разметки, оператор узнаёт сразу.
+  меняет вёрстку — селектор ломается, цена берётся из разметки, оператор узнаёт сразу;
+- в конце — месячный отчёт клиенту, собранный из журнала событий этих двух дней.
+
+Ступень модели в демо включена здесь же (в образце конфига она выключена: это Premium),
+а «моделью» работает FakeLLM — её ответ проходит ту же проверку цитаты, что и ответ ИИ.
 
 Паузы между запросами настоящие по смыслу, но мгновенные по времени (подменённый
 sleep), DNS — словарь: домены `.example` резолвятся в публичный адрес и до сети не доходят.
@@ -17,7 +21,7 @@ sleep), DNS — словарь: домены `.example` резолвятся в 
 import csv
 import datetime as dt
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
@@ -29,14 +33,16 @@ from autostudio.clientconf import NotifyConfig, SinkConfig, load_client_config
 from autostudio.clock import FrozenClock
 from autostudio.errors import ConfigError
 from autostudio.events import EventLog
-from autostudio.notify import ConsoleNotifier
+from autostudio.notify import ConsoleNotifier, Notifier
 from autostudio.prices import texts
 from autostudio.prices.config import PricesConfig
 from autostudio.prices.fetch import FetchSettings, PoliteFetcher
 from autostudio.prices.heuristics import make_fake_llm
-from autostudio.prices.metrics import highlights
-from autostudio.prices.monitor import Fetcher, PricesDeps, RunResult, run_once
+from autostudio.prices.metrics import METRICS, highlights
+from autostudio.prices.monitor import PACKAGE, Fetcher, PricesDeps, RunResult, run_once
 from autostudio.prices.store import PriceStore
+from autostudio.report import build_report, month_bounds, render_markdown
+from autostudio.runlog import Heartbeat, supervised_run
 from autostudio.sinks import CsvSink
 
 EXAMPLE: Final = Path(__file__).resolve().parents[3] / 'examples' / 'prices' / 'client.toml'
@@ -45,6 +51,7 @@ DAY_ONE: Final = dt.datetime(2026, 10, 20, 6, 0, tzinfo=dt.UTC)
 # запрос перехватывает MockTransport.
 _PUBLIC_IP: Final = '93.184.215.14'
 _HTML: Final = {'content-type': 'text/html; charset=utf-8'}
+_CELL: Final = 28
 
 _ROBOTS: Final[dict[str, str]] = {
     'shop-b.example': 'User-agent: *\nAllow: /\n',
@@ -175,13 +182,28 @@ async def _no_sleep(seconds: float) -> None:
     return None
 
 
+class _OperatorConsole:
+    """Канал оператора в демо: печатается с пометкой, что клиент этого не видит."""
+
+    def __init__(self, inner: Notifier) -> None:
+        self._inner = inner
+
+    async def send(self, text: str) -> None:
+        await self._inner.send(f'[operator channel, internal — the client does not see this]\n{text}')
+
+
 def demo_config(out_dir: Path) -> PricesConfig:
-    """Конфиг из `examples/prices/client.toml` с выгрузкой в `out_dir` и уведомлениями в консоль."""
+    """Конфиг из `examples/prices/client.toml` с выгрузкой в `out_dir`, уведомлениями в консоль
+    и включённой ступенью модели (в демо её играет FakeLLM).
+    """
     if not EXAMPLE.exists():
         raise ConfigError(f'нет образца конфига {EXAMPLE}: демо запускается из клона репозитория')
     config = load_client_config(EXAMPLE, PricesConfig)
     return msgspec.structs.replace(
-        config, sink=SinkConfig(backend='csv', csv_dir=out_dir), notify=NotifyConfig(console=True)
+        config,
+        sink=SinkConfig(backend='csv', csv_dir=out_dir),
+        notify=NotifyConfig(console=True),
+        prices=msgspec.structs.replace(config.prices, llm_fallback=True),
     )
 
 
@@ -192,6 +214,7 @@ def _reset(out_dir: Path, state: Path, language: str) -> CsvSink:
         sink.path_for(tab).unlink(missing_ok=True)
     for name in ('prices.sqlite', 'events.sqlite'):
         (state / name).unlink(missing_ok=True)
+    (out_dir / 'report.md').unlink(missing_ok=True)
     return sink
 
 
@@ -212,12 +235,16 @@ def _table(sink: CsvSink, tab: str) -> list[str]:
     with sink.path_for(tab).open(encoding='utf-8', newline='') as fh:
         rows = list(csv.reader(fh))
     picked = [[row[0], row[2], row[3], row[5], row[8], row[10]] for row in rows]
-    widths = [min(max(len(row[i]) for row in picked), 28) for i in range(len(picked[0]))]
-    return ['  ' + ' | '.join(cell[:28].ljust(widths[i]) for i, cell in enumerate(row)).rstrip() for row in picked]
+    # Узкие колонки обрезаются, а «Статус» — последний и печатается целиком: его и читают.
+    widths = [min(max(len(row[i]) for row in picked), _CELL) for i in range(len(picked[0]) - 1)]
+    return [
+        '  ' + ' | '.join([*(cell[:_CELL].ljust(widths[i]) for i, cell in enumerate(row[:-1])), row[-1]]).rstrip()
+        for row in picked
+    ]
 
 
 @contextmanager
-def _quiet(*names: str) -> Iterator[None]:
+def _quiet(*names: str) -> Generator[None]:
     # В демо видны уведомления, а не построчный лог каждого HTTP-запроса; уровни возвращаются.
     loggers = [logging.getLogger(name) for name in names]
     levels = [logger.level for logger in loggers]
@@ -265,23 +292,49 @@ async def _run_demo(out_dir: Path) -> str:
             events=EventLog(state / 'events.sqlite'),
             sink=sink,
             notifier=ConsoleNotifier(),
-            operator=ConsoleNotifier(),
+            operator=_OperatorConsole(ConsoleNotifier()),
             llm=llm,
         )
+        # Как в боевом запуске: проход под присмотром — в журнал пишется и надёжность для отчёта.
+        heartbeat = Heartbeat(http, None)
         for day in (1, 2):
             web.day = day
             when = texts.show_time(clock(), config.client.zone)
             print(f'\n— day {day}, {when} —', flush=True)
-            result = await run_once(config, deps, clock())
+            result = await supervised_run(
+                package=PACKAGE,
+                job=lambda: run_once(config, deps, clock()),
+                events=deps.events,
+                heartbeat=heartbeat,
+                operator=None,
+                client_name=config.client.name,
+                now=clock,
+            )
+            if result is None:
+                raise ConfigError(f'демо: проход дня {day} завершился ошибкой (см. лог)')
             lines.append(_describe(day, when, result, total))
             clock.advance(dt.timedelta(days=1))
     tabs = texts.TABS[language]
-    lines.append(f'Model calls: {len(llm.calls)}, each answer accepted only with a quote found on the page.')
+    lines.append(f'Model calls: {len(llm.calls)} (FakeLLM), each answer accepted only with a quote found on the page.')
     lines.append(f'HTTP requests: {len(web.requests)} (robots.txt once per site per run; per-site pauses simulated).')
     lines.append(f'"{tabs["now"]}" after day 2:')
     lines.extend(_table(sink, tabs['now']))
     lines.append('Sheet tabs: ' + ', '.join(str(sink.path_for(tab)) for tab in tabs.values()))
-    events = deps.events.between(DAY_ONE - dt.timedelta(days=1), clock() + dt.timedelta(days=1))
-    for item in highlights(events, language):
-        lines.append(f'Report highlight: {item}')
+    start, end = month_bounds(DAY_ONE.astimezone(config.client.zone).date(), config.client.zone)
+    events = deps.events.between(start, end)
+    month_highlights = highlights([event for event in events if event.package == PACKAGE], language)
+    lines.extend(f'Report highlight: {item}' for item in month_highlights)
+    report = render_markdown(
+        build_report(
+            client=config.client.name,
+            month=start.date(),
+            language=language,
+            events=events,
+            specs=METRICS,
+            highlights=month_highlights,
+        )
+    )
+    path = out_dir / 'report.md'
+    path.write_text(report, encoding='utf-8')
+    lines.extend(['', f'Monthly report for the client ({path}):', report.rstrip()])
     return '\n'.join(lines)

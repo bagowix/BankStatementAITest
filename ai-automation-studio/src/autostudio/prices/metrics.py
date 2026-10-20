@@ -43,15 +43,19 @@ _TEXT: Final[dict[str, dict[str, str]]] = {
     'en': {
         'changes': 'Price changes caught: {n}',
         'aggressive': 'Most active competitor: {name} — price cuts: {cuts}, cheaper than you: {under} times',
-        'expensive': 'You were the most expensive for: {items}',
+        'expensive': 'Where you were the most expensive: {items}',
+        'expensive_item': '{product} (the cheapest competitor is {pct}% below you)',
     },
     'ru': {
         'changes': 'Замечено изменений цен: {n}',
         'aggressive': 'Самый активный конкурент: {name} — снижений цены: {cuts}, дешевле вас: {under} раз(а)',
-        'expensive': 'Вы были дороже всех по: {items}',
+        'expensive': 'Где вы были дороже всех: {items}',
+        'expensive_item': '{product} (самый дешёвый конкурент на {pct}% ниже вас)',
     },
 }
 _TOP: Final = 3
+# «Дороже всех» по одному конкуренту — это просто «дороже конкурента»; вывод — от двух.
+_MIN_COMPETITORS: Final = 2
 
 
 def _decimal(value: str | None) -> Decimal | None:
@@ -102,9 +106,17 @@ def highlights(events: Sequence[Event], language: str) -> list[str]:
     by_product: dict[str, list[Decimal]] = {}
     for (product, _), diff in latest.items():
         by_product.setdefault(product, []).append(diff)
-    # Дороже всех — когда каждый сравнимый конкурент дешевле; сортировка — по самому дешёвому.
-    expensive = sorted((min(diffs), product) for product, diffs in by_product.items() if max(diffs) < 0)
+    # Дороже всех — когда каждый сравнимый конкурент (а их не меньше двух) дешевле; сортировка —
+    # по самому дешёвому конкуренту.
+    expensive = sorted(
+        (min(diffs), product)
+        for product, diffs in by_product.items()
+        if len(diffs) >= _MIN_COMPETITORS and max(diffs) < 0
+    )
     if expensive:
-        items = ', '.join(f'{product} ({texts.show_pct(diff)}%)' for diff, product in expensive[:_TOP])
+        items = ', '.join(
+            t['expensive_item'].format(product=product, pct=texts.plain_pct(-diff, language))
+            for diff, product in expensive[:_TOP]
+        )
         out.append(t['expensive'].format(items=items))
     return out

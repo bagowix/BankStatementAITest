@@ -133,6 +133,7 @@ FAILURES: Final[dict[str, dict[str, str]]] = {
         'unreadable': 'page could not be read',
         'no_price': 'price not found on the page',
         'internal_error': 'check failed',
+        'later': 'not checked this time — will be checked on the next run',
     },
     'ru': {
         'robots_disallowed': 'пропущено: сайт просит роботов не заходить на эту страницу',
@@ -143,6 +144,7 @@ FAILURES: Final[dict[str, dict[str, str]]] = {
         'unreadable': 'страницу не удалось прочитать',
         'no_price': 'цена на странице не найдена',
         'internal_error': 'проверка не удалась',
+        'later': 'в этот раз не проверено — проверим в следующий раз',
     },
 }
 
@@ -155,6 +157,9 @@ _FAILURE_GROUPS: Final[dict[str, str]] = {
     'too_large': 'unreadable',
     'not_html': 'unreadable',
     'too_many_redirects': 'unreadable',
+    # Бюджет модели на проход и срок прохода кончились — со страницей всё в порядке.
+    'llm_budget': 'later',
+    'run_timeout': 'later',
 }
 
 STATUS: Final[dict[str, dict[str, str]]] = {
@@ -165,6 +170,9 @@ STATUS: Final[dict[str, dict[str, str]]] = {
         'free': 'ok: free',
         'stale': '{reason}; showing the last known price',
         'na_currency': 'n/a: {theirs} ≠ {yours}',
+        'jump': 'needs a check: unusual price jump, re-checking',
+        'ambiguous': 'needs a check: unclear price format on the site',
+        'multiple': 'needs a check: several products on the page',
     },
     'ru': {
         'ok': 'ок',
@@ -173,6 +181,9 @@ STATUS: Final[dict[str, dict[str, str]]] = {
         'free': 'ок: бесплатно',
         'stale': '{reason}; показана последняя известная цена',
         'na_currency': 'н/д: {theirs} ≠ {yours}',
+        'jump': 'нужна проверка: необычный скачок цены, перепроверяем',
+        'ambiguous': 'нужна проверка: формат цены на сайте неоднозначен',
+        'multiple': 'нужна проверка: на странице несколько товаров',
     },
 }
 
@@ -255,12 +266,19 @@ def show_amount(amount: Decimal, language: str) -> str:
     return text
 
 
-def show_pct(value: Decimal) -> str:
-    """Процент для сообщения со знаком: «−5.5», «+3.2»."""
+def plain_pct(value: Decimal, language: str = 'en') -> str:
+    """Процент для сообщения без знака, с десятичным знаком языка клиента: «6.7» / «6,7»."""
+    text = f'{value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP):.1f}'
+    return text.replace('.', ',') if lang(language) == 'ru' else text
+
+
+def show_pct(value: Decimal, language: str = 'en') -> str:
+    """Процент для сообщения со знаком: «−5.5», «+3.2» (по-русски — «−5,5»: как и у сумм)."""
     rounded = value.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)
+    text = plain_pct(abs(rounded), language)
     if rounded > 0:
-        return f'+{rounded:.1f}'
-    return f'{rounded:.1f}'.replace('-', '−')
+        return f'+{text}'
+    return f'−{text}' if rounded < 0 else text
 
 
 def show_time(moment: dt.datetime, zone: dt.tzinfo) -> str:

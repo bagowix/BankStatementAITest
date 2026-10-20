@@ -108,6 +108,8 @@ def test__weekly_hours__for_weekday__monday_is_zero():
         ({'state_ttl_min': 1}, 'state_ttl_min'),
         ({'reminders_min_before': [120, 120]}, 'reminders_min_before'),
         ({'reminders_min_before': [0]}, 'reminders_min_before'),
+        ({'phone_region': 'XX'}, 'phone_region'),
+        ({'phone_region': 'ge'}, 'phone_region'),
         ({'texts': {'en': {'nonexistent': 'x'}}}, 'нет такого текста'),
         ({'texts': {'ka': {'booked': 'x'}}}, 'не поддерживается'),
         ({'texts': {'en': {'booked': 'Done {nmae}'}}}, 'nmae'),
@@ -145,7 +147,7 @@ def test__service__invalid__config_error(service, message):
         make_config(services=[service])
 
 
-def test__duration_not_multiple_of_step__allowed():
+def test__service__duration_not_multiple_of_step__allowed():
     config = make_config(services=[{'id': 'cut', 'name': {'en': 'Cut'}, 'duration_min': 40, 'price': '10'}])
     assert config.booking.services[0].duration_min == 40
 
@@ -195,7 +197,7 @@ def test__owner_language__unsupported_client_language__english():
     assert make_config(client={'language': 'ru'}).owner_language == 'ru'
 
 
-def test__pick_text__fallbacks():
+def test__pick_text__missing_language__fallbacks():
     assert pick_text({'en': 'Hi', 'ru': 'Привет'}, 'ru', 'en') == 'Привет'
     assert pick_text({'en': 'Hi'}, 'ru', 'en') == 'Hi'
     assert pick_text({'ka': 'გამარჯობა'}, 'ru', 'en') == 'გამარჯობა'

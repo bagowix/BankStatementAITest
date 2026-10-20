@@ -3,23 +3,24 @@
 import asyncio
 import datetime as dt
 import os
+import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
 import cyclopts
 from dishka import make_async_container
 
-from autostudio.clientconf import load_client_config, require_env
+from autostudio.clientconf import client_data_dir, load_client_config, require_env
 from autostudio.clock import Clock, system_now
 from autostudio.errors import ConfigError
 from autostudio.inbox.config import InboxConfig
 from autostudio.inbox.demo import run_demo
 from autostudio.inbox.errors import InboxError, MailboxError
-from autostudio.inbox.heuristics import make_fake_llm
 from autostudio.inbox.imap import ImapMailBox
 from autostudio.inbox.pipeline import DryRow, InboxDeps, RunResult, dry_run, run_once
-from autostudio.inbox.providers import InboxProvider
-from autostudio.llm import make_llm
+from autostudio.inbox.providers import InboxProvider, build_llm
+from autostudio.llm import LLMClient
 from autostudio.providers import CoreProvider, OperatorAlerts
 from autostudio.runlog import Heartbeat, supervised_run
 from autostudio.settings import LLMProvider, Settings
@@ -55,6 +56,11 @@ _HINTS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
 )
 _DEFAULT_HINT: Final = 'Проверьте, что IMAP включён, а в .env — логин и пароль приложения (не основной пароль).'
 _UNSUPPORTED_HOSTS: Final = ('outlook', 'office365', 'hotmail')
+_ENV_HINT: Final = (
+    'переменные берутся из окружения процесса: загрузите .env клиента — '
+    '`uv run --env-file clients/<id>/.env autostudio inbox …` (в Docker это делает env_file)'
+)
+_FAKE_WARNING: Final = '⚠ модель-заглушка (ключевые слова): для боевой работы задайте AUTOSTUDIO_LLM_PROVIDER и ключ'
 
 
 def provider_hint(host: str) -> str:
@@ -71,7 +77,7 @@ def _env_problems(config: InboxConfig) -> list[str]:
     section = config.inbox
     for var in (section.username_env, section.password_env):
         if not os.environ.get(var):
-            problems.append(f'переменная {var} не задана (см. examples/inbox/.env.example)')
+            problems.append(f'переменная {var} не задана — {_ENV_HINT}')
     if config.sink.backend == 'google' and not os.environ.get(config.sink.credentials_env):
         problems.append(f'sink.backend = "google", но {config.sink.credentials_env} не задана')
     if config.notify.telegram_chat_id and not os.environ.get(config.notify.telegram_token_env):
@@ -79,6 +85,40 @@ def _env_problems(config: InboxConfig) -> list[str]:
     if config.notify.webhook_url_env and not os.environ.get(config.notify.webhook_url_env):
         problems.append(f'notify.webhook_url_env = {config.notify.webhook_url_env}, но переменная пуста')
     return problems
+
+
+def _channel_report(config: InboxConfig, settings: Settings | None) -> tuple[list[str], list[str]]:
+    """Куда уйдут сигналы владельцу и оператору — и предупреждения, если никуда."""
+    notify = config.notify
+    channels: list[str] = []
+    if notify.telegram_chat_id:
+        channels.append(f'telegram {notify.telegram_chat_id}')
+    if notify.webhook_url_env:
+        channels.append(f'вебхук ({notify.webhook_url_env})')
+    console_only = not channels
+    if notify.console or console_only:
+        channels.append('консоль сервера')
+    lines = [f'  сигналы владельцу: {", ".join(channels)}']
+    warnings: list[str] = []
+    if console_only and any(category.notify for category in config.inbox.categories):
+        warnings.append(
+            '⚠ сигналы о горячих лидах уйдут только в лог сервера: задайте [notify] telegram_chat_id '
+            '(и AUTOSTUDIO_NOTIFY_BOT_TOKEN) или webhook_url_env — или уберите notify у категорий'
+        )
+    if settings is not None:
+        token = os.environ.get(settings.operator_token_env, '')
+        if settings.operator_chat_id and token:
+            lines.append(f'  сигналы оператору: telegram {settings.operator_chat_id}')
+        else:
+            what = 'сбои, брошенные письма' + (
+                ' и подозрительные письма' if config.inbox.alert_operator_on_injection else ''
+            )
+            warnings.append(
+                f'⚠ канал оператора не настроен (AUTOSTUDIO_OPERATOR_CHAT_ID и {settings.operator_token_env}): '
+                f'{what} будут видны только в логе'
+            )
+        lines.append(f'  данные клиента: {client_data_dir(settings.data_dir, config.client).resolve()}')
+    return lines, warnings
 
 
 async def _check_connection(config: InboxConfig) -> tuple[list[str], list[str]]:
@@ -147,6 +187,7 @@ def check(config: Path, *, connect: bool = False, skip_env: bool = False) -> Non
         problems.append(provider_hint(section.imap_host))
     if not section.company.facts and any(c.draft_reply for c in section.categories):
         lines.append('  ⚠ фактов о компании нет: черновики будут только «спасибо, коллега свяжется»')
+    settings: Settings | None = None
     if not skip_env:
         try:
             settings = Settings.from_env(os.environ)
@@ -155,8 +196,10 @@ def check(config: Path, *, connect: bool = False, skip_env: bool = False) -> Non
         else:
             lines.append(f'  модель: {settings.llm_provider.value} / {settings.llm_model}')
             if settings.llm_provider is LLMProvider.FAKE:
-                lines.append('  ⚠ модель-заглушка: для боевой работы задайте AUTOSTUDIO_LLM_PROVIDER и ключ')
+                lines.append(f'  {_FAKE_WARNING}')
         problems += _env_problems(cfg)
+    channel_lines, warnings = _channel_report(cfg, settings)
+    lines += channel_lines + [f'  {warning}' for warning in warnings]
     if connect and not problems:
         connected, connect_problems = asyncio.run(_check_connection(cfg))
         lines += connected
@@ -186,6 +229,30 @@ def format_result(result: RunResult) -> str:
         lines.append(f'  ✗ остановлено: {result.aborted}')
     lines += [f'  ✗ {error}' for error in result.errors]
     return '\n'.join(lines)
+
+
+def require_model(settings: Settings, environ: Mapping[str, str]) -> None:
+    """Не даёт боевому разбору молча работать на заглушке.
+
+    Пустой AUTOSTUDIO_LLM_PROVIDER в ядре значит `fake`: забытый ключ превратил бы разбор
+    почты клиента в сортировку по ключевым словам и шаблонные черновики. Заглушка в боевом
+    запуске — только если она выбрана явно (для проверки развёртывания).
+
+    Args:
+        settings: Настройки процесса.
+        environ: Окружение процесса.
+
+    Raises:
+        ConfigError: Провайдер модели не задан.
+    """
+    if settings.llm_provider is not LLMProvider.FAKE:
+        return
+    if environ.get('AUTOSTUDIO_LLM_PROVIDER', '').strip().lower() != LLMProvider.FAKE.value:
+        raise ConfigError(
+            'AUTOSTUDIO_LLM_PROVIDER не задан: боевой разбор не запускается на заглушке. '
+            'Задайте openai|anthropic и ключ (или явно fake — только для проверки развёртывания)'
+        )
+    print(_FAKE_WARNING, flush=True)
 
 
 async def _serve(config: InboxConfig, settings: Settings, every_minutes: int | None) -> None:
@@ -234,14 +301,28 @@ def run(config: Path, *, every_minutes: int | None = None) -> None:
         raise ConfigError('--every-minutes: не меньше 1')
     cfg = load_client_config(config, InboxConfig)
     settings = Settings.from_env(os.environ)
+    require_model(settings, os.environ)
     try:
         asyncio.run(_serve(cfg, settings, every_minutes))
     except KeyboardInterrupt:
         print('inbox: остановлено')
 
 
-def format_dry_rows(rows: list[DryRow], zone: dt.tzinfo) -> str:
-    """Таблица пробного разбора для консоли."""
+_VIA: Final[dict[str, str]] = {'prefilter': 'rules', 'error': 'ERROR'}
+
+
+def format_dry_rows(rows: list[DryRow], zone: dt.tzinfo, model_label: str = 'AI') -> str:
+    """Таблица пробного разбора для консоли.
+
+    Args:
+        rows: Строки пробного разбора.
+        zone: Часовой пояс клиента.
+        model_label: Как подписать разбор моделью (`stub` для заглушки — показ не должен
+            выдавать ключевые слова за ИИ).
+
+    Returns:
+        Таблица текстом.
+    """
     header = ['Received', 'From', 'Subject', 'Category', 'Urgency', 'Conf', 'Via', 'Would do', 'Notes']
     table = [header] + [
         [
@@ -251,7 +332,7 @@ def format_dry_rows(rows: list[DryRow], zone: dt.tzinfo) -> str:
             row.category,
             row.urgency,
             f'{row.confidence:.2f}',
-            'rules' if row.source == 'prefilter' else 'AI',
+            _VIA.get(row.source, model_label),
             ', '.join(row.would) or '—',
             ', '.join(row.notes),
         ]
@@ -277,9 +358,9 @@ def dry_run_command(config: Path, *, limit: int = 20) -> None:
         raise ConfigError('--limit: от 1 до 200')
     cfg = load_client_config(config, InboxConfig)
     settings = Settings.from_env(os.environ)
-    llm = make_llm(settings, fake=make_fake_llm())
-    if settings.llm_provider is LLMProvider.FAKE:
-        print('⚠ модель-заглушка (ключевые слова): для настоящего показа задайте AUTOSTUDIO_LLM_PROVIDER и ключ')
+    stub = settings.llm_provider is LLMProvider.FAKE
+    if stub:
+        print(_FAKE_WARNING)
     section = cfg.inbox
     box = ImapMailBox(
         host=section.imap_host,
@@ -288,10 +369,27 @@ def dry_run_command(config: Path, *, limit: int = 20) -> None:
         password=require_env(section.password_env, os.environ),
         timeout=section.timeout_seconds,
     )
-    rows = asyncio.run(dry_run(cfg, box, llm, system_now(), limit))
-    print(format_dry_rows(rows, cfg.client.zone))
+    llm = build_llm(settings)
+    rows = asyncio.run(_dry(cfg, box, llm, limit))
+    print(format_dry_rows(rows, cfg.client.zone, model_label='stub' if stub else 'AI'))
     by_rules = sum(row.source == 'prefilter' for row in rows)
-    print(f'\nписем: {len(rows)}, из них правилами без модели: {by_rules}, вызовов модели: {llm.usage.calls}')
+    errors = sum(row.source == 'error' for row in rows)
+    print(
+        f'\nписем: {len(rows)}, из них правилами без модели: {by_rules}, с ошибкой: {errors}, '
+        f'вызовов модели: {llm.usage.calls}'
+    )
+
+
+def _progress(done: int, total: int) -> None:
+    # Прогресс — в stderr: на встрече видно, что разбор идёт, а таблицу в stdout можно сохранить.
+    print(f'\r  разобрано {done}/{total}…', end='\n' if done == total else '', file=sys.stderr, flush=True)
+
+
+async def _dry(config: InboxConfig, box: ImapMailBox, llm: LLMClient, limit: int) -> list[DryRow]:
+    try:
+        return await dry_run(config, box, llm, system_now(), limit, progress=_progress)
+    finally:
+        await llm.aclose()
 
 
 @app.command

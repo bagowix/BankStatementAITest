@@ -2,7 +2,12 @@
 # Секретов здесь нет — только имена переменных окружения (см. .env.example).
 #
 # Демо (`autostudio prices demo`) гоняет именно этот файл на офлайн-фикстурах:
-# домены *.example обслуживает httpx.MockTransport, в настоящую сеть ничего не уходит.
+# домены *.example обслуживает httpx.MockTransport, в настоящую сеть ничего не уходит
+# (демо само включает ступень модели — её там играет FakeLLM).
+#
+# Образец настроен как тариф Basic: проверка раз в день, без ступени модели. Перед боевым
+# запуском замените адреса *.example, contact_email и sink, затем
+# `autostudio prices check <config> --strict`.
 
 [client]
 id = "demo-prices"
@@ -29,9 +34,10 @@ respect_robots = true
 min_delay_s = 5            # пауза между запросами к одному сайту
 timeout_s = 20
 max_retries = 2
-llm_fallback = true        # платная ступень для страниц без разметки (в демо — FakeLLM)
-llm_max_pages_per_run = 5
-failure_alert_after = 2    # тариф Basic проверяет раз в день: два дня сбоев подряд — повод вмешаться
+llm_fallback = false       # Premium: модель для страниц без разметки (нужен AUTOSTUDIO_LLM_PROVIDER=openai|anthropic)
+llm_max_pages_per_run = 5  # потолок платных страниц за проход, когда ступень включена
+failure_alert_after = 2    # Basic проверяет раз в день: два дня сбоев подряд — повод вмешаться
+max_run_minutes = 30       # проход дольше — недочитанное «не проверено», следующий запуск не ждёт
 sheet_history = "changes"  # в «History» только новые значения; полная история — в SQLite
 
 [[prices.products]]

@@ -44,7 +44,7 @@ def test__other_data__longest_ids__fits_telegram_limit():
     assert cb.day_data('cut', None, day) == 'd:cut:_:20261231'
 
 
-def test__parse_slot__any_staff_roundtrip():
+def test__parse_slot__any_staff__roundtrip():
     ref = SlotRef(source='ai', service_id='cut', staff_id=None, start=MOMENT)
     assert cb.parse_slot(cb.split(cb.slot_data(cb.TIME, ref))[1]) == ref
 
@@ -74,7 +74,7 @@ def test__decode__garbage__none():
     assert cb.decode_ts(cb.encode_ts(MOMENT)) == MOMENT
 
 
-def test__split_join__roundtrip():
+def test__split_join__action_and_args__roundtrip():
     assert cb.split(cb.join('rt', 'ABC', '1')) == ('rt', ['ABC', '1'])
     assert cb.split('m') == ('m', [])
     assert cb.staff_code(None) == '_' and cb.staff_from_code('_') is None and cb.staff_from_code('x') == 'x'

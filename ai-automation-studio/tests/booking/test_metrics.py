@@ -27,7 +27,7 @@ EVENTS = [
 ]
 
 
-def test__metrics__honest_minutes_per_action():
+def test__metrics__specs__honest_minutes_per_action():
     minutes = {spec.kind: spec.minutes_saved for spec in METRICS}
     assert minutes == {
         'booking.created': 5,
@@ -60,7 +60,7 @@ def test__highlights__russian__plurals():
     assert single[2] == '1 вопрос клиентов бот закрыл сам, 0 передано вам.'
 
 
-def test__highlights__ties_and_unknown_language():
+def test__highlights__ties_and_unknown_language__deterministic_english():
     tie = [created('fri', 'a', 'no'), created('mon', 'b', 'no')]
     assert highlights(tie, 'ka')[:2] == ['Busiest day: Monday — 1 of 2 bookings.', 'Most booked: a (1).']
     assert highlights([created('mon', 'a', 'no')], 'en')[0] == 'Busiest day: Monday — 1 of 1 booking.'
@@ -71,7 +71,7 @@ def test__highlights__nothing__empty():
     assert highlights([Event(at=START, package='booking', kind='booking.created', payload={})], 'en') == []
 
 
-def test__report__renders_with_booking_metrics():
+def test__report__booking_events__rendered():
     report = build_report(
         client='Demo Barbers',
         month=dt.date(2026, 10, 1),

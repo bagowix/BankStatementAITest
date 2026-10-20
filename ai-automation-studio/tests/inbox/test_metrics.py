@@ -39,7 +39,7 @@ def test__highlights__english__leads_drafts_hours_injections():
         '2 new leads found in the inbox, 1 of them urgent.',
         'Reply drafts were ready for 1 of 2 emails that needed an answer (50%).',
         'About 0.2 h of manual email work saved (estimate).',
-        '1 emails with hidden instructions to the AI were blocked — no action was taken on them.',
+        '1 email with hidden instructions to the AI was blocked — no action was taken on it.',
     ]
 
 

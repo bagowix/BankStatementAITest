@@ -14,7 +14,7 @@ class Flaky:
         self.sent.append((chat, message.text))
 
 
-async def test__deliver__routes_to_origin_admins_and_explicit_chat():
+async def test__deliver__mixed_recipients__routed():
     sender, notifier = Recorder(), Recorder()
     failures = await deliver(
         sender,

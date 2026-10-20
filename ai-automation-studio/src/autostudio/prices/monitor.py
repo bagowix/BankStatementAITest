@@ -1,15 +1,23 @@
 """Один проход монитора: прочитать все ссылки, сравнить с прошлым, записать, сообщить.
 
-Порядок записи выбран так, чтобы ничего не терялось молча:
+Порядок работы выбран так, чтобы ничего не терялось и не дублировалось:
 
-1. все ссылки проверяются (сайты — параллельно, страницы одного сайта — по очереди);
-2. сравнение с прошлой ценой — чистой функцией `assess`, в `Decimal`;
-3. таблица клиента: «Prices now» заменяется, «History» и «Changes» дописываются;
-4. только после удачной записи таблицы — история в SQLite одной транзакцией и журнал
-   событий. Упала таблица — в базе ничего не изменилось, и следующий запуск повторит ту же
-   работу (а `supervised_run` сообщит оператору);
-5. одно уведомление владельцу за запуск — если было что-то значимое — и отдельно
-   оператору о сломанных ссылках (один раз на пороге, а не каждый запуск).
+1. проход берёт замок клиента: второй одновременный проход (cron + ручной `run`) пропускается;
+2. все ссылки проверяются бесплатными ступенями (сайты — параллельно, страницы одного сайта
+   — по очереди), затем страницы без разметки — моделью, бюджет делится в порядке конфига;
+   у прохода есть общий срок (`max_run_minutes`);
+3. сравнение с прошлой ценой — чистой функцией `assess`, в `Decimal`;
+4. «Prices now» заменяется целиком; упала таблица — база не меняется, следующий проход
+   повторит ту же работу (а `supervised_run` сообщит оператору);
+5. цены, состояние ссылок и исходящие (строки «History»/«Changes», уведомление владельцу)
+   записываются в SQLite одной транзакцией, затем исходящие доставляются; недоставленное
+   остаётся в очереди и уходит первым в следующий проход — без потерь и без дублей;
+6. оператору — о сломанных ссылках и сомнительных ценах (один раз на пороге, а не каждый запуск).
+
+Клиенту не сообщается то, в чём сомневается сам монитор: цена из неоднозначной разметки,
+цена со страницы с несколькими товарами и скачок больше ±50%, пока его не подтвердило
+повторное чтение. Такие чтения видны в таблице как «нужна проверка» и не становятся базой
+для следующих сравнений.
 
 Сбой одной ссылки — даже неожиданное исключение на странной странице — не останавливает
 остальные: он становится строкой «не проверено» и сигналом оператору.
@@ -26,16 +34,28 @@ from typing import Final, Literal, Protocol
 import httpx
 import msgspec
 
-from autostudio.errors import NotifyError
+from autostudio.errors import AutoStudioError, NotifyError, SinkError
 from autostudio.events import EventLog
 from autostudio.llm import LLMClient
 from autostudio.notify import Notifier
 from autostudio.prices import texts
 from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product
-from autostudio.prices.extract import Availability, ExtractionFailure, LLMBudget, PriceReading, read_price
+from autostudio.prices.extract import (
+    AMBIGUOUS_DECIMAL,
+    MULTIPLE_PRODUCTS,
+    Availability,
+    ExtractionFailure,
+    LLMBudget,
+    PriceReading,
+    ask_model,
+    budget_denied,
+    extract_price,
+    merge_model,
+    model_text,
+)
 from autostudio.prices.fetch import FetchFailure, FetchResult
 from autostudio.prices.money import Qualifier
-from autostudio.prices.store import OfferKey, OfferState, PriceStore, StoredReading
+from autostudio.prices.store import Channel, OfferKey, OfferState, OutboxEntry, PriceStore, StoredReading
 from autostudio.prices.urls import origin, redact
 from autostudio.sinks import Row, TableSink
 
@@ -45,7 +65,13 @@ PACKAGE: Final = 'prices'
 # Сколько сайтов проверяется одновременно. Страницы одного сайта всё равно идут по очереди
 # с паузой — параллельность ускоряет запуск, не увеличивая нагрузку ни на один сайт.
 _PARALLEL_SITES: Final = 4
+_PARALLEL_MODEL: Final = 4
 _SHEETS_URL: Final = 'https://docs.google.com/spreadsheets/d/{id}'
+# Скачок цены больше этого — сначала подтверждение повторным чтением, потом уведомление
+# владельцу: «2 499 → 2.50» чаще ошибка вёрстки или разметки, чем распродажа.
+MAX_PLAUSIBLE_JUMP_PCT: Final = Decimal(50)
+_BUDGET_FLAG: Final = 'llm_budget_exhausted'
+REDIRECTED: Final = 'redirected'
 # Предупреждения удачного чтения — оператору, один раз, когда предупреждение появилось.
 _WARNINGS: Final[dict[str, str]] = {
     'selector_not_found': (
@@ -60,9 +86,18 @@ _WARNINGS: Final[dict[str, str]] = {
         'в разметке цена записана с точкой-разделителем тысяч ({raw}); на странице видно то же число '
         'тысячами — так и прочитано. Сверьте с сайтом: {url}'
     ),
-    'schema_ambiguous_decimal': (
+    AMBIGUOUS_DECIMAL: (
         'в разметке цена «{raw}»: по стандарту это дробь, но может быть и тысячами, а на странице '
-        'подтверждения нет. Сверьте с сайтом и при необходимости задайте селектор: {url}'
+        'подтверждения нет. Клиенту уведомлений по ней нет («нужна проверка»). Сверьте с сайтом и '
+        'задайте селектор: autostudio prices probe {url}'
+    ),
+    MULTIPLE_PRODUCTS: (
+        'на странице несколько товаров с разными ценами в разметке — взята первая, клиенту уведомлений '
+        'по ней нет («нужна проверка»). Задайте селектор: autostudio prices probe {url}'
+    ),
+    REDIRECTED: (
+        'ссылка теперь редиректит на более короткий адрес (товар переехал); цена прочитана, но обновите '
+        'url в конфиге — итоговый адрес покажет autostudio prices probe {url}'
     ),
 }
 
@@ -107,6 +142,13 @@ class CheckFailure(msgspec.Struct, frozen=True, kw_only=True):
 type CheckOutcome = PriceReading | CheckFailure
 
 
+class _NeedsModel(msgspec.Struct, frozen=True, kw_only=True):
+    # Бесплатные ступени не нашли цену; страница ждёт модель (и бюджет на неё).
+    text: str
+    failure: ExtractionFailure
+    warnings: tuple[str, ...] = ()
+
+
 class Change(msgspec.Struct, frozen=True, kw_only=True):
     """Значимое событие по ссылке — строка вкладки «Changes» и пункт уведомления.
 
@@ -123,6 +165,7 @@ class Change(msgspec.Struct, frozen=True, kw_only=True):
         pct: Изменение в % (`price`) или разница с ценой клиента (`undercut`).
         own_price: Цена клиента.
         availability: Наличие сейчас (для `stock`).
+        old_availability: Наличие до этого (для `stock`).
     """
 
     kind: ChangeKind
@@ -136,6 +179,7 @@ class Change(msgspec.Struct, frozen=True, kw_only=True):
     pct: Decimal | None = None
     own_price: Decimal | None = None
     availability: Availability = Availability.UNKNOWN
+    old_availability: Availability = Availability.UNKNOWN
 
 
 class Assessment(msgspec.Struct, frozen=True, kw_only=True):
@@ -149,10 +193,12 @@ class Assessment(msgspec.Struct, frozen=True, kw_only=True):
         previous: Прошлая цена из истории.
         changes: Значимые события.
         state: Новое состояние ссылки.
-        diff_vs_own: Разница с ценой клиента в % (только в одной валюте).
+        diff_vs_own: Разница с ценой клиента в % (только в одной валюте и только для надёжной цены).
         change_vs_last: Изменение к прошлой цене в % (только в одной валюте).
         new_value: Цена или наличие отличаются от прошлых (или это первое чтение).
         operator_lines: Что сказать оператору.
+        doubtful: Число под сомнением (неоднозначная разметка, несколько товаров).
+        held: Скачок цены ждёт подтверждения повторным чтением.
     """
 
     key: OfferKey
@@ -166,6 +212,13 @@ class Assessment(msgspec.Struct, frozen=True, kw_only=True):
     change_vs_last: Decimal | None = None
     new_value: bool = False
     operator_lines: tuple[str, ...] = ()
+    doubtful: bool = False
+    held: bool = False
+
+    @property
+    def recorded(self) -> bool:
+        """Цена становится новой точкой сравнения (история, база для следующего прохода)."""
+        return isinstance(self.outcome, PriceReading) and not self.doubtful and not self.held
 
 
 class RunResult(msgspec.Struct, frozen=True, kw_only=True):
@@ -179,6 +232,9 @@ class RunResult(msgspec.Struct, frozen=True, kw_only=True):
     llm_pages: int
     methods: dict[str, int] = msgspec.field(default_factory=dict)
     failures: dict[str, int] = msgspec.field(default_factory=dict)
+    skipped: bool = False
+    llm_input_tokens: int = 0
+    llm_output_tokens: int = 0
 
 
 def pct_change(old: Decimal, new: Decimal) -> Decimal:
@@ -186,15 +242,47 @@ def pct_change(old: Decimal, new: Decimal) -> Decimal:
     return (new - old) / old * 100
 
 
-def _comparable(amount_currency: str | None, product: Product) -> bool:
-    return product.own_price is not None and amount_currency == product.currency
+def _comparable(currency: str | None, own: Decimal | None, product: Product) -> bool:
+    return own is not None and currency == product.currency
 
 
-def _undercuts(product: Product, currency: str | None, amount: Decimal, availability: Availability) -> bool:
-    # Цена «от» и цена товара, которого нет в наличии, клиента не подрезают.
-    if not _comparable(currency, product) or availability is Availability.OUT_OF_STOCK:
+def _undercuts(
+    own: Decimal | None, product: Product, currency: str | None, amount: Decimal, availability: Availability
+) -> bool:
+    # Товар не в наличии клиента не подрезает; валюты не смешиваются.
+    if not _comparable(currency, own, product) or availability is Availability.OUT_OF_STOCK:
         return False
-    return product.own_price is not None and amount < product.own_price
+    return own is not None and amount < own
+
+
+def _jump_key(reading: PriceReading) -> str:
+    return f'{format(reading.amount, "f")} {reading.currency or "?"}'
+
+
+def _failed(
+    product: Product,
+    offer: Offer,
+    outcome: CheckFailure,
+    *,
+    previous: StoredReading | None,
+    state: OfferState,
+    section: PricesSection,
+) -> Assessment:
+    key = OfferKey(product.id, offer.competitor, offer.url)
+    failures = state.failures + 1
+    lines: tuple[str, ...] = ()
+    if failures == section.failure_alert_after:
+        where = f'{product.name} / {offer.competitor}'
+        lines = (f'• {where}: {outcome.reason} ({outcome.detail}) — сбоев подряд: {failures}; {redact(offer.url)}',)
+    return Assessment(
+        key=key,
+        product=product,
+        offer=offer,
+        outcome=outcome,
+        previous=previous,
+        state=msgspec.structs.replace(state, failures=failures, last_reason=outcome.reason),
+        operator_lines=lines,
+    )
 
 
 def assess(
@@ -209,55 +297,87 @@ def assess(
     """Сравнивает результат проверки с прошлым: изменения, подрезание, наличие, сбои.
 
     Первое чтение — не «изменение»: сравнивать не с чем. Валюты не смешиваются: другая
-    валюта — не процент изменения и не «дешевле вас», а отдельная пометка.
+    валюта — не процент изменения и не «дешевле вас», а отдельная пометка. Сомнительная
+    цена (`PriceReading.doubtful`) и неподтверждённый скачок больше `MAX_PLAUSIBLE_JUMP_PCT`
+    не дают клиенту уведомлений и не становятся базой сравнения.
 
     Args:
         product: Товар клиента.
         offer: Страница конкурента.
         outcome: Цена или сбой этого запуска.
-        previous: Последняя прочитанная цена или None.
+        previous: Последняя записанная цена или None.
         state: Состояние ссылки до запуска.
         section: Пороги из конфига.
 
     Returns:
         Итог ссылки.
     """
+    if isinstance(outcome, CheckFailure):
+        return _failed(product, offer, outcome, previous=previous, state=state, section=section)
+
     key = OfferKey(product.id, offer.competitor, offer.url)
     where = f'{product.name} / {offer.competitor}'
-    if isinstance(outcome, CheckFailure):
-        failures = state.failures + 1
-        lines: tuple[str, ...] = ()
-        if failures == section.failure_alert_after:
-            lines = (f'• {where}: {outcome.reason} ({outcome.detail}) — сбоев подряд: {failures}; {redact(offer.url)}',)
-        new_state = OfferState(failures=failures, last_reason=outcome.reason, warning=state.warning)
+    reading, own = outcome, product.own_price
+    doubtful = reading.doubtful
+    same_currency = previous is not None and previous.currency == reading.currency
+    change_vs_last = (
+        pct_change(previous.amount, reading.amount)
+        if previous is not None and same_currency and previous.amount > 0 and not doubtful
+        else None
+    )
+    jump = _jump_key(reading)
+    held = change_vs_last is not None and abs(change_vs_last) > MAX_PLAUSIBLE_JUMP_PCT and state.pending != jump
+
+    lines: list[str] = []
+    for warning in dict.fromkeys(reading.warnings):
+        if warning not in state.warnings:
+            template = _WARNINGS.get(warning, '{warning}')
+            text = template.format(
+                warning=warning, selector=offer.selector, method=reading.method.value, raw=reading.raw, url=offer.url
+            )
+            lines.append(f'• {where}: {text}')
+    if state.failures >= section.failure_alert_after:
+        lines.append(f'• {where}: снова читается (сбоев подряд было: {state.failures})')
+    new_state = OfferState(
+        failures=0, last_reason=None, warning=','.join(dict.fromkeys(reading.warnings)) or None, pending=None
+    )
+
+    if doubtful or held:
+        if held and previous is not None and change_vs_last is not None:
+            lines.append(
+                f'• {where}: цена {texts.cell_amount(previous.amount)} → {texts.cell_amount(reading.amount)} '
+                f'{reading.currency or ""} ({texts.cell_pct(change_vs_last)}%) — необычный скачок; клиенту '
+                f'сообщим, если повторное чтение его подтвердит. {redact(offer.url)}'
+            )
+            new_state = msgspec.structs.replace(new_state, pending=jump)
         return Assessment(
             key=key,
             product=product,
             offer=offer,
-            outcome=outcome,
+            outcome=reading,
             previous=previous,
             state=new_state,
-            operator_lines=lines,
+            change_vs_last=change_vs_last if held else None,
+            operator_lines=tuple(lines),
+            doubtful=doubtful,
+            held=held,
         )
 
-    reading = outcome
     changes: list[Change] = []
-    change_vs_last: Decimal | None = None
     base = Change(
         kind='price',
         product=product.name,
         competitor=offer.competitor,
         url=offer.url,
         currency=reading.currency,
-        own_price=product.own_price,
+        own_price=own,
     )
     replace = msgspec.structs.replace
     if previous is not None:
-        if previous.currency == reading.currency and previous.amount > 0:
-            change_vs_last = pct_change(previous.amount, reading.amount)
+        if change_vs_last is not None:
             if abs(change_vs_last) >= section.alert_change_pct:
                 changes.append(replace(base, old_amount=previous.amount, new_amount=reading.amount, pct=change_vs_last))
-        elif previous.currency == reading.currency:
+        elif same_currency:
             # Было «бесплатно» (allow_free): процента от нуля нет, но само изменение — есть.
             if reading.amount != previous.amount:
                 changes.append(replace(base, old_amount=previous.amount, new_amount=reading.amount))
@@ -274,28 +394,31 @@ def assess(
         # Если одна из валют не определилась — не сравниваем и не тревожим клиента впустую.
         known = Availability.UNKNOWN not in (previous.availability, reading.availability)
         if known and previous.availability != reading.availability:
-            changes.append(replace(base, kind='stock', availability=reading.availability))
-    diff = (
-        pct_change(product.own_price, reading.amount)
-        if product.own_price and _comparable(reading.currency, product)
-        else None
-    )
+            changes.append(
+                replace(base, kind='stock', availability=reading.availability, old_availability=previous.availability)
+            )
+    diff = pct_change(own, reading.amount) if own and _comparable(reading.currency, own, product) else None
     exact = reading.qualifier is Qualifier.EXACT
-    if section.alert_undercut and exact and _undercuts(product, reading.currency, reading.amount, reading.availability):
-        was = previous is not None and _undercuts(product, previous.currency, previous.amount, previous.availability)
+    if (
+        section.alert_undercut
+        and exact
+        and _undercuts(own, product, reading.currency, reading.amount, reading.availability)
+    ):
+        # «Было» — то, что тогда вызвало бы уведомление: точная цена ниже тогдашней цены клиента.
+        was = (
+            previous is not None
+            and previous.qualifier is Qualifier.EXACT
+            and _undercuts(
+                previous.own_price if previous.own_price is not None else own,
+                product,
+                previous.currency,
+                previous.amount,
+                previous.availability,
+            )
+        )
         if not was:
             changes.append(replace(base, kind='undercut', new_amount=reading.amount, pct=diff))
 
-    warning = reading.warnings[0] if reading.warnings else None
-    lines = ()
-    if warning is not None and warning != state.warning:
-        template = _WARNINGS.get(warning, '{warning}')
-        text = template.format(
-            warning=warning, selector=offer.selector, method=reading.method.value, raw=reading.raw, url=offer.url
-        )
-        lines += (f'• {where}: {text}',)
-    if state.failures >= section.failure_alert_after:
-        lines += (f'• {where}: снова читается (сбоев подряд было: {state.failures})',)
     new_value = (
         previous is None
         or section.sheet_history == 'all'
@@ -309,11 +432,11 @@ def assess(
         outcome=reading,
         previous=previous,
         changes=tuple(changes),
-        state=OfferState(failures=0, last_reason=None, warning=warning),
+        state=new_state,
         diff_vs_own=diff,
         change_vs_last=change_vs_last,
         new_value=new_value,
-        operator_lines=lines,
+        operator_lines=tuple(lines),
     )
 
 
@@ -321,111 +444,205 @@ def _path_depth(url: str) -> int:
     return len([part for part in httpx.URL(url).path.split('/') if part])
 
 
+def _redirect(configured: str, final: str) -> Literal['away', 'moved'] | None:
+    """Редирект на более короткий адрес: в корень/раздел (`away`) или просто переезд (`moved`)."""
+    depth = _path_depth(final)
+    if depth >= _path_depth(configured):
+        return None
+    # Удалённый товар уводит в корень сайта или раздел каталога, где разметка описывает чужие
+    # товары: цена оттуда была бы молча неверной. Канонический адрес без языкового префикса
+    # или без «/product/» — обычный переезд: цену читаем, оператору — обновить url.
+    return 'away' if depth <= 1 else 'moved'
+
+
 async def check_offer(
-    product: Product,
-    offer: Offer,
-    fetcher: Fetcher,
-    *,
-    llm: LLMClient | None,
-    budget: LLMBudget,
-    section: PricesSection,
-) -> CheckOutcome:
-    """Загружает и читает одну страницу; любой сбой превращается в `CheckFailure`.
+    product: Product, offer: Offer, fetcher: Fetcher, *, section: PricesSection, model: bool
+) -> PriceReading | CheckFailure | _NeedsModel:
+    """Загружает и читает одну страницу бесплатными ступенями; любой сбой — `CheckFailure`.
 
     Args:
         product: Товар.
         offer: Страница конкурента.
         fetcher: Загрузчик.
-        llm: Модель или None.
-        budget: Бюджет модели на запуск.
         section: Настройки монитора.
+        model: Включена ли платная ступень (тогда страница без цены ждёт модель).
 
     Returns:
-        Цена или сбой.
+        Цена, сбой или страница для модели.
     """
     try:
         page = await fetcher.fetch(offer.url)
         if isinstance(page, FetchFailure):
             return CheckFailure(reason=page.reason, detail=page.detail)
-        if _path_depth(page.final_url) < _path_depth(offer.url):
-            # Удалённый товар часто уводит редиректом в каталог, где разметка описывает
-            # другой товар. Цена оттуда была бы молча неверной — лучше честный пропуск.
+        redirect = _redirect(offer.url, page.final_url)
+        if redirect == 'away':
             return CheckFailure(reason='redirected_away', detail=f'→ {redact(page.final_url)}')
-        result = await read_price(
-            page.html, offer, product_name=product.name, llm=llm, budget=budget, allow_free=section.allow_free
-        )
+        warnings = (REDIRECTED,) if redirect == 'moved' else ()
+        result = extract_price(page.html, offer, allow_free=section.allow_free, page_url=page.final_url)
+        if isinstance(result, ExtractionFailure) and model:
+            return _NeedsModel(text=model_text(page.html), failure=result, warnings=warnings)
     except Exception as exc:
         # Одна странная страница не должна останавливать мониторинг остальных: трассировка
         # уходит в лог, оператор получает сбой ссылки, остальные ссылки проверяются.
         logger.exception('проверка %s / %s упала', product.id, offer.competitor)
         return CheckFailure(reason='internal_error', detail=type(exc).__name__)
+    return _settle(result, warnings)
+
+
+def _settle(result: PriceReading | ExtractionFailure, warnings: tuple[str, ...]) -> CheckOutcome:
     if isinstance(result, ExtractionFailure):
         return CheckFailure(reason=result.reason, detail=result.detail)
-    return result
+    return msgspec.structs.replace(result, warnings=(*result.warnings, *warnings)) if warnings else result
 
 
 async def check_all(
-    section: PricesSection, fetcher: Fetcher, *, llm: LLMClient | None, budget: LLMBudget
+    section: PricesSection,
+    fetcher: Fetcher,
+    *,
+    llm: LLMClient | None,
+    budget: LLMBudget,
+    deadline_s: float | None = None,
 ) -> list[tuple[Product, Offer, CheckOutcome]]:
     """Проверяет все ссылки: сайты параллельно, страницы одного сайта — последовательно.
+
+    Сначала все страницы читаются бесплатными ступенями, затем страницы без цены — моделью:
+    бюджет делится в порядке конфига, поэтому одни и те же ссылки получают модель от запуска
+    к запуску (а не те, чей сайт ответил быстрее). Что не уложилось в срок прохода, — сбой
+    `run_timeout` для этой ссылки, а не зависший проход.
 
     Args:
         section: Товары и настройки.
         fetcher: Загрузчик этого запуска.
         llm: Модель или None.
         budget: Бюджет модели.
+        deadline_s: Срок прохода в секундах (по умолчанию `max_run_minutes`).
 
     Returns:
         Результаты в порядке конфига (таблица и уведомления стабильны от запуска к запуску).
     """
     pairs = [(product, offer) for product in section.products for offer in product.offers]
-    results: dict[int, CheckOutcome] = {}
+    first: dict[int, PriceReading | CheckFailure | _NeedsModel] = {}
     by_site: dict[str, list[int]] = {}
     for index, (_, offer) in enumerate(pairs):
         by_site.setdefault(origin(offer.url), []).append(index)
+    loop = asyncio.get_running_loop()
+    limit_s = deadline_s if deadline_s is not None else section.max_run_minutes * 60
+    deadline = loop.time() + limit_s
+    late = CheckFailure(reason='run_timeout', detail=f'проход не уложился в {limit_s:g} с')
     gate = asyncio.Semaphore(_PARALLEL_SITES)
 
     async def worker(indexes: list[int]) -> None:
         async with gate:
             for index in indexes:
                 product, offer = pairs[index]
-                results[index] = await check_offer(product, offer, fetcher, llm=llm, budget=budget, section=section)
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    first[index] = late
+                    continue
+                try:
+                    async with asyncio.timeout(remaining):
+                        first[index] = await check_offer(
+                            product, offer, fetcher, section=section, model=llm is not None
+                        )
+                except TimeoutError:
+                    first[index] = late
 
     await asyncio.gather(*(worker(indexes) for indexes in by_site.values()))
-    return [(product, offer, results[index]) for index, (product, offer) in enumerate(pairs)]
+
+    final: dict[int, CheckOutcome] = {}
+    granted: list[tuple[int, _NeedsModel]] = []
+    for index in range(len(pairs)):
+        outcome = first[index]
+        if not isinstance(outcome, _NeedsModel):
+            final[index] = outcome
+        elif llm is not None and budget.take():
+            granted.append((index, outcome))
+        else:
+            final[index] = _settle(budget_denied(outcome.failure), ())
+    if llm is not None and granted:
+        final.update(await _ask_all(pairs, granted, llm=llm, section=section, deadline=deadline, late=late))
+    return [(product, offer, final[index]) for index, (product, offer) in enumerate(pairs)]
+
+
+async def _ask_all(
+    pairs: list[tuple[Product, Offer]],
+    granted: list[tuple[int, _NeedsModel]],
+    *,
+    llm: LLMClient,
+    section: PricesSection,
+    deadline: float,
+    late: CheckFailure,
+) -> dict[int, CheckOutcome]:
+    loop = asyncio.get_running_loop()
+    gate = asyncio.Semaphore(_PARALLEL_MODEL)
+
+    async def ask(index: int, waiting: _NeedsModel) -> tuple[int, CheckOutcome]:
+        product, offer = pairs[index]
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return index, late
+        try:
+            async with gate, asyncio.timeout(remaining):
+                answer = await ask_model(
+                    waiting.text, offer, product_name=product.name, llm=llm, allow_free=section.allow_free
+                )
+        except TimeoutError:
+            return index, late
+        except Exception as exc:
+            # Неожиданный сбой SDK на одной странице не роняет проход: это сбой ссылки.
+            logger.exception('модель на %s / %s упала', product.id, offer.competitor)
+            return index, CheckFailure(reason='internal_error', detail=type(exc).__name__)
+        return index, _settle(merge_model(waiting.failure, answer), waiting.warnings)
+
+    return dict(await asyncio.gather(*(ask(index, waiting) for index, waiting in granted)))
 
 
 # --- таблица -------------------------------------------------------------------------------
 
 
-def _status(outcome: CheckOutcome, previous: StoredReading | None, language: str) -> str:
+def _status(item: Assessment, language: str) -> str:
     t = texts.STATUS[language]
+    outcome = item.outcome
     if isinstance(outcome, CheckFailure):
         reason = texts.failure_text(outcome.reason, language)
-        return t['stale'].format(reason=reason) if previous is not None else reason
+        return t['stale'].format(reason=reason) if item.previous is not None else reason
+    if item.held:
+        return t['jump']
+    if item.doubtful:
+        return t['multiple'] if MULTIPLE_PRODUCTS in outcome.warnings else t['ambiguous']
     return t[outcome.qualifier.value] if outcome.qualifier is not Qualifier.EXACT else t['ok']
+
+
+def _diff_cell(product: Product, currency: str | None, diff: Decimal | None, language: str) -> str:
+    if product.own_price is None:
+        return ''
+    if currency != product.currency:
+        return texts.STATUS[language]['na_currency'].format(theirs=currency or '?', yours=product.currency)
+    return texts.cell_pct(diff) if diff is not None else ''
 
 
 def now_row(item: Assessment, *, at: dt.datetime, zone: dt.tzinfo, language: str) -> Row:
     """Строка вкладки «Prices now»: текущая цена или последняя известная с пометкой."""
     product, offer = item.product, item.offer
     own = texts.cell_amount(product.own_price) if product.own_price is not None else ''
-    shown: PriceReading | StoredReading | None = (
-        item.outcome if isinstance(item.outcome, PriceReading) else item.previous
-    )
-    checked = at if isinstance(item.outcome, PriceReading) else (item.previous.at if item.previous else None)
+    shown: PriceReading | StoredReading | None
+    if isinstance(item.outcome, PriceReading):
+        shown, checked, diff = item.outcome, at, item.diff_vs_own
+    else:
+        shown = item.previous
+        checked = item.previous.at if item.previous else None
+        diff = (
+            pct_change(product.own_price, shown.amount)
+            if shown is not None and product.own_price and _comparable(shown.currency, product.own_price, product)
+            else None
+        )
     if shown is None:
-        price = currency = diff = availability = method = ''
+        price = currency = diff_text = availability = method = ''
     else:
         price, currency = texts.cell_amount(shown.amount), shown.currency or ''
         availability = texts.AVAILABILITY[language][shown.availability.value]
         method = texts.METHODS[language][shown.method.value]
-        if product.own_price is None:
-            diff = ''
-        elif _comparable(shown.currency, product):
-            diff = texts.cell_pct(pct_change(product.own_price, shown.amount))
-        else:
-            diff = texts.STATUS[language]['na_currency'].format(theirs=shown.currency or '?', yours=product.currency)
+        diff_text = _diff_cell(product, shown.currency, diff, language)
     change = texts.cell_pct(item.change_vs_last) if item.change_vs_last is not None else ''
     return [
         product.name,
@@ -433,12 +650,12 @@ def now_row(item: Assessment, *, at: dt.datetime, zone: dt.tzinfo, language: str
         offer.competitor,
         price,
         currency,
-        diff,
+        diff_text,
         change,
         availability,
         method,
         texts.show_time(checked, zone) if checked else '',
-        _status(item.outcome, item.previous, language),
+        _status(item, language),
         offer.url,
     ]
 
@@ -462,7 +679,8 @@ def change_row(change: Change, *, at: dt.datetime, zone: dt.tzinfo, language: st
     """Строка вкладки «Changes»."""
     kind = texts.CHANGE_KINDS[language][change.kind]
     if change.kind == 'stock':
-        was, now = '', texts.AVAILABILITY[language][change.availability.value]
+        was = texts.AVAILABILITY[language][change.old_availability.value]
+        now = texts.AVAILABILITY[language][change.availability.value]
     elif change.kind == 'currency':
         was = f'{texts.cell_amount(change.old_amount or Decimal(0))} {change.old_currency or "?"}'
         now = f'{texts.cell_amount(change.new_amount or Decimal(0))} {change.currency or "?"}'
@@ -530,7 +748,7 @@ def render_digest(
             old=amount(c.old_amount),
             new=amount(c.new_amount),
             currency=c.currency or '',
-            pct=f' ({texts.show_pct(c.pct)}%)' if c.pct is not None else '',
+            pct=f' ({texts.show_pct(c.pct, language)}%)' if c.pct is not None else '',
         ),
     )
     section(
@@ -541,7 +759,7 @@ def render_digest(
             price=amount(c.new_amount),
             currency=c.currency or '',
             own=amount(c.own_price),
-            pct=texts.show_pct(c.pct or Decimal(0)),
+            pct=texts.show_pct(c.pct or Decimal(0), language),
         ),
     )
     section(
@@ -605,20 +823,32 @@ async def run_once(config: PricesConfig, deps: PricesDeps, now: dt.datetime) -> 
         now: Момент запуска, с часовым поясом.
 
     Returns:
-        Итог прохода.
+        Итог прохода (`skipped=True`, если другой проход по этому клиенту ещё идёт).
 
     Raises:
-        SinkError: Таблица клиента не записалась (база при этом не изменилась).
-        NotifyError: Уведомление владельцу не доставлено (данные уже записаны).
+        SinkError: Таблица клиента не записалась. Если не заменилась «Prices now» — база не
+            изменилась; если не дописались строки — они ждут в очереди следующего прохода.
+        NotifyError: Уведомление владельцу не доставлено (оно ждёт в очереди следующего прохода).
         ValueError: Время без часового пояса.
     """
     if now.tzinfo is None:
         raise ValueError('момент запуска должен быть с часовым поясом')
+    with deps.store.exclusive() as locked:
+        if not locked:
+            logger.warning('prices %s: предыдущий проход ещё идёт — этот пропущен', config.client.id)
+            return RunResult(
+                checked=0, failed=0, changes=(), digest=None, operator_alert=None, llm_pages=0, skipped=True
+            )
+        return await _run_locked(config, deps, now)
+
+
+async def _run_locked(config: PricesConfig, deps: PricesDeps, now: dt.datetime) -> RunResult:
     section = config.prices
     language = texts.lang(config.client.language)
     zone = config.client.zone
     llm = deps.llm if section.llm_fallback else None
     budget = LLMBudget(section.llm_max_pages_per_run if llm is not None else 0)
+    tokens_before = (llm.usage.input_tokens, llm.usage.output_tokens) if llm is not None else (0, 0)
 
     checks = await check_all(section, deps.new_fetcher(), llm=llm, budget=budget)
     assessments: list[Assessment] = []
@@ -635,38 +865,13 @@ async def run_once(config: PricesConfig, deps: PricesDeps, now: dt.datetime) -> 
             )
         )
     readings = [(item, item.outcome) for item in assessments if isinstance(item.outcome, PriceReading)]
+    recorded = [(item, reading) for item, reading in readings if item.recorded]
     changes = tuple(change for item in assessments for change in item.changes)
 
     tabs, headers = texts.TABS[language], texts.HEADERS[language]
     await deps.sink.replace(
         tabs['now'], headers['now'], [now_row(item, at=now, zone=zone, language=language) for item in assessments]
     )
-    history = [
-        history_row(item, reading, at=now, zone=zone, language=language) for item, reading in readings if item.new_value
-    ]
-    if history:
-        await deps.sink.append(tabs['history'], headers['history'], history)
-    if changes:
-        await deps.sink.append(
-            tabs['changes'], headers['changes'], [change_row(c, at=now, zone=zone, language=language) for c in changes]
-        )
-
-    deps.store.commit(
-        now, [(item.key, reading) for item, reading in readings], [(item.key, item.state) for item in assessments]
-    )
-    for item, reading in readings:
-        deps.events.record(PACKAGE, 'prices.checked', now, _event_payload(item, reading))
-    for change in changes:
-        deps.events.record(PACKAGE, _CHANGE_EVENTS[change.kind], now, _change_payload(change))
-    for item in assessments:
-        if isinstance(item.outcome, CheckFailure):
-            deps.events.record(
-                PACKAGE,
-                'prices.failed',
-                now,
-                {'product': item.product.name, 'competitor': item.offer.competitor, 'reason': item.outcome.reason},
-            )
-
     failed = len(assessments) - len(readings)
     sheet_url = (
         _SHEETS_URL.format(id=config.sink.spreadsheet_id)
@@ -682,17 +887,44 @@ async def run_once(config: PricesConfig, deps: PricesDeps, now: dt.datetime) -> 
         total=len(assessments),
         sheet_url=sheet_url,
     )
+    outbox: list[OutboxEntry] = []
+    history = [
+        history_row(item, reading, at=now, zone=zone, language=language) for item, reading in recorded if item.new_value
+    ]
+    if history:
+        outbox.append(OutboxEntry(channel='sheet', tab=tabs['history'], header=headers['history'], rows=history))
+    if changes:
+        rows = [change_row(change, at=now, zone=zone, language=language) for change in changes]
+        outbox.append(OutboxEntry(channel='sheet', tab=tabs['changes'], header=headers['changes'], rows=rows))
+    if digest is not None:
+        outbox.append(OutboxEntry(channel='owner', text=digest))
+
+    deps.store.commit(
+        now,
+        [(item.key, reading) for item, reading in recorded],
+        [(item.key, item.state) for item in assessments],
+        own_prices={item.key: item.product.own_price for item, _ in recorded},
+        outbox=outbox,
+    )
+    for item, reading in readings:
+        deps.events.record(PACKAGE, 'prices.checked', now, _event_payload(item, reading))
+    for change in changes:
+        deps.events.record(PACKAGE, _CHANGE_EVENTS[change.kind], now, _change_payload(change))
+    for item in assessments:
+        if isinstance(item.outcome, CheckFailure):
+            deps.events.record(
+                PACKAGE,
+                'prices.failed',
+                now,
+                {'product': item.product.name, 'competitor': item.offer.competitor, 'reason': item.outcome.reason},
+            )
+
     operator_lines = [line for item in assessments for line in item.operator_lines]
-    if budget.denied:
-        operator_lines.append(
-            f'• бюджет модели ({budget.limit} стр. за запуск) исчерпан: без проверки осталось {budget.denied} стр.'
-        )
+    operator_lines += _budget_lines(deps.store, budget, now)
     operator_alert = f'🛠 {config.client.name} / prices:\n' + '\n'.join(operator_lines) if operator_lines else None
     await _tell_operator(deps.operator, operator_alert)
-    if digest is not None:
-        await deps.notifier.send(digest)
     logger.info('prices: %s проверено, %s не проверено, событий %s', len(readings), failed, len(changes))
-    return RunResult(
+    result = RunResult(
         checked=len(readings),
         failed=failed,
         changes=changes,
@@ -701,7 +933,59 @@ async def run_once(config: PricesConfig, deps: PricesDeps, now: dt.datetime) -> 
         llm_pages=budget.used,
         methods=dict(Counter(reading.method.value for _, reading in readings)),
         failures=dict(Counter(item.outcome.reason for item in assessments if isinstance(item.outcome, CheckFailure))),
+        llm_input_tokens=(llm.usage.input_tokens - tokens_before[0]) if llm is not None else 0,
+        llm_output_tokens=(llm.usage.output_tokens - tokens_before[1]) if llm is not None else 0,
     )
+    await deliver(deps)
+    return result
+
+
+def _budget_lines(store: PriceStore, budget: LLMBudget, now: dt.datetime) -> list[str]:
+    # Об исчерпанном бюджете — один раз, когда это началось, и один раз, когда прошло;
+    # ежечасный Premium-клиент иначе слал бы оператору 24 одинаковых сообщения в день.
+    exhausted = store.flag(_BUDGET_FLAG) is not None
+    if budget.denied and not exhausted:
+        store.set_flag(_BUDGET_FLAG, now.isoformat())
+        return [
+            f'• бюджет модели ({budget.limit} стр. за запуск) исчерпан: без проверки осталось {budget.denied} стр. '
+            '— поднимите llm_max_pages_per_run или задайте селекторы'
+        ]
+    if not budget.denied and exhausted:
+        store.set_flag(_BUDGET_FLAG, None)
+        return ['• бюджета модели снова хватает на все страницы'] if budget.limit else []
+    return []
+
+
+async def deliver(deps: PricesDeps) -> None:
+    """Доставляет очередь: строки вкладок по порядку, уведомления владельцу по порядку.
+
+    Сбой одного канала не держит другой (таблица легла — уведомление всё равно уходит), а
+    внутри канала порядок сохраняется: после сбоя остальное ждёт следующего прохода.
+
+    Args:
+        deps: Зависимости прохода.
+
+    Raises:
+        SinkError: Строки не дописались (остались в очереди).
+        NotifyError: Уведомление не доставлено (осталось в очереди).
+    """
+    errors: list[AutoStudioError] = []
+    blocked: set[Channel] = set()
+    for entry in deps.store.pending():
+        if entry.channel in blocked:
+            continue
+        try:
+            if entry.channel == 'sheet':
+                await deps.sink.append(entry.tab, entry.header, entry.rows)
+            else:
+                await deps.notifier.send(entry.text)
+        except (SinkError, NotifyError) as exc:
+            blocked.add(entry.channel)
+            errors.append(exc)
+            continue
+        deps.store.delivered(entry.id)
+    if errors:
+        raise errors[0]
 
 
 async def _tell_operator(operator: Notifier | None, text: str | None) -> None:

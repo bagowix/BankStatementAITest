@@ -90,7 +90,9 @@ reminders.py: раз в минуту — напоминания, раз в ча�
    интервалами, пустой список — выходной; праздники — `closed_dates`.
 7. **Правила:** `slot_step_min` (шаг сетки), `min_lead_min` (не раньше чем через N минут),
    `horizon_days` (на сколько дней вперёд), `buffer_min` (пауза между клиентами),
-   `reminders_min_before`, `cancellation_min_before`, `contact_phone`.
+   `reminders_min_before`, `cancellation_min_before`, `contact_phone`, `phone_region` (страна для
+   номеров без кода: `GE` — «599 123 456» станет `+995 599 12 34 56`; номер проверяется по
+   libphonenumber, опечатка не пройдёт, а номер из «Поделиться контактом» принимается всегда).
 8. **FAQ** (`[[booking.faq]]`): 5–10 вопросов на обоих языках — адрес и как найти, парковка,
    оплата, правила отмены, подготовка к визиту, гарантия. Бот отвечает **только** по ним, по
    ценам и по часам работы.
@@ -104,7 +106,8 @@ reminders.py: раз в минуту — напоминания, раз в ча�
     ближайшие свободные слоты по каждой услуге.
 12. **Прогон в консоли:** `uv run autostudio booking chat clients/acme-barbers/booking.toml --language ru`
     (и `--admin` — служебные команды). Работает в песочнице `var/chat`, не трогая боевые данные.
-    Удобно записать короткое видео для клиента.
+    Удобно записать короткое видео для клиента. В контейнере писать можно только в `/data`:
+    `docker compose ... run --rm booking booking chat /config/booking.toml --data-dir /data/chat`.
 13. **Запуск:** `deploy/new-deployment.sh acme-barbers booking`, затем
     `docker compose -f clients/acme-barbers/compose.yaml --profile booking up -d`.
 

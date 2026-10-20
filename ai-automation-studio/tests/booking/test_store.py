@@ -124,7 +124,7 @@ def test__cancel__someone_elses_booking__not_found(store):
     assert store.get(booking.id).active
 
 
-def test__reschedule__moves_keeps_id_and_resets_reminders(store):
+def test__reschedule__free_slot__same_id_and_reminders_reset(store):
     booking = create(store, local(WED, 12))
     due = DueReminder(booking=booking, minutes_before=120, covers=(120,))
     assert store.claim_reminder(due, START)
@@ -167,7 +167,7 @@ def test__due_reminders__downtime__one_reminder_covers_both(store):
     assert store.due_reminders(local(WED, 16), []) == []
 
 
-def test__claim_reminder__exactly_once_across_restart(tmp_path):
+def test__claim_reminder__repeat_and_restart__exactly_once(tmp_path):
     path = tmp_path / 'booking.sqlite'
     first = BookingStore(path)
     create(first, local(WED, 17))
@@ -191,7 +191,7 @@ def test__claim_reminder__cancelled_booking__false_and_release_allows_retry(stor
     assert not store.claim_reminder(due, now)
 
 
-def test__queries__overlapping_upcoming_for_customer(store):
+def test__queries__mixed_bookings__active_only_in_order(store):
     a = create(store, local(WED, 10))
     b = create(store, local(WED, 15), who=BOB)
     cancelled = create(store, local(WED, 17))
@@ -202,7 +202,7 @@ def test__queries__overlapping_upcoming_for_customer(store):
     assert store.for_customer(ANNA.key, local(WED, 11)) == []
 
 
-def test__customers__upsert_keeps_known_fields(store):
+def test__customers__partial_upsert__known_fields_kept(store):
     assert store.customer('tg:9') is None
     store.save_customer(Customer(key='tg:9', language='ru'), START)
     store.save_customer(Customer(key='tg:9', name='Олег', phone='+995555'), START)
@@ -227,12 +227,12 @@ def test__readonly__existing_file__reads(tmp_path):
     assert ro.get(booking.id) == booking and ro.path == path
 
 
-def test__naive_datetime__rejected(store):
+def test__store__naive_datetime__value_error(store):
     with pytest.raises(ValueError, match='часовым поясом'):
         store.upcoming(dt.datetime(2026, 1, 1), START)  # noqa: DTZ001
 
 
-def test__corrupted_row__booking_error(store):
+def test__store__corrupted_row__booking_error(store):
     booking = create(store, local(WED, 12))
     with store._connect() as conn:  # прямой доступ — имитация повреждённой базы
         conn.execute("UPDATE bookings SET name = x'00' WHERE id = ?", (booking.id,))
@@ -240,14 +240,14 @@ def test__corrupted_row__booking_error(store):
         store.get(booking.id)
 
 
-def test__sql_literals__match_active_statuses():
+def test__sql_literals__active_statuses__in_sync():
     literal = "('pending', 'confirmed')"
     assert {status.value for status in ACTIVE_STATUSES} == {'pending', 'confirmed'}
     for name in ('_CLASH', '_OVERLAPPING', '_UPCOMING', '_FOR_CUSTOMER', '_REMINDER_CANDIDATES'):
         assert literal in vars(store_module)[name]
 
 
-def test__new_booking_id__alphabet_without_ambiguous_chars():
+def test__new_booking_id__many__unique_without_ambiguous_chars():
     ids = {new_booking_id() for _ in range(200)}
     assert len(ids) == 200
     assert not any(set(i) & set('IO01') for i in ids)

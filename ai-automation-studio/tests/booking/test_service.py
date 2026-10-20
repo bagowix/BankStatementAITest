@@ -77,11 +77,11 @@ async def test__reschedule__foreign_or_missing__not_found(app: App):
         await app.service.reschedule(booking.id, local(WED, 14), now=START, by_admin=True)  # обед
 
 
-async def test__sheet_row__owner_language_and_removed_service(app: App):
+async def test__sheet_row__owner_language_and_removed_service__formatted(app: App):
     booking = app.book_directly('tg:1', 'haircut', 'giorgi', local(WED, 12), name='Anna')
     row = app.service.sheet_row('action_created', booking, START)
     assert row == ['2026-10-20 12:30', 'created', booking.id, '2026-10-21', '12:00', 'Haircut', 'Giorgi', 'Anna',
-                   '+995555000111', '40 GEL', 'buttons']  # fmt: skip
+                   '+995 555 00 01 11', '40 GEL', 'buttons']  # fmt: skip
     from msgspec.structs import replace
 
     gone = app.service.sheet_row('action_cancelled', replace(booking, service_id='removed'), START)

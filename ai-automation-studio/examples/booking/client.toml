@@ -36,6 +36,8 @@ buffer_min = 0
 reminders_min_before = [1440, 120]
 cancellation_min_before = 120
 contact_phone = "+995 555 12 34 56"
+# Страна для номеров, которые покупатель набирает без кода: «599 123 456» → +995 599 12 34 56.
+phone_region = "GE"
 closed_dates = [2026-12-31, 2027-01-01, 2027-01-02, 2027-01-07]
 
 [booking.hours]

@@ -30,11 +30,11 @@ def test__cursor__per_uidvalidity_and_only_forward(store):
 
 
 def test__failures__counted_and_cleared_by_mark_uid(store):
-    assert store.record_failure('INBOX', 1, 7, 'boom') == 1
-    assert store.record_failure('INBOX', 1, 7, 'boom') == 2
+    assert store.record_failure('INBOX', 1, 7, 'boom', now=NOW) == 1
+    assert store.record_failure('INBOX', 1, 7, 'boom', now=NOW) == 2
     store.mark_uid('INBOX', 1, 7, '<m@x>', NOW)
     assert store.uid_done('INBOX', 1, 7)
-    assert store.record_failure('INBOX', 1, 7, 'again') == 1
+    assert store.record_failure('INBOX', 1, 7, 'again', now=NOW) == 1
 
 
 def test__message_lifecycle__triage_actions_finish_rows_purge(store):

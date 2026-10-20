@@ -31,8 +31,11 @@ class Category(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=
     Attributes:
         id: Код категории (`lead`, `booking_request`): его видит модель и таблица.
         description: Описание для модели — по нему она выбирает категорию.
-        notify: Это «возможность» (лид, заявка): считать в отчёте и сообщать владельцу,
-            если срочность не ниже `notify_on_urgency`.
+        label: Название для владельца по языкам (`{en = "Booking request", ru = "Заявка на бронь"}`);
+            без него показывается id с заглавной буквы.
+        lead: Это «возможность» (лид, заявка): считается в отчёте как найденный лид. Если не
+            задано — совпадает с `notify` (так вели себя конфиги до появления поля).
+        notify: Сообщать владельцу о таком письме, если срочность не ниже `notify_on_urgency`.
         draft_reply: Готовить черновик ответа, если письмо ждёт ответа.
         move_to: Папка (ярлык Gmail), куда скопировать письмо, или None. Письмо из
             исходной папки не удаляется никогда.
@@ -40,6 +43,8 @@ class Category(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=
 
     id: str
     description: str
+    label: dict[str, str] = msgspec.field(default_factory=dict)
+    lead: bool | None = None
     notify: bool = False
     draft_reply: bool = False
     move_to: str | None = None
@@ -51,6 +56,24 @@ class Category(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=
             raise ConfigError(f'категория {self.id!r}: нужно описание — по нему модель выбирает категорию')
         if self.move_to is not None:
             _check_folder(self.move_to, f'categories[{self.id}].move_to')
+        _check_languages(self.label, f'categories[{self.id}].label')
+
+    @property
+    def is_lead(self) -> bool:
+        """Считать ли письмо этой категории лидом (в отчёте и в итогах запуска)."""
+        return self.notify if self.lead is None else self.lead
+
+    def title(self, language: str) -> str:
+        """Название категории для владельца: подпись на его языке, иначе английская, иначе id.
+
+        Args:
+            language: Язык владельца.
+
+        Returns:
+            Название без служебных подчёркиваний.
+        """
+        label = self.label.get(language) or self.label.get('en')
+        return label.strip() if label else self.id.replace('_', ' ').capitalize()
 
 
 def default_categories() -> list[Category]:
@@ -59,26 +82,32 @@ def default_categories() -> list[Category]:
         Category(
             id='lead',
             description='A potential new customer asks about prices, availability, a quote or wants to buy or book.',
+            label={'en': 'New inquiry', 'ru': 'Новый запрос'},
+            lead=True,
             notify=True,
             draft_reply=True,
         ),
         Category(
             id='support',
             description='An existing customer has a question, problem, complaint, change or refund request.',
+            label={'en': 'Customer support', 'ru': 'Вопрос клиента'},
             draft_reply=True,
         ),
         Category(
             id='invoice',
             description='Invoices, bills, payment requests, receipts or payment confirmations '
             'from suppliers or partners.',
+            label={'en': 'Invoice', 'ru': 'Счёт'},
         ),
         Category(
             id='marketing',
             description='Newsletters, promotions, cold sales pitches, SEO or advertising offers and other bulk mail.',
+            label={'en': 'Newsletter or promotion', 'ru': 'Рассылка или реклама'},
         ),
         Category(
             id=FALLBACK_CATEGORY,
             description='Anything else: personal, internal, service notifications, unclear messages.',
+            label={'en': 'Other', 'ru': 'Прочее'},
         ),
     ]
 
@@ -89,16 +118,22 @@ class CompanyProfile(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
     Attributes:
         name: Название компании в подписи и в поле From.
         signature: Подпись под черновиком; пусто — только название.
+        signatures: Подписи на других языках (`{ru = "С уважением, …"}`): черновик на русском
+            не должен заканчиваться английским «Best regards».
         tone: Тон ответа своими словами (`warm, concise, professional`).
         facts: ЕДИНСТВЕННЫЕ факты, которые черновик вправе утверждать: цены, как
             забронировать, часы работы. Чего здесь нет, того черновик не обещает.
+        facts_by_language: Те же факты на других языках (`{ru = [...]}`); для черновика на
+            этом языке берутся они — модели не приходится переводить цены и условия.
         reply_language: `auto` — язык отправителя, иначе код языка (`en`, `ru`).
     """
 
     name: str
     signature: str = ''
+    signatures: dict[str, str] = msgspec.field(default_factory=dict)
     tone: str = 'warm, concise and professional'
     facts: list[str] = msgspec.field(default_factory=list)
+    facts_by_language: dict[str, list[str]] = msgspec.field(default_factory=dict)
     reply_language: str = 'auto'
 
     def __post_init__(self) -> None:
@@ -108,11 +143,30 @@ class CompanyProfile(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
             raise ConfigError('inbox.company.facts: пустой факт — уберите его')
         if self.reply_language != 'auto' and not _LANGUAGE.match(self.reply_language):
             raise ConfigError(f'inbox.company.reply_language={self.reply_language!r}: `auto` или код языка (en, ru)')
+        _check_languages(self.signatures, 'inbox.company.signatures')
+        for language, facts in self.facts_by_language.items():
+            if not _LANGUAGE.match(language):
+                raise ConfigError(f'inbox.company.facts_by_language: {language!r} — нужен код языка (en, ru)')
+            if not facts or any(not fact.strip() for fact in facts):
+                raise ConfigError(f'inbox.company.facts_by_language.{language}: пустой список или пустой факт')
 
     @property
     def sign_off(self) -> str:
-        """Подпись, которой код заканчивает каждый черновик."""
+        """Подпись по умолчанию, которой код заканчивает черновик."""
         return self.signature.strip() or self.name.strip()
+
+    def sign_off_for(self, language: str) -> str:
+        """Подпись черновика на языке ответа (если задана), иначе подпись по умолчанию."""
+        return self.signatures.get(language, '').strip() or self.sign_off
+
+    def facts_for(self, language: str) -> list[str]:
+        """Факты для черновика на языке ответа: переведённые, если есть, иначе основные."""
+        return self.facts_by_language.get(language) or self.facts
+
+    @property
+    def all_facts(self) -> list[str]:
+        """Все факты на всех языках — по ним проверяются числа в черновике."""
+        return [*self.facts, *(fact for facts in self.facts_by_language.values() for fact in facts)]
 
 
 class InboxSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
@@ -219,6 +273,14 @@ class InboxConfig(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fiel
     notify: NotifyConfig = NotifyConfig()
     sink: SinkConfig = SinkConfig()
     inbox: InboxSection
+
+
+def _check_languages(values: dict[str, str], where: str) -> None:
+    for language, value in values.items():
+        if not _LANGUAGE.match(language):
+            raise ConfigError(f'{where}: {language!r} — нужен код языка (en, ru)')
+        if not value.strip():
+            raise ConfigError(f'{where}.{language}: пустое значение')
 
 
 def _check_folder(name: str, where: str) -> None:

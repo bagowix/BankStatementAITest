@@ -481,7 +481,7 @@ class Engine:
                 Outgoing(text=self._texts.get(lang, 'got_contact'), remove_keyboard=True),
                 self._views.menu(lang),
             ], (conversation.reset())
-        phone = clean_phone(raw, international=international)
+        phone = clean_phone(raw, region=self._config.booking.phone_region, shared=international)
         if phone is None:
             # Клавиатура «Отправить номер» ещё на экране: достаточно подсказки с примером.
             return [Outgoing(text=self._texts.get(lang, 'bad_phone'))], conversation

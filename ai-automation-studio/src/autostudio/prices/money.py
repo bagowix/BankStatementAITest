@@ -10,28 +10,50 @@
   («1.299,99» и «1,299.99» → 1299.99);
 - одиночный разделитель, за которым ровно три цифры и нет разделителя другого вида, —
   это тысячи («1,299» → 1299, «1.299» → 1299); иначе это десятичная точка («12,99», «12.5»);
-- исключение: ведущий ноль («0,500») группой тысяч быть не может — это дробь.
+- исключение: ведущий ноль («0,500») группой тысяч быть не может — это дробь;
+- перевод строки — граница элемента страницы, а не разделитель тысяч: «AirPods Pro 2» в
+  заголовке и «729 ₾» под ним — это 2 и 729, а не 2 729. Знак валюты в соседнем элементе
+  («729» и «₾» в разных `<span>`) к числу прилипает, если не принадлежит числу в своей строке.
 
 Неоднозначность честная: «1.299» в валюте с тремя знаками после точки (KWD, BHD) было бы
 1.299, но это не наш рынок. Поэтому, где страница даёт машинное значение schema.org
 (`"price": "1299.00"`, `content="1299.00"`), оно разбирается строго (`parse_schema_amount`)
 и предпочитается тексту витрины.
+
+Суммы ограничены: не больше `MAX_AMOUNT` и не больше `MAX_DECIMALS` значащих знаков после
+точки. «1e-999999999» в JSON-LD — не цена, а мусор (или ловушка): записанная в ячейку
+целиком, она заняла бы гигабайты.
 """
 
 import re
+from bisect import bisect_left, bisect_right
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Final
 
 import msgspec
 
-# Всё, что браузер рисует как пробел, приводится к обычному пробелу один-к-одному:
-# длина строки не меняется, и позиции найденной цены совпадают с исходным текстом
+# Всё, что браузер рисует как пробел, приводится к обычному пробелу, а переводы строк — к '\n',
+# один-к-одному: длина строки не меняется, и позиции найденной цены совпадают с исходным текстом
 # (на этом стоит проверка цитаты модели).
-_SPACES: Final = str.maketrans(dict.fromkeys('          \t\n\r\f\v', ' '))
+_HSPACES: Final = '           　\t'
+_VSPACES: Final = '\n\r\f\v  \x85'
+_SPACES: Final = str.maketrans({**dict.fromkeys(_HSPACES, ' '), **dict.fromkeys(_VSPACES, '\n')})
 
 # Цена больше миллиарда на витрине малого бизнеса — это штрихкод, артикул или телефон.
 MAX_AMOUNT: Final = Decimal('999999999')
+_MAX_INTEGER_DIGITS: Final = len(str(MAX_AMOUNT))
+# Больше четырёх значащих знаков после точки у цены не бывает; нули в хвосте («12.50000») — бывают.
+MAX_DECIMALS: Final = 4
+_QUANTUM: Final = Decimal(1).scaleb(-MAX_DECIMALS)
+# Хвост дробной части длиннее — уже не цена, даже если это одни нули.
+_MAX_FRACTION_TEXT: Final = 12
+# Текст элемента цены или машинное значение длиннее — это не цена, а контейнер или мусор:
+# его не разбираем (и не пишем в таблицу клиента).
+MAX_PRICE_TEXT: Final = 200
+_MAX_CURRENCY_TEXT: Final = 32
+# Сколько символов перед числом смотреть в поисках «от» / «from».
+_FROM_WINDOW: Final = 40
 
 _NUMBER: Final = re.compile(
     r"""
@@ -93,9 +115,16 @@ _CURRENCY: Final = re.compile(
 )
 
 _FREE: Final = re.compile(r'(?<!\w)(?:free|бесплатно|gratis|kostenlos|უფასო)(?!\w)', re.IGNORECASE)
-_FROM: Final = re.compile(r'(?:^|[\s(:])(?:from|starting at|от|ab|desde|dès|à partir de)\s*$', re.IGNORECASE)
-_RANGE: Final = re.compile(r'^\s*(?:[-–—‒−]|\.\.\.?|…|to|до)\s*(?:US\$|[$€£₾₽₴₸₺֏₼])?\s*\d', re.IGNORECASE)
-_SCHEMA_NUMBER: Final = re.compile(r'^\d+(?:\.\d+)?$')
+# «from 1 200», «От: 1 200» — двоеточие после слова тоже бывает.
+_FROM: Final = re.compile(r'(?<!\w)(?:from|starting at|от|ab|desde|dès|à partir de)\s*:?\s*$', re.IGNORECASE)
+# Без «^»: `match(text, pos)` и так привязан к pos, а «^» совпал бы только в начале строки.
+_RANGE: Final = re.compile(r'\s*(?:[-–—‒−]|\.\.\.?|…|to|до)\s*(?:US\$|[$€£₾₽₴₸₺֏₼])?\s*\d', re.IGNORECASE)
+# «4 999 ₾ − 10%» — это бейдж скидки после цены, а не диапазон «от 4 999 до 10».
+_DISCOUNT: Final = re.compile(r'\s*[-–—‒−]\s*\d{1,3}(?:[.,]\d+)?\s*%')
+_PERCENT_AFTER: Final = re.compile(r' *%')
+# Машинное значение schema.org: «1299.00», а также экспоненциальная запись «1e3» / «1e-60000»
+# (её витринный разбор прочитал бы как «60000»).
+_SCHEMA_NUMBER: Final = re.compile(r'^\d+(?:\.\d+)?(?:[eE][+-]?\d{1,10})?$')
 _RANGE_GAP: Final = re.compile(r'\s*(?:[-–—‒−]|\.\.\.?|…|to|до)\s*', re.IGNORECASE)
 # Максимальный зазор между числом и знаком валюты, чтобы считать их одной ценой («1 299 ₾»).
 _MAX_GAP: Final = 2
@@ -133,6 +162,8 @@ class PriceMention(msgspec.Struct, frozen=True, kw_only=True):
     Attributes:
         start: Начало фрагмента (вместе с прилегающим знаком валюты).
         end: Конец фрагмента (не включая).
+        number_start: Начало самого числа.
+        number_end: Конец самого числа (не включая).
         amount: Сумма.
         currency: Код валюты рядом с числом или None.
         currency_token: Запись валюты на странице.
@@ -140,6 +171,8 @@ class PriceMention(msgspec.Struct, frozen=True, kw_only=True):
 
     start: int
     end: int
+    number_start: int
+    number_end: int
     amount: Decimal
     currency: str | None
     currency_token: str | None
@@ -150,6 +183,13 @@ class _Token(msgspec.Struct, frozen=True):
     end: int
     text: str
     code: str
+
+
+class _Option(msgspec.Struct, frozen=True):
+    # Знак валюты рядом с числом: зазор, индекс знака и «через границу строки».
+    gap: int
+    index: int
+    crosses: bool
 
 
 def _currency_tokens(text: str) -> list[_Token]:
@@ -170,39 +210,95 @@ def _currency_tokens(text: str) -> list[_Token]:
     return tokens
 
 
+def bounded_amount(value: Decimal, *, allow_zero: bool = False) -> Decimal | None:
+    """Сумма в пределах здравого смысла или None.
+
+    Args:
+        value: Сумма из текста или разметки.
+        allow_zero: Разрешить ноль («бесплатно»).
+
+    Returns:
+        Сумма (хвост из нулей дальше `MAX_DECIMALS` знаков отрезан) или None — для NaN,
+        бесконечности, отрицательных, слишком больших и слишком дробных значений.
+    """
+    if not value.is_finite() or value < 0 or value > MAX_AMOUNT or (value == 0 and not allow_zero):
+        return None
+    exponent = value.as_tuple().exponent
+    if isinstance(exponent, int) and exponent < -MAX_DECIMALS:
+        # «12.50000» — те же 12.5; «1e-999999999» — не цена, а мусор разметки.
+        rounded = value.quantize(_QUANTUM)
+        return rounded if rounded == value else None
+    return value
+
+
 def _amount(match: re.Match[str]) -> Decimal | None:
+    frac: str | None
     if match.group('lead') is not None:
-        lead, groups, frac = match.group('lead'), match.group('groups'), match.group('gfrac')
-        sep = match.group('sep')
+        lead, groups, sep = match.group('lead'), match.group('groups'), match.group('sep')
+        frac = match.group('gfrac')
         if lead == '0' and sep in '.,' and len(groups) == 3 and frac is None:
             # «0,500»: группа тысяч не начинается с нуля — значит, это дробь.
-            digits = f'0.{groups}'
+            integer, frac = '0', groups
         else:
-            digits = lead + groups.replace(sep, '') + (f'.{frac}' if frac else '')
+            integer = lead + groups.replace(sep, '')
     else:
-        frac = match.group('frac')
-        digits = match.group('int') + (f'.{frac}' if frac else '')
+        integer, frac = match.group('int'), match.group('frac')
+    # Проверки по строке — до Decimal: на странице встречаются «числа» в тысячи цифр.
+    if len(integer.lstrip('0')) > _MAX_INTEGER_DIGITS:
+        return None
+    if frac and (len(frac) > _MAX_FRACTION_TEXT or len(frac.rstrip('0')) > MAX_DECIMALS):
+        return None
     try:
-        value = Decimal(digits)
+        value = Decimal(f'{integer}.{frac}' if frac else integer)
     except InvalidOperation:  # pragma: no cover - регулярное выражение пропускает только цифры
         return None
-    return value if value <= MAX_AMOUNT else None
+    return bounded_amount(value, allow_zero=True)
 
 
-def _adjacent(tokens: list[_Token], start: int, end: int, text: str) -> _Token | None:
-    best: _Token | None = None
-    best_gap = _MAX_GAP + 1
-    for token in tokens:
-        if token.end <= start:
-            gap_text = text[token.end : start]
-        elif token.start >= end:
-            gap_text = text[end : token.start]
-        else:
-            continue
-        if gap_text.strip(' ') or len(gap_text) >= best_gap:
-            continue
-        best, best_gap = token, len(gap_text)
-    return best
+def _option(norm: str, tokens: list[_Token], index: int, start: int, end: int) -> _Option | None:
+    # Зазор между числом и знаком: не больше `_MAX_GAP` символов и только пробелы/переводы строки.
+    if end - start > _MAX_GAP:
+        return None
+    gap = norm[start:end]
+    if gap.strip(' \n'):
+        return None
+    return _Option(gap=end - start, index=index, crosses='\n' in gap)
+
+
+def _attach(norm: str, spans: list[tuple[int, int]], tokens: list[_Token]) -> list[int | None]:
+    """Какой знак валюты принадлежит каждому числу (индекс в `tokens` или None).
+
+    Знак ищется только у ближайших соседей (bisect по позициям), поэтому разбор линеен по
+    длине текста — страница в мегабайты цифр не превращается в часы работы. Сначала числа
+    берут знаки из своей строки; через границу строки знак достаётся числу, только если он
+    ничей: «iPhone 15» над «$799» — это 15 без валюты и 799 долларов.
+    """
+    starts = [token.start for token in tokens]
+    ends = [token.end for token in tokens]
+    owners: list[int | None] = [None] * len(spans)
+    bound: set[int] = set()
+    late: list[tuple[int, list[_Option]]] = []
+    for number, (start, end) in enumerate(spans):
+        options: list[_Option] = []
+        before = bisect_right(ends, start) - 1
+        if before >= 0 and (found := _option(norm, tokens, before, tokens[before].end, start)) is not None:
+            options.append(found)
+        after = bisect_left(starts, end)
+        if after < len(tokens) and (found := _option(norm, tokens, after, end, tokens[after].start)) is not None:
+            options.append(found)
+        same_line = [option for option in options if not option.crosses]
+        if same_line:
+            # При равном зазоре побеждает знак перед числом (он раньше в списке).
+            pick = min(same_line, key=lambda option: option.gap)
+            owners[number] = pick.index
+            bound.add(pick.index)
+        elif options:
+            late.append((number, options))
+    for number, options in late:
+        free = [option for option in options if option.index not in bound]
+        if free:
+            owners[number] = min(free, key=lambda option: option.gap).index
+    return owners
 
 
 def _not_a_price(text: str, start: int, end: int, *, check_before: bool, check_after: bool) -> bool:
@@ -211,14 +307,15 @@ def _not_a_price(text: str, start: int, end: int, *, check_before: bool, check_a
     after = text[end] if end < len(text) else ''
     if check_before and before.isalpha():
         return True
-    return check_after and (after.isalpha() or text[end:].lstrip(' ')[:1] == '%')
+    return check_after and (after.isalpha() or _PERCENT_AFTER.match(text, end) is not None)
 
 
 def find_price_mentions(text: str) -> list[PriceMention]:
     """Все числа текста, похожие на цену, по порядку.
 
     Число, приклеенное к букве («128GB») или к знаку процента («-15%»), пропускается,
-    если только эта «буква» не знак валюты («1299GEL»).
+    если только эта «буква» не знак валюты («1299GEL»). Число не продолжается через
+    перевод строки (границу элемента страницы).
 
     Args:
         text: Текст витрины или его фрагмент.
@@ -228,23 +325,25 @@ def find_price_mentions(text: str) -> list[PriceMention]:
     """
     norm = text.translate(_SPACES)
     tokens = _currency_tokens(norm)
+    numbers = [
+        (match.start(), match.end(), amount)
+        for match in _NUMBER.finditer(norm)
+        if (amount := _amount(match)) is not None
+    ]
+    owners = _attach(norm, [(start, end) for start, end, _ in numbers], tokens)
     mentions: list[PriceMention] = []
-    for match in _NUMBER.finditer(norm):
-        amount = _amount(match)
-        if amount is None:
-            continue
-        start, end = match.start(), match.end()
-        token = _adjacent(tokens, start, end, norm)
+    for (start, end, amount), owner in zip(numbers, owners, strict=True):
+        token = tokens[owner] if owner is not None else None
         before_free = token is None or token.start >= end
         after_free = token is None or token.end <= start
         if _not_a_price(norm, start, end, check_before=before_free, check_after=after_free):
             continue
-        span_start = min(start, token.start) if token else start
-        span_end = max(end, token.end) if token else end
         mentions.append(
             PriceMention(
-                start=span_start,
-                end=span_end,
+                start=min(start, token.start) if token else start,
+                end=max(end, token.end) if token else end,
+                number_start=start,
+                number_end=end,
                 amount=amount,
                 currency=token.code if token else None,
                 currency_token=token.text if token else None,
@@ -253,17 +352,19 @@ def find_price_mentions(text: str) -> list[PriceMention]:
     return mentions
 
 
-def parse_price(text: str, *, allow_free: bool = False) -> ParsedPrice | None:
+def parse_price(text: str, *, allow_free: bool = False, infer_currency: bool = True) -> ParsedPrice | None:
     """Читает цену из текста витрины.
 
     Из нескольких чисел выбирается первое, рядом с которым стоит знак валюты; если таких
     нет — первое число вообще. Если валюта у числа не указана, но во всём тексте названа
-    ровно одна валюта, берётся она.
+    ровно одна валюта, берётся она (если `infer_currency`).
 
     Args:
         text: Текст элемента цены, цитата модели или meta-значение.
         allow_free: Считать «Бесплатно»/«Free» и нулевую цену ценой 0. По умолчанию
             нет: ноль на витрине чаще значит «цена по запросу», чем подарок.
+        infer_currency: Брать единственную валюту текста для числа без знака. Для проверки
+            цитаты модели выключается: валюта обязана стоять рядом с числом.
 
     Returns:
         Цена или None, если цены в тексте нет.
@@ -277,21 +378,23 @@ def parse_price(text: str, *, allow_free: bool = False) -> ParsedPrice | None:
     index = next((i for i, m in enumerate(mentions) if m.currency is not None), 0)
     chosen = mentions[index]
     currency, token = chosen.currency, chosen.currency_token
-    if index > 0 and _RANGE_GAP.fullmatch(norm[mentions[index - 1].end : chosen.start]):
+    if index > 0 and _RANGE_GAP.fullmatch(norm, mentions[index - 1].end, chosen.start):
         # «10 - 20 GEL»: валюта стоит только у верхней границы, а цена диапазона — нижняя.
         # (Будь валюта у нижней границы, выбрана была бы она сама.)
         lower = mentions[index - 1]
         return ParsedPrice(amount=lower.amount, currency=currency, currency_token=token, qualifier=Qualifier.RANGE)
-    if currency is None:
+    if currency is None and infer_currency:
         codes = {t.code: t.text for t in _currency_tokens(norm)}
         if len(codes) == 1:
             currency, token = next(iter(codes.items()))
     qualifier = Qualifier.EXACT
     if chosen.amount == 0:
         qualifier = Qualifier.FREE
-    elif _RANGE.match(norm[chosen.end :]):
+    elif _RANGE.match(norm, chosen.end) and not _DISCOUNT.match(norm, chosen.end):
         qualifier = Qualifier.RANGE
-    elif _FROM.search(norm[: chosen.start]) or (token is not None and token.endswith('დან')):
+    elif _FROM.search(norm, max(0, chosen.start - _FROM_WINDOW), chosen.start) or (
+        token is not None and token.endswith('დან')
+    ):
         qualifier = Qualifier.FROM
     return ParsedPrice(amount=chosen.amount, currency=currency, currency_token=token, qualifier=qualifier)
 
@@ -307,7 +410,7 @@ def parse_schema_amount(value: str | int | Decimal | None) -> Decimal | None:
         value: Число из JSON (int или Decimal — float сюда не попадает) или строка.
 
     Returns:
-        Положительная сумма или None.
+        Положительная сумма в пределах `bounded_amount` или None.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -315,6 +418,8 @@ def parse_schema_amount(value: str | int | Decimal | None) -> Decimal | None:
         amount = Decimal(value)
     else:
         cleaned = value.strip()
+        if len(cleaned) > MAX_PRICE_TEXT:
+            return None
         if _SCHEMA_NUMBER.match(cleaned):
             amount = Decimal(cleaned)
         else:
@@ -322,9 +427,7 @@ def parse_schema_amount(value: str | int | Decimal | None) -> Decimal | None:
             if parsed is None:
                 return None
             amount = parsed.amount
-    if not amount.is_finite() or amount <= 0 or amount > MAX_AMOUNT:
-        return None
-    return amount
+    return bounded_amount(amount)
 
 
 def normalize_currency(value: str | None) -> str | None:
@@ -339,6 +442,8 @@ def normalize_currency(value: str | None) -> str | None:
     if not value:
         return None
     cleaned = value.strip()
+    if len(cleaned) > _MAX_CURRENCY_TEXT:
+        return None
     if cleaned in _SYMBOLS:
         return _SYMBOLS[cleaned]
     upper = cleaned.upper()
@@ -375,5 +480,15 @@ def resolve_currency(*, structured: str | None, parsed: ParsedPrice | None, decl
 
 
 def collapse_spaces(text: str) -> str:
-    """Сжимает любые пробельные символы в одиночные пробелы (для сравнения цитат)."""
+    """Сжимает любые пробельные символы (и переводы строк) в одиночные пробелы."""
     return ' '.join(text.translate(_SPACES).split())
+
+
+def collapse_lines(text: str) -> str:
+    """Сжимает пробелы внутри строк и убирает пустые строки, сохраняя границы строк.
+
+    Перевод строки здесь — граница элемента страницы: по нему `find_price_mentions` не
+    склеивает числа из соседних элементов.
+    """
+    lines = (' '.join(line.split()) for line in text.translate(_SPACES).split('\n'))
+    return '\n'.join(line for line in lines if line)

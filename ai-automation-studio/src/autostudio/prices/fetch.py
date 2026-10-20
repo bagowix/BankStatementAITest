@@ -4,13 +4,18 @@
 обошли его robots.txt, банит IP оператора, и клиент остаётся без цен. Поэтому:
 
 - к одному сайту — не чаще раза в `min_delay_s`, и не больше одного запроса одновременно;
-- robots.txt читается один раз за запуск на сайт: нет файла (4xx) или сайт недоступен —
-  можно; 5xx — сайт болеет, в этот запуск его не трогаем;
+- robots.txt читается один раз за запуск на сайт и разбирается по RFC 9309 (protego:
+  `*`, `$`, самое длинное совпадение — одинаково на всех версиях Python; у
+  `urllib.robotparser` в 3.12 правила с `*` молча не работали). Нет файла (4xx) или сайт
+  недоступен — можно; 5xx — сайт болеет, в этот запуск его не трогаем;
 - 429/5xx/таймаут — повтор с экспоненциальной паузой; `Retry-After` соблюдается, а если
   сайт просит подождать дольше предела, страница откладывается до следующего запуска;
-- страница больше `max_page_bytes` обрывается на потоке, не дочитываясь в память;
+- страница больше `max_page_bytes` обрывается на потоке, не дочитываясь в память, а у каждой
+  попытки есть общий срок (`timeout_s` у httpx — это предел на каждый шаг чтения, и сайт,
+  отдающий по байту, иначе держал бы проход часами);
 - редиректы проходятся вручную, и каждый адрес заново проверяется на SSRF (включая
-  адреса, в которые резолвится имя) и на robots.txt.
+  адреса, в которые резолвится имя — то самое punycode-имя, к которому подключится httpx)
+  и на robots.txt.
 
 Ограничение: между нашей проверкой DNS и соединением httpx имя резолвится ещё раз
 (DNS rebinding). Для полной защиты сервер оператора закрывает исходящие соединения во
@@ -23,15 +28,16 @@ import datetime as dt
 import email.utils
 import ipaddress
 import logging
+import math
 import re
 import socket
 import time
-import urllib.robotparser
 from collections.abc import Awaitable, Callable
 from typing import Final, Self
 
 import httpx
 import msgspec
+from protego import Protego
 
 from autostudio import __version__
 from autostudio.clock import Clock, system_now
@@ -52,6 +58,9 @@ _ACCEPT: Final = 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5'
 # Crawl-delay из robots.txt соблюдается, но не больше минуты: иначе один сайт растянул бы
 # проход на часы. Дольше — значит, сайт не рад частым визитам, и частоту стоит обсудить.
 _MAX_CRAWL_DELAY_S: Final = 60.0
+# Общий срок одной попытки — во столько раз больше `timeout_s` (предела на шаг чтения).
+_ATTEMPT_FACTOR: Final = 3.0
+_MAX_RETRY_DIGITS: Final = 9
 
 
 class FetchResult(msgspec.Struct, frozen=True, kw_only=True):
@@ -96,6 +105,12 @@ class FetchSettings(msgspec.Struct, frozen=True, kw_only=True):
     max_redirects: int = 5
     max_retry_after_s: float = 60.0
     backoff_base_s: float = 2.0
+    attempt_timeout_s: float | None = None
+
+    @property
+    def attempt_deadline_s(self) -> float:
+        """Общий срок одной попытки: соединение, заголовки и всё тело страницы."""
+        return self.attempt_timeout_s or self.timeout_s * _ATTEMPT_FACTOR
 
     @classmethod
     def from_section(cls, section: PricesSection, version: str = __version__) -> Self:
@@ -144,26 +159,25 @@ type _Outcome = _Body | _Redirect | _Transient | FetchFailure
 class _RobotsRules:
     """Правила robots.txt одного сайта: «всё можно», «всё нельзя» или разобранный файл."""
 
-    def __init__(self, parser: urllib.robotparser.RobotFileParser | None, *, allow: bool) -> None:
-        self._parser = parser
+    def __init__(self, rules: Protego | None, *, allow: bool) -> None:
+        self._rules = rules
         self._allow = allow
 
     @classmethod
     def from_text(cls, text: str) -> Self:
-        parser = urllib.robotparser.RobotFileParser()
-        parser.parse(text.splitlines())
-        return cls(parser, allow=True)
+        return cls(Protego.parse(text), allow=True)
 
     def allows(self, agent: str, url: str) -> bool:
-        if self._parser is None:
+        if self._rules is None:
             return self._allow
-        return self._parser.can_fetch(agent, url)
+        return self._rules.can_fetch(url, agent)
 
     def crawl_delay(self, agent: str) -> float:
-        if self._parser is None:
+        if self._rules is None:
             return 0.0
-        delay = self._parser.crawl_delay(agent)
-        return float(delay) if delay is not None else 0.0
+        delay = self._rules.crawl_delay(agent)
+        # Мусор вроде «Crawl-delay: 1e400» паузой не считается.
+        return delay if delay is not None and math.isfinite(delay) and delay > 0 else 0.0
 
 
 def decode_html(body: bytes, charset: str | None) -> str:
@@ -183,10 +197,11 @@ def decode_html(body: bytes, charset: str | None) -> str:
         match = _META_CHARSET.search(body[:4096])
         candidate = match.group(1).decode('ascii') if match else None
     try:
-        codec = codecs.lookup(candidate or 'utf-8').name
-    except LookupError:
-        codec = 'utf-8'
-    return body.decode(codec, errors='replace')
+        return body.decode(codecs.lookup(candidate or 'utf-8').name, errors='replace')
+    except (LookupError, UnicodeError, ValueError):
+        # «charset=hex», «base64», «idna» — кодеки Python, но не кодировки текста: страницу
+        # читаем как UTF-8, а не падаем на чужом заголовке.
+        return body.decode('utf-8', errors='replace')
 
 
 class PoliteFetcher:
@@ -266,8 +281,15 @@ class PoliteFetcher:
             pass
         else:
             return None  # IP-литерал уже проверен url_problem
+        # Резолвим ровно то имя, к которому подключится httpx (IDNA 2008, punycode): системный
+        # резолвер кодирует Unicode-имя по IDNA 2003, и «faß.example» превратился бы в другое
+        # имя — «fass.example» — с другими адресами.
         try:
-            addresses = await self._resolve(host, parsed.port or (443 if parsed.scheme == 'https' else 80))
+            wire_host = parsed.raw_host.decode('ascii')
+        except UnicodeDecodeError:
+            return FetchFailure(reason='blocked_url', detail=f'{host}: имя не в ASCII после IDNA')
+        try:
+            addresses = await self._resolve(wire_host, parsed.port or (443 if parsed.scheme == 'https' else 80))
         except OSError as exc:
             return FetchFailure(reason='dns', detail=f'{host}: {type(exc).__name__}')
         for address in addresses:
@@ -297,8 +319,15 @@ class PoliteFetcher:
 
     async def _load_robots(self, site: str) -> _RobotsRules:
         current = f'{site}/robots.txt'
-        for _ in range(self._s.max_redirects + 1):
-            if await self._check_address(current) is not None:
+        for hop in range(self._s.max_redirects + 1):
+            blocked = await self._check_address(current)
+            if blocked is not None and hop == 0:
+                # robots.txt того же сайта, чья страница только что прошла проверку, — не «файла
+                # нет», а сбой (адрес не собрался, DNS моргнул): в этот запуск сайт не трогаем.
+                logger.warning('robots.txt %s не проверен (%s) — сайт пропущен в этом запуске', site, blocked.reason)
+                return _RobotsRules(None, allow=False)
+            if blocked is not None:
+                # Редирект robots.txt во внутреннюю сеть — как отсутствие файла (RFC 9309 §2.3.1.2).
                 return _RobotsRules(None, allow=True)
             outcome = await self._request(current, limit=_ROBOTS_LIMIT, html_only=False, truncate=True)
             if isinstance(outcome, _Redirect):
@@ -351,12 +380,19 @@ class PoliteFetcher:
         async with self._lock_for(site):
             await self._wait_turn(site)
             try:
-                async with self._http.stream(
-                    'GET', url, headers=self._headers, timeout=self._s.timeout_s, follow_redirects=False
-                ) as response:
+                async with (
+                    asyncio.timeout(self._s.attempt_deadline_s),
+                    self._http.stream(
+                        'GET', url, headers=self._headers, timeout=self._s.timeout_s, follow_redirects=False
+                    ) as response,
+                ):
                     return await self._consume(response, limit=limit, html_only=html_only, truncate=truncate)
             except httpx.TimeoutException:
                 return _Transient(reason='timeout', detail=f'дольше {self._s.timeout_s:g} с')
+            except TimeoutError:
+                return _Transient(
+                    reason='timeout', detail=f'страница грузилась дольше {self._s.attempt_deadline_s:g} с'
+                )
             except httpx.TransportError as exc:
                 # В тексте исключения httpx — полный URL; наружу идёт только тип.
                 return _Transient(reason='network', detail=type(exc).__name__)
@@ -396,8 +432,10 @@ class PoliteFetcher:
         value = response.headers.get('retry-after', '').strip()
         if not value:
             return None
-        if value.isdigit():
-            return float(value)
+        if value.isascii() and value.isdigit():
+            # isdigit() без isascii() пропустил бы «²» — float() на нём падает. Число в сотни
+            # цифр — просто «очень долго»: страница отложится до следующего запуска.
+            return float(value) if len(value) <= _MAX_RETRY_DIGITS else math.inf
         try:
             when = email.utils.parsedate_to_datetime(value)
         except (TypeError, ValueError):

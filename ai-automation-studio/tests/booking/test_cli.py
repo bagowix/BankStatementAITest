@@ -43,7 +43,7 @@ def test__check__online__token_required_and_validated(env, monkeypatch, capsys):
     assert 'токен бота: BOOKING_BOT_TOKEN задан' in out and TOKEN not in out
 
 
-def test__check_environment__google_sink_and_notify_channels(env, write_toml):
+def test__check_environment__google_sink_and_notify_channels__each_secret_required(env, write_toml):
     text = EXAMPLE.read_text(encoding='utf-8').replace(
         'backend = "csv"', 'backend = "google"\nspreadsheet_id = "sheet-1"'
     )
@@ -67,7 +67,7 @@ def test__check_environment__google_sink_and_notify_channels(env, write_toml):
     assert cli.check_environment(config, environ)[-1].startswith('Google Sheets')
 
 
-def test__describe__warnings_for_thin_config(env, write_toml):
+def test__describe__thin_config__warnings(env, write_toml):
     text = EXAMPLE.read_text(encoding='utf-8').replace('admin_chat_ids = [111111111]', 'admin_chat_ids = []')
     text = text.replace('contact_phone = "+995 555 12 34 56"\n', '')
     text = text.split('[[booking.faq]]')[0]
@@ -78,7 +78,7 @@ def test__describe__warnings_for_thin_config(env, write_toml):
     assert 'модель fake' in joined
 
 
-def test__agenda__reads_store_readonly(env, capsys):
+def test__agenda__existing_store__printed_readonly(env, capsys):
     config = cli.load_booking_config(EXAMPLE)
     store = BookingStore(env / 'data' / config.client.id / 'booking.sqlite')
     start = local(WED, 12)
@@ -100,7 +100,7 @@ def test__agenda__reads_store_readonly(env, capsys):
         cli.agenda(EXAMPLE, days=0)
 
 
-def test__chat__sandbox_dir_and_quit(env, monkeypatch, capsys):
+def test__chat__scripted_input__sandbox_used_live_data_untouched(env, monkeypatch, capsys):
     answers = iter(['3', '/quit'])
     monkeypatch.setattr('builtins.input', lambda prompt: next(answers))
     cli.chat(EXAMPLE, data_dir=env / 'sandbox', language='ru')
@@ -110,7 +110,7 @@ def test__chat__sandbox_dir_and_quit(env, monkeypatch, capsys):
     assert not (env / 'data').exists()
 
 
-def test__run__wires_container_and_stops(env, monkeypatch, capsys):
+def test__run__polling_returns__container_wired_and_stopped(env, monkeypatch, capsys):
     monkeypatch.setenv('BOOKING_BOT_TOKEN', TOKEN)
     seen: list[list[str]] = []
 
@@ -123,12 +123,12 @@ def test__run__wires_container_and_stops(env, monkeypatch, capsys):
     assert 'бот остановлен' in capsys.readouterr().out
 
 
-def test__demo__command_prints_summary(env, capsys):
+def test__demo__command__summary_printed(env, capsys):
     cli.demo(out=env / 'demo')
     assert 'офлайн-демо бота записи' in capsys.readouterr().out
 
 
-def test__root_cli__booking_subcommand_registered():
+def test__root_cli__import__booking_subcommand_registered():
     from autostudio.cli import app
 
     assert 'booking' in app

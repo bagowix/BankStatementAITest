@@ -9,6 +9,7 @@ from selectolax.lexbor import LexborHTMLParser, SelectolaxError
 
 from autostudio.clientconf import ClientInfo, NotifyConfig, SinkConfig
 from autostudio.errors import ConfigError
+from autostudio.prices.money import MAX_AMOUNT, MAX_DECIMALS, bounded_amount
 from autostudio.prices.urls import url_problem
 
 _PRODUCT_ID: Final = re.compile(r'^[A-Za-z0-9][\w.-]{0,63}$')
@@ -22,6 +23,15 @@ _MAX_CHANGE_PCT: Final = Decimal(100)
 # Токен, по которому robots.txt сайта может обратиться именно к нам (`User-agent: autostudio-prices`).
 ROBOTS_AGENT: Final = 'autostudio-prices'
 DEFAULT_USER_AGENT: Final = 'Mozilla/5.0 (compatible; {token}/{version}; +mailto:{contact_email})'
+
+
+class ConfigFieldError(ConfigError, ValueError):
+    """Ошибка поля конфига.
+
+    Наследует и `ValueError`: msgspec превращает её в ошибку проверки с путём до поля
+    (`$.prices.products[2].offers[0]`), так что оператор видит, какой товар и какая ссылка
+    сломаны, а не только «селектор не разбирается».
+    """
 
 
 class Offer(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
@@ -43,29 +53,30 @@ class Offer(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=Tru
 
     def __post_init__(self) -> None:
         if not self.competitor.strip() or len(self.competitor) > 80 or '\n' in self.competitor:
-            raise ConfigError(f'offer.competitor={self.competitor!r}: непустая строка до 80 символов')
+            raise ConfigFieldError(f'offer.competitor={self.competitor!r}: непустая строка до 80 символов')
+        where = f'offer «{self.competitor}»'
         problem = url_problem(self.url)
         if problem is not None:
-            raise ConfigError(f'offer.url={self.url!r}: {problem}')
+            raise ConfigFieldError(f'{where}: url={self.url!r}: {problem}')
         if self.selector is not None:
-            _check_selector(self.selector)
+            _check_selector(self.selector, where)
         if self.attr is not None:
             if self.selector is None:
-                raise ConfigError(f'offer.attr={self.attr!r} без offer.selector: нечего читать')
+                raise ConfigFieldError(f'{where}: offer.attr={self.attr!r} без offer.selector: нечего читать')
             if not _ATTR.match(self.attr):
-                raise ConfigError(f'offer.attr={self.attr!r}: недопустимое имя атрибута')
+                raise ConfigFieldError(f'{where}: offer.attr={self.attr!r}: недопустимое имя атрибута')
         if self.currency is not None and not _CURRENCY.match(self.currency):
-            raise ConfigError(f'offer.currency={self.currency!r}: код ISO 4217 заглавными, например GEL')
+            raise ConfigFieldError(f'{where}: offer.currency={self.currency!r}: код ISO 4217 заглавными, например GEL')
 
 
-def _check_selector(selector: str) -> None:
+def _check_selector(selector: str, where: str) -> None:
     # Опечатка в селекторе должна всплыть на `check`, а не ночью на боевом запуске.
     if not selector.strip():
-        raise ConfigError('offer.selector пуст')
+        raise ConfigFieldError(f'{where}: offer.selector пуст')
     try:
         LexborHTMLParser('<p></p>').css(selector)
     except SelectolaxError:
-        raise ConfigError(f'offer.selector={selector!r}: CSS-селектор не разбирается') from None
+        raise ConfigFieldError(f'{where}: offer.selector={selector!r}: CSS-селектор не разбирается') from None
 
 
 class Product(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
@@ -87,16 +98,19 @@ class Product(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=T
 
     def __post_init__(self) -> None:
         if not _PRODUCT_ID.match(self.id):
-            raise ConfigError(f'product.id={self.id!r}: латиница, цифры, «-», «_», «.», до 64 символов')
+            raise ConfigFieldError(f'product.id={self.id!r}: латиница, цифры, «-», «_», «.», до 64 символов')
         if not self.name.strip():
-            raise ConfigError(f'product {self.id}: пустое name')
-        if self.own_price is not None and (not self.own_price.is_finite() or self.own_price <= 0):
-            raise ConfigError(f'product {self.id}: own_price должна быть больше нуля')
+            raise ConfigFieldError(f'product {self.id}: пустое name')
+        if self.own_price is not None and bounded_amount(self.own_price) != self.own_price:
+            raise ConfigFieldError(
+                f'product {self.id}: own_price — больше нуля, до {MAX_AMOUNT}, не больше {MAX_DECIMALS} знаков '
+                'после точки'
+            )
         if not _CURRENCY.match(self.currency):
-            raise ConfigError(f'product {self.id}: currency={self.currency!r} — код ISO 4217, например GEL')
+            raise ConfigFieldError(f'product {self.id}: currency={self.currency!r} — код ISO 4217, например GEL')
         competitors = [offer.competitor.strip().lower() for offer in self.offers]
         if len(set(competitors)) != len(competitors):
-            raise ConfigError(f'product {self.id}: один конкурент указан дважды — уведомления станут неоднозначны')
+            raise ConfigFieldError(f'product {self.id}: один конкурент указан дважды — уведомления станут неоднозначны')
 
 
 class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
@@ -118,6 +132,8 @@ class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
         llm_max_pages_per_run: Сколько страниц за запуск может прочитать модель.
         failure_alert_after: После скольких сбоев подряд одной ссылки звать оператора.
         sheet_history: `changes` — в «History» только новые значения; `all` — каждая проверка.
+        max_run_minutes: Предел длины прохода: что не успели проверить — «не проверено» в этот раз,
+            а не зависший проход, который держит и следующие запуски таймера.
     """
 
     products: list[Product]
@@ -135,6 +151,7 @@ class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
     llm_max_pages_per_run: int = 20
     failure_alert_after: int = 3
     sheet_history: Literal['changes', 'all'] = 'changes'
+    max_run_minutes: float = 30.0
 
     def __post_init__(self) -> None:
         if not self.products:
@@ -155,6 +172,7 @@ class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
         _check_range('max_page_bytes', self.max_page_bytes, 10_000, 20_000_000)
         _check_range('llm_max_pages_per_run', self.llm_max_pages_per_run, 0, 1000)
         _check_range('failure_alert_after', self.failure_alert_after, 1, 100)
+        _check_range('max_run_minutes', self.max_run_minutes, 1, 360)
 
     @property
     def offer_count(self) -> int:

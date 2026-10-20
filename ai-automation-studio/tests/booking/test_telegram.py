@@ -115,7 +115,7 @@ async def feed(bot: Bot, booking_bot: BookingBot, raw: dict) -> None:
     await dispatcher.feed_update(bot, Update.model_validate(raw, context={'bot': bot}))
 
 
-def test__render_markup__inline_contact_remove_none():
+def test__render_markup__each_kind__matching_markup():
     inline = render_markup(Outgoing(text='x', buttons=[[Button('A', 'a')]]))
     assert isinstance(inline, InlineKeyboardMarkup) and inline.inline_keyboard[0][0].callback_data == 'a'
     contact = render_markup(Outgoing(text='x', request_contact='📱 Share', keyboard=['✖️ Cancel']))
@@ -126,7 +126,7 @@ def test__render_markup__inline_contact_remove_none():
     assert render_markup(Outgoing(text='x')) is None
 
 
-def test__chat_keys__roundtrip_and_foreign_key_rejected():
+def test__chat_keys__foreign_key__recipient_gone():
     assert chat_key(-100123) == 'tg:-100123' and chat_id_of('tg:-100123') == -100123
     for bad in ('console:operator', 'tg:abc', '123'):
         with pytest.raises(RecipientGoneError):
@@ -247,7 +247,7 @@ async def test__router__admin_chat_group_member__admin(bot, session, app):
     assert booking_bot.admin_keys == ['tg:-100']
 
 
-async def test__router__bot_sender_ignored(bot, session, booking_bot):
+async def test__router__message_from_bot__ignored(bot, session, booking_bot):
     raw = message_update('/start')
     raw['message']['from']['is_bot'] = True
     await feed(bot, booking_bot, raw)
@@ -284,7 +284,7 @@ async def test__process__no_operator__apology_only(bot, session, app, monkeypatc
     assert len(session.sent()) == 1
 
 
-async def test__set_commands__default_and_per_language(bot, session, booking_bot):
+async def test__set_commands__languages__default_and_per_language(bot, session, booking_bot):
     await set_commands(bot, booking_bot, ['en', 'ru'])
     calls = [r for r in session.requests if isinstance(r, SetMyCommands)]
     assert [c.language_code for c in calls] == [None, 'en', 'ru']
@@ -293,7 +293,7 @@ async def test__set_commands__default_and_per_language(bot, session, booking_bot
     await set_commands(bot, booking_bot, ['en'])
 
 
-async def test__run_polling__webhook_dropped_loop_stopped(bot, session, booking_bot, app, monkeypatch):
+async def test__run_polling__stopped__webhook_dropped_and_loop_stopped(bot, session, booking_bot, app, monkeypatch):
     from autostudio.booking.reminders import ReminderLoop
     from autostudio.runlog import Heartbeat
 

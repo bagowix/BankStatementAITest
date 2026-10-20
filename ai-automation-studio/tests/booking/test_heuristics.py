@@ -100,7 +100,7 @@ def test__answer_faq__not_covered__unanswerable():
     assert faq('Do you do hair coloring for kids?') == FaqAnswer(answerable=False, answer=None, faq_ids=[])
 
 
-async def test__booking_fake_llm__both_schemas_registered():
+async def test__booking_fake_llm__both_schemas__registered():
     llm = booking_fake_llm()
     out = await llm.extract(system=SYSTEM, prompt=wrap_customer_message('hello'), schema=BookingIntent)
     assert out.intent == 'greeting'

@@ -1,4 +1,5 @@
 import json
+import time
 from decimal import Decimal
 
 import pytest
@@ -7,7 +8,9 @@ from autostudio.errors import LLMError
 from autostudio.llm import FakeLLM
 from autostudio.prices.config import Offer
 from autostudio.prices.extract import (
+    MAX_EVIDENCE_CHARS,
     MAX_VISIBLE_CHARS,
+    MULTIPLE_PRODUCTS,
     SYSTEM_PROMPT,
     Availability,
     ExtractionFailure,
@@ -313,16 +316,19 @@ def test__visible_text__scripts_styles_hidden__removed():
 
 def test__visible_text__main_with_price__only_main():
     html = page(body='<nav>menu menu</nav><main><h1>AirPods</h1><p>729 ₾</p></main><footer>foot</footer>')
-    assert visible_text(html) == 'AirPods 729 ₾'
+    # Каждый элемент — своя строка: число из заголовка не склеивается с ценой.
+    assert visible_text(html) == 'AirPods\n729 ₾'
 
 
 def test__visible_text__main_without_price__whole_body():
     html = page(body='<main>news</main><p>99 ₾</p>')
-    assert visible_text(html) == 'news 99 ₾'
+    assert visible_text(html) == 'news\n99 ₾'
 
 
-def test__visible_text__long_page__trimmed():
-    assert len(visible_text(page(body='<p>' + 'x ' * 10_000 + '</p>'))) == MAX_VISIBLE_CHARS
+def test__visible_text__long_page__trimmed_at_word_boundary():
+    text = visible_text(page(body='<p>' + 'xy ' * 10_000 + '</p>'))
+    assert MAX_VISIBLE_CHARS - 3 <= len(text) <= MAX_VISIBLE_CHARS
+    assert text.endswith('xy')  # слово на краю не обрывается: «1 29» вместо «1 299» не появится
 
 
 def guess(price: str | None, evidence: str | None, found: bool = True, currency: str | None = 'GEL') -> PriceGuess:
@@ -358,9 +364,17 @@ def test__verify_guess__whole_page_as_evidence__rejected():
     assert failure.reason == 'llm_unverified'
 
 
-def test__verify_guess__model_currency_without_evidence__not_trusted():
-    result = reading(verify_guess(guess('729', '729', currency='USD'), 'Price 729', OFFER))
-    assert result.currency is None
+def test__verify_guess__quote_without_currency__rejected():
+    # Голое число не доказывает цену: «15» из «iPhone 15» выглядело бы так же.
+    result = verify_guess(guess('729', '729', currency='USD'), 'Price 729', OFFER)
+    assert isinstance(result, ExtractionFailure)
+    assert result.reason == 'llm_unverified'
+    assert 'нет валюты' in result.detail
+
+
+def test__verify_guess__model_currency__not_trusted_currency_from_quote():
+    result = reading(verify_guess(guess('729', '729 ₾', currency='USD'), 'Price 729 ₾', OFFER))
+    assert result.currency == 'GEL'
 
 
 @pytest.mark.parametrize(
@@ -549,3 +563,240 @@ def test__explain__ambiguous_schema__warning_visible_to_operator():
     assert reports['json_ld'].reading is not None
     assert reports['json_ld'].reading.warnings == ('schema_thousands_dot',)
     assert reports['meta'].note == 'nothing'
+
+
+# --- ловушки ревью: проверка цитаты модели -------------------------------------------------------
+
+PAGE_1299 = 'iPhone 15 128GB\nPrice: 1 299 ₾\nIn stock\n12 months warranty\n2 449,90 ₾ with case'
+
+
+@pytest.mark.parametrize(
+    ('price', 'evidence'),
+    [
+        ('299', '299 ₾'),  # отрезана группа тысяч
+        ('99', '99 ₾'),
+        ('449.90', '449,90 ₾'),
+        ('2', '2'),  # голая цифра
+        ('12', '12'),  # «12 months»
+        ('15', '15'),  # «iPhone 15»
+        ('128', '128'),  # «128GB»
+        ('12', '12 months'),
+    ],
+)
+def test__verify_guess__fragment_or_bare_number__rejected(price, evidence):
+    failure = verify_guess(guess(price, evidence), PAGE_1299, OFFER)
+    assert isinstance(failure, ExtractionFailure), (price, evidence)
+    assert failure.reason == 'llm_unverified'
+
+
+def test__verify_guess__whole_printed_price__accepted_with_page_currency():
+    result = reading(verify_guess(guess('1299', '1 299 ₾', currency='USD'), PAGE_1299, OFFER))
+    assert (result.amount, result.currency) == (Decimal(1299), 'GEL')
+
+
+def test__verify_guess__quote_glues_two_elements__rejected():
+    # «AirPods Pro 2» в заголовке и «729 ₾» под ним: «2 729 ₾» есть в склеенном тексте, но такой цены нет.
+    text = visible_text(page(body='<h1>AirPods Pro 2</h1><span>729 ₾</span>'))
+    failure = verify_guess(guess('2729', '2 729 ₾'), text, OFFER)
+    assert isinstance(failure, ExtractionFailure)
+    assert failure.reason == 'llm_unverified'
+    assert reading(verify_guess(guess('729', '729 ₾'), text, OFFER)).amount == Decimal(729)
+
+
+@pytest.mark.parametrize(
+    ('body', 'expected'),
+    [
+        ('<h1>AirPods Pro 2</h1><span>729 ₾</span>', Decimal(729)),
+        ('<main><h1>iPhone 15</h1><div class="p">729 ₾</div></main>', Decimal(729)),
+        ('<h2>Pixel 8</h2><p>$<b>649</b></p>', Decimal(649)),
+    ],
+)
+async def test__read_with_llm__name_ends_with_digit__price_not_glued(body, expected):
+    result = reading(await read_with_llm(page(body=body), OFFER, product_name='x', llm=make_fake_llm()))
+    assert result.amount == expected
+
+
+def test__verify_guess__claim_not_a_number__rejected():
+    failure = verify_guess(guess('call us', '729 ₾'), '729 ₾', OFFER)
+    assert isinstance(failure, ExtractionFailure)
+    assert 'не цену' in failure.detail
+
+
+def test__verify_guess__free_quote_allowed__zero_with_declared_currency():
+    offer = Offer(competitor='S', url='https://s.example/p', currency='GEL')
+    result = reading(verify_guess(guess('0', 'Бесплатно'), 'Доставка\nБесплатно', offer, allow_free=True))
+    assert (result.amount, result.currency, result.qualifier) == (Decimal(0), 'GEL', Qualifier.FREE)
+
+
+# --- ловушки ревью: несколько товаров на странице ----------------------------------------------
+
+
+def related_graph(main_url: str | None = None) -> dict[str, object]:
+    main: dict[str, object] = {'@type': 'Product', 'name': 'iPhone 15', 'offers': {'price': '2799', 'priceCurrency': 'GEL'}}
+    if main_url:
+        main['url'] = main_url
+    related = {'@type': 'Product', 'name': 'Case', 'offers': {'price': '49', 'priceCurrency': 'GEL'}}
+    return {
+        '@graph': [
+            {'@type': 'ItemList', 'itemListElement': [{'@type': 'ListItem', 'item': related}]},
+            main,
+        ]
+    }
+
+
+def test__extract__json_ld_related_list_first__main_product_price():
+    result = reading(extract_price(page(ld(related_graph())), OFFER))
+    assert result.amount == Decimal(2799)
+    assert result.warnings == ()
+
+
+def test__extract__json_ld_related_via_is_related_to__ignored():
+    data = {
+        '@type': 'Product',
+        'name': 'iPhone 15',
+        'isRelatedTo': [{'@type': 'Product', 'offers': {'price': '49', 'priceCurrency': 'GEL'}}],
+        'offers': {'price': '2799', 'priceCurrency': 'GEL'},
+    }
+    assert reading(extract_price(page(ld([{'@type': 'WebPage', 'mainEntity': data}])), OFFER)).amount == Decimal(2799)
+
+
+def test__extract__json_ld_only_list_products__no_structured_price():
+    data = {'@type': 'ItemList', 'itemListElement': [{'@type': 'Product', 'offers': {'price': 49, 'priceCurrency': 'GEL'}}]}
+    failure = extract_price(page(ld(data)), OFFER)
+    assert isinstance(failure, ExtractionFailure)
+    assert failure.reason == 'no_price'
+
+
+def test__extract__two_top_level_products__first_with_multiple_products_warning():
+    data = [
+        {'@type': 'Product', 'name': 'A', 'offers': {'price': '49', 'priceCurrency': 'GEL'}},
+        {'@type': 'Product', 'name': 'B', 'offers': {'price': '2799', 'priceCurrency': 'GEL'}},
+    ]
+    result = reading(extract_price(page(ld(data)), OFFER))
+    assert result.amount == Decimal(49)
+    assert MULTIPLE_PRODUCTS in result.warnings
+    assert result.doubtful
+
+
+def test__extract__two_products_one_matches_page_url__that_one_without_warning():
+    data = [
+        {'@type': 'Product', 'url': 'https://shop.example/p/2', 'offers': {'price': '49', 'priceCurrency': 'GEL'}},
+        {'@type': 'Product', '@id': '/p/1#product', 'offers': {'price': '2799', 'priceCurrency': 'GEL'}},
+    ]
+    result = reading(extract_price(page(ld(data)), OFFER))
+    assert (result.amount, result.warnings) == (Decimal(2799), ())
+
+
+def test__extract__two_products_canonical_and_heading__resolved():
+    data = [
+        {'@type': 'Product', 'name': 'Case', 'offers': {'price': '49', 'priceCurrency': 'GEL'}},
+        {'@type': 'Product', 'name': 'iPhone  15', 'offers': {'price': '2799', 'priceCurrency': 'GEL'}},
+    ]
+    html = page(ld(data), '<h1>iPhone 15</h1>')
+    assert reading(extract_price(html, OFFER)).amount == Decimal(2799)
+    data[0]['url'] = 'https://www.shop.example/canonical/'
+    html = page(ld(data) + '<link rel="canonical" href="https://shop.example/canonical">')
+    assert reading(extract_price(html, OFFER, page_url='https://shop.example/redirected')).amount == Decimal(49)
+
+
+def test__extract__microdata_carousel_first__main_scope_with_h1():
+    body = (
+        '<div class="recent"><div itemscope itemtype="https://schema.org/Product">'
+        '<span itemprop="price" content="49">49 ₾</span><meta itemprop="priceCurrency" content="USD"></div></div>'
+        '<div itemscope itemtype="https://schema.org/Product"><h1>iPhone 15</h1>'
+        '<div itemprop="offers" itemscope itemtype="https://schema.org/Offer">'
+        '<span itemprop="price" content="2799">2 799 ₾</span><meta itemprop="priceCurrency" content="GEL">'
+        '<link itemprop="availability" href="https://schema.org/InStock"></div></div>'
+    )
+    result = reading(extract_price(page(body=body), OFFER))
+    assert (result.amount, result.currency, result.availability) == (Decimal(2799), 'GEL', Availability.IN_STOCK)
+    assert result.warnings == ()
+
+
+def test__extract__microdata_related_item_property__ignored():
+    body = (
+        '<div itemscope itemtype="https://schema.org/Product"><span itemprop="name">iPhone 15</span>'
+        '<div itemprop="isRelatedTo" itemscope itemtype="https://schema.org/Product">'
+        '<span itemprop="price" content="49"></span></div>'
+        '<span itemprop="price" content="2799"></span><meta itemprop="priceCurrency" content="GEL"></div>'
+    )
+    assert reading(extract_price(page(body=body), OFFER)).amount == Decimal(2799)
+
+
+def test__extract__microdata_two_unrelated_products__warning():
+    body = (
+        '<div itemscope itemtype="https://schema.org/Product"><span itemprop="price" content="49"></span></div>'
+        '<div itemscope itemtype="https://schema.org/Product"><span itemprop="price" content="2799"></span></div>'
+    )
+    assert MULTIPLE_PRODUCTS in reading(extract_price(page(body=body), OFFER)).warnings
+
+
+def test__extract__microdata_inside_item_list__ignored():
+    body = (
+        '<ul itemscope itemtype="https://schema.org/ItemList"><li itemscope itemtype="https://schema.org/Product">'
+        '<span itemprop="price" content="49"></span></li></ul>'
+    )
+    assert isinstance(extract_price(page(body=body), OFFER), ExtractionFailure)
+
+
+# --- ловушки ревью: размеры и «числа» из разметки ------------------------------------------------
+
+
+@pytest.mark.parametrize('price', ['1e-999999999', '0.000001', '1e-60000'])
+def test__extract__json_ld_tiny_exponent_price__no_price(price):
+    html = page('<script type="application/ld+json">{"@type":"Product","offers":{"price":' + price + '}}</script>')
+    failure = extract_price(html, OFFER)
+    assert isinstance(failure, ExtractionFailure)
+    assert failure.reason == 'no_price'
+
+
+def test__extract__json_ld_huge_string_price__ignored():
+    data = {'@type': 'Product', 'offers': {'price': '1299 ₾ ' + 'x' * 60_000, 'priceCurrency': 'GEL'}}
+    assert isinstance(extract_price(page(ld(data)), OFFER), ExtractionFailure)
+
+
+def test__extract__long_but_valid_value__raw_clipped():
+    data = {'@type': 'Product', 'offers': {'price': '1299 ₾ ' + 'x' * 150, 'priceCurrency': 'GEL'}}
+    result = reading(extract_price(page(ld(data)), OFFER))
+    assert result.amount == Decimal(1299)
+    assert len(result.raw) <= MAX_EVIDENCE_CHARS
+
+
+def test__extract__microdata_price_on_container__ignored():
+    body = '<div itemprop="price">1 299 ₾ ' + 'lorem ' * 12_000 + '</div>'
+    assert isinstance(extract_price(page(body=body), OFFER), ExtractionFailure)
+
+
+def test__extract__selector_matches_huge_container__selector_no_price():
+    body = '<div class="price-now">2 729 ₾ ' + 'lorem ' * 1000 + '</div>'
+    failure = extract_price(page(body=body), SELECTOR_OFFER)
+    assert isinstance(failure, ExtractionFailure)
+    assert failure.reason == 'selector_no_price'
+
+
+def test__extract__dense_two_megabyte_page__fast():
+    # Раньше «1.299» в разметке запускал разбор всего <main> до обрезки: 80 с на 32 КБ.
+    dense = ''.join(f'<p>Review {i}: 5 stars, 12 months, {i % 997} ₾ delivery</p>' for i in range(40_000))
+    html = page(ld({'@type': 'Product', 'offers': {'price': '1.299', 'priceCurrency': 'GEL'}}), f'<main>{dense}</main>')
+    assert len(html) > 2_000_000
+    started = time.perf_counter()
+    result = reading(extract_price(html, OFFER))
+    text = visible_text(html)
+    assert time.perf_counter() - started < 5
+    assert result.warnings == ('schema_ambiguous_decimal',)
+    assert len(text) <= MAX_VISIBLE_CHARS
+
+
+def test__suggest_selectors__name_and_price_container__not_suggested_as_glued_number():
+    html = page(body='<div class="card"><h1>iPhone 15</h1><span class="cost">729 ₾</span></div>')
+    suggestions = suggest_selectors(html)
+    assert [s.selector for s in suggestions] == ['span.cost']
+    assert suggestions[0].amount == Decimal(729)
+
+
+def test__budget_denied__selector_reason_kept_else_llm_budget():
+    from autostudio.prices.extract import budget_denied
+
+    assert budget_denied(ExtractionFailure(reason='no_price')).reason == 'llm_budget'
+    assert budget_denied(ExtractionFailure(reason='selector_not_found')).reason == 'selector_not_found'
+

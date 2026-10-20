@@ -35,6 +35,11 @@ _MONTHS: Final = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep',
 _UID: Final = re.compile(rb'UID (\d+)')
 _LIST_LINE: Final = re.compile(rb'^\((?P<flags>[^)]*)\)\s+(?P<delim>"(?:[^"\\]|\\.)*"|NIL)\s+(?P<name>.+)$')
 _MUTF7_RUN: Final = re.compile(r'&([A-Za-z0-9+,]*)-')
+_AUTH_FAILED: Final = re.compile(
+    r'AUTHENTICATIONFAILED|AUTHORIZATIONFAILED|invalid credentials|authentication failed|login failed|'
+    r'incorrect (?:username|password)|username and password not accepted|application-specific password',
+    re.I,
+)
 
 type ImapData = Sequence[bytes | tuple[bytes, bytes] | None]
 type ImapReply = tuple[str, ImapData]
@@ -149,7 +154,7 @@ def decode_folder(name: str) -> str:
         try:
             raw = base64.b64decode(packed.replace(',', '/') + '=' * (-len(packed) % 4))
             return raw.decode('utf-16-be')
-        except (ValueError, UnicodeDecodeError):
+        except ValueError:  # UnicodeDecodeError — тоже ValueError
             return match.group(0)
 
     return _MUTF7_RUN.sub(repl, name)
@@ -255,6 +260,9 @@ class ImapMailBox:
         for secret in (self._password, self._user):
             if secret:
                 text = text.replace(secret, '***')
+        # imaplib кладёт ответ сервера в исключение как repr байтов: b'[ALERT] …'.
+        if len(text) >= 3 and text[0] == 'b' and text[1] in '\'"' and text[-1] == text[1]:
+            text = text[2:-1]
         return text[:300]
 
     def _error(self, action: str, exc: BaseException) -> MailboxError:
@@ -293,10 +301,12 @@ class ImapMailBox:
 
         try:
             self._conn = await asyncio.to_thread(connect)
-        except imaplib.IMAP4.error:
-            raise MailboxError(
-                f'IMAP {self._host}: вход отклонён — проверьте логин и пароль приложения (не основной пароль)'
-            ) from None
+        except imaplib.IMAP4.error as exc:
+            # Причина сервера нужна оператору: «слишком много подключений» или «IMAP выключен»
+            # лечатся не сменой пароля. Логин и пароль из текста вычищаются.
+            reason = self._scrub(str(exc))
+            hint = ' — проверьте логин и пароль приложения (не основной пароль)' if _AUTH_FAILED.search(reason) else ''
+            raise MailboxError(f'IMAP {self._host}: вход не выполнен: {reason}{hint}') from None
         except OSError as exc:
             raise self._error('подключение', exc) from None
         return self

@@ -93,10 +93,15 @@ def url_problem(url: str) -> str | None:
 
 
 def origin(url: str) -> str:
-    """`scheme://host[:port]` — ключ кэша robots.txt и паузы между запросами."""
+    """`scheme://host[:port]` — ключ кэша robots.txt и паузы между запросами.
+
+    IPv6-литерал остаётся в квадратных скобках: без них `https://2606:4700::1111/robots.txt`
+    — уже не URL, и robots.txt такого сайта молча считался бы отсутствующим.
+    """
     parsed = httpx.URL(url)
     port = f':{parsed.port}' if parsed.port is not None else ''
-    return f'{parsed.scheme}://{parsed.host}{port}'
+    host = f'[{parsed.host}]' if ':' in parsed.host else parsed.host
+    return f'{parsed.scheme}://{host}{port}'
 
 
 def redact(url: str) -> str:

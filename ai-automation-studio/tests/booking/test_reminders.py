@@ -29,7 +29,7 @@ async def send(app: App, sender, store: BookingStore | None = None, now: dt.date
     )
 
 
-async def test__send_due_reminders__exactly_once_even_after_restart(app, tmp_path):
+async def test__send_due_reminders__repeat_and_restart__sent_exactly_once(app, tmp_path):
     booking = app.book_directly('tg:1', 'haircut', 'giorgi', local(WED, 17))
     sender = Recorder()
     app.clock.set(local(WED, 15, 1))
@@ -78,7 +78,7 @@ async def test__send_due_reminders__cancelled_booking__nothing_sent(app):
     assert await send(app, Recorder()) == 0
 
 
-async def test__refresh_schedule__replaces_tab_with_horizon(app):
+async def test__refresh_schedule__twice__tab_replaced(app):
     app.book_directly('tg:1', 'haircut', 'giorgi', local(WED, 17), name='Anna')
     app.book_directly('tg:2', 'beard', 'nika', local(WED, 12), name='Bob')
     rows = await refresh_schedule(app.store, app.sink, app.clock(), config=app.config, texts=app.texts)
@@ -105,7 +105,7 @@ def make_loop(app: App, sender, sink=None, operator=None, http=None) -> Reminder
     )
 
 
-async def test__reminder_loop__schedule_hourly_with_run_events(app):
+async def test__reminder_loop__ticks__schedule_hourly_with_run_events(app):
     app.book_directly('tg:1', 'haircut', 'giorgi', local(WED, 17))
     loop = make_loop(app, Recorder())
     await loop.tick()

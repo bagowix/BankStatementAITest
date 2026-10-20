@@ -4,13 +4,14 @@
 модуль, поэтому любая запись, отмена или перенос одинаково попадает в журнал (из
 него — месячный отчёт) и во вкладку `Bookings` таблицы владельца.
 
-Таблица — зеркало, а не источник истины: если Google Sheets сейчас недоступен,
-запись всё равно создаётся, сбой пишется в лог, а вкладка `Schedule` догонит
-состояние при ежечасном обновлении (и при сбое — сигнал оператору через `supervised_run`).
+Таблица — зеркало, а не источник истины: строка во вкладку `Bookings` пишется в фоне
+(`mirror.SheetMirror`), поэтому покупатель не ждёт Google. Если Google Sheets сейчас
+недоступен, запись всё равно создаётся, строка повторяется со следующей, а вкладка
+`Schedule` догонит состояние при ежечасном обновлении (и при сбое — сигнал оператору
+через `supervised_run`).
 """
 
 import datetime as dt
-import logging
 from collections.abc import Mapping
 from typing import Final
 
@@ -25,19 +26,18 @@ from autostudio.booking.domain import (
     TimeWindow,
     bookable_days,
     find_slot,
+    format_phone,
     free_slots,
     is_open_at,
     local_today,
     nearest_slots,
     next_free_slots,
 )
+from autostudio.booking.mirror import SheetMirror
 from autostudio.booking.store import BookingStore
 from autostudio.booking.texts import BOOKINGS_HEADER, Texts
-from autostudio.errors import SinkError
 from autostudio.events import EventLog
 from autostudio.sinks import TableSink
-
-logger = logging.getLogger(__name__)
 
 PACKAGE: Final = 'booking'
 BOOKINGS_TAB: Final = 'Bookings'
@@ -53,6 +53,7 @@ class BookingService:
         events: Журнал событий клиента.
         sink: Таблица владельца.
         texts: Тексты (язык владельца для таблицы и журнала).
+        mirror: Фоновая запись строк в таблицу; по умолчанию — поверх `sink`.
     """
 
     def __init__(
@@ -63,11 +64,12 @@ class BookingService:
         events: EventLog,
         sink: TableSink,
         texts: Texts,
+        mirror: SheetMirror | None = None,
     ) -> None:
         self._config = config
         self._store = store
         self._events = events
-        self._sink = sink
+        self._mirror = mirror or SheetMirror(sink)
         self._texts = texts
 
     @property
@@ -77,6 +79,10 @@ class BookingService:
     @property
     def store(self) -> BookingStore:
         return self._store
+
+    async def drain(self) -> None:
+        """Дожидается фоновой записи строк в таблицу (остановка процесса, демо, тесты)."""
+        await self._mirror.drain()
 
     def bookings(self, now: dt.datetime) -> list[Booking]:
         """Активные записи на весь горизонт (с запасом в сутки по краям)."""
@@ -174,6 +180,7 @@ class BookingService:
         language: str,
         source: Source,
         now: dt.datetime,
+        max_active: int | None = None,
     ) -> Booking:
         """Создаёт запись после повторной проверки слота.
 
@@ -181,34 +188,21 @@ class BookingService:
             service_id: Услуга.
             staff_id: Мастер или None — любой свободный в это время.
             start: Начало, UTC.
-            customer: Покупатель с именем и телефоном.
+            customer: Чат покупателя с именем и телефоном для записи.
             language: Язык покупателя.
             source: Откуда пришла запись.
             now: Текущий момент.
+            max_active: Лимит предстоящих записей чата или None (администратор).
 
         Returns:
             Созданная запись.
 
         Raises:
             SlotTakenError: Время уже занято (или вне расписания).
+            TooManyBookingsError: Лимит предстоящих записей исчерпан.
             BookingError: Нет имени или телефона.
         """
-        buffer = dt.timedelta(minutes=self._config.booking.buffer_min)
-        # Две попытки: при «любом свободном» мастер назначается в момент проверки, и если
-        # его за эти миллисекунды занял другой процесс, на то же время может быть свободен другой.
-        for attempt in range(2):
-            slot = self.find(service_id, staff_id, start, now)
-            if slot is None:
-                raise SlotTakenError(f'{service_id} {start.isoformat()}')
-            try:
-                booking = self._store.create(
-                    slot, customer=customer, source=source, language=language, now=now, buffer=buffer
-                )
-            except SlotTakenError:
-                if staff_id is not None or attempt:
-                    raise
-                continue
-            break
+        booking = self._create(service_id, staff_id, start, customer, language, source, now, max_active)
         self.record(
             'booking.created',
             now,
@@ -222,8 +216,41 @@ class BookingService:
                 'lead_days': str((self._texts.local(booking.start).date() - local_today(self._config, now)).days),
             },
         )
-        await self._log_row('action_created', booking, now)
+        self._log_row('action_created', booking, now)
         return booking
+
+    def _create(
+        self,
+        service_id: str,
+        staff_id: str | None,
+        start: dt.datetime,
+        customer: Customer,
+        language: str,
+        source: Source,
+        now: dt.datetime,
+        max_active: int | None,
+    ) -> Booking:
+        buffer = dt.timedelta(minutes=self._config.booking.buffer_min)
+        # Две попытки: при «любом свободном» мастер назначается в момент проверки, и если
+        # его за эти миллисекунды занял другой процесс, на то же время может быть свободен другой.
+        for attempt in range(2):
+            slot = self.find(service_id, staff_id, start, now)
+            if slot is None:
+                break
+            try:
+                return self._store.create(
+                    slot,
+                    customer=customer,
+                    source=source,
+                    language=language,
+                    now=now,
+                    buffer=buffer,
+                    max_active=max_active,
+                )
+            except SlotTakenError:
+                if staff_id is not None or attempt:
+                    raise
+        raise SlotTakenError(f'{service_id} {start.isoformat()}')
 
     async def cancel(
         self, booking_id: str, *, now: dt.datetime, by_admin: bool, customer: str | None = None
@@ -250,7 +277,7 @@ class BookingService:
             now,
             {**self._service_payload(booking), 'by': 'admin' if by_admin else 'customer'},
         )
-        await self._log_row('action_cancelled', booking, now)
+        self._log_row('action_cancelled', booking, now)
         return booking
 
     async def reschedule(
@@ -300,7 +327,7 @@ class BookingService:
             now,
             {**self._service_payload(new), 'by': 'admin' if by_admin else 'customer'},
         )
-        await self._log_row('action_rescheduled', new, now)
+        self._log_row('action_rescheduled', new, now)
         return old, new
 
     @property
@@ -332,14 +359,11 @@ class BookingService:
             texts.service_name(booking.service_id, language),
             texts.staff_name(booking.staff_id),
             booking.name,
-            booking.phone,
+            format_phone(booking.phone),
             price,
             texts.get(language, f'source_{booking.source}'),
         ]
 
-    async def _log_row(self, action_key: str, booking: Booking, now: dt.datetime) -> None:
+    def _log_row(self, action_key: str, booking: Booking, now: dt.datetime) -> None:
         header = BOOKINGS_HEADER[self._config.owner_language]
-        try:
-            await self._sink.append(BOOKINGS_TAB, header, [self.sheet_row(action_key, booking, now)])
-        except SinkError as exc:
-            logger.error('строка записи %s не попала в таблицу: %s', booking.id, exc)
+        self._mirror.append(BOOKINGS_TAB, header, [self.sheet_row(action_key, booking, now)])
