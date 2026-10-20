@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Callable
 import httpx
 import pytest
 
-from autostudio.prices.config import PricesSection, Product
+from autostudio.prices.config import Offer, PricesSection, Product, SiteRule
 from autostudio.prices.fetch import (
     FetchFailure,
     FetchResult,
@@ -590,3 +590,114 @@ async def test__fetch__robots_address_fails_its_own_check__site_skipped_not_allo
     assert isinstance(result, FetchFailure)
     assert result.reason == 'robots_disallowed'
     assert site.requests == []
+
+
+# --- RFC 9309 через protego: «*», «$» и самое длинное правило ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ('rules', 'path', 'allowed'),
+    [
+        # «*» — любая последовательность символов, в том числе посреди пути.
+        ('User-agent: *\nDisallow: /*/cart\n', '/ka/cart', False),
+        ('User-agent: *\nDisallow: /*/cart\n', '/ka/catalog', True),
+        ('User-agent: *\nDisallow: /p*print\n', '/p/42/print-version', False),
+        # «$» — конец адреса: правило про «.pdf$» не трогает «.pdf/…» и «.pdf?…».
+        ('User-agent: *\nDisallow: /*.pdf$\n', '/files/price.pdf', False),
+        ('User-agent: *\nDisallow: /*.pdf$\n', '/files/price.pdf/view', True),
+        ('User-agent: *\nDisallow: /p/1$\n', '/p/1', False),
+        ('User-agent: *\nDisallow: /p/1$\n', '/p/10', True),
+        # Самое длинное совпадение решает, порядок строк в файле — нет.
+        ('User-agent: *\nDisallow: /shop/\nAllow: /shop/sale/\n', '/shop/sale/1', True),
+        ('User-agent: *\nAllow: /shop/sale/\nDisallow: /shop/\n', '/shop/sale/1', True),
+        ('User-agent: *\nAllow: /shop/sale/\nDisallow: /shop/\n', '/shop/new/1', False),
+        ('User-agent: *\nAllow: /shop\nDisallow: /shop/private\n', '/shop/private/1', False),
+        ('User-agent: *\nDisallow: /\nAllow: /*.html$\n', '/item/1.html', True),
+        ('User-agent: *\nDisallow: /\nAllow: /*.html$\n', '/item/1.htm', False),
+        # Равная длина: RFC 9309 §2.2.2 — побеждает Allow (наименее строгое правило).
+        ('User-agent: *\nDisallow: /p\nAllow: /p\n', '/p/1', True),
+        # Группа для нашего агента заменяет группу «*» целиком, а не дополняет её.
+        ('User-agent: *\nDisallow: /\n\nUser-agent: autostudio-prices\nDisallow: /admin/\n', '/p/1', True),
+    ],
+)
+async def test__fetch__robots_wildcards_end_anchor_longest_match__rfc9309(rules, path, allowed):
+    site = Site({'a.example/robots.txt': httpx.Response(200, text=rules), f'a.example{path}': ok()})
+    fetcher, http, _ = make(site, min_delay_s=1.0)
+    async with http:
+        result = await fetcher.fetch(f'https://a.example{path}')
+    assert isinstance(result, FetchResult) is allowed, result
+    if not allowed:
+        assert isinstance(result, FetchFailure)
+        assert result.reason == 'robots_disallowed'
+        assert site.paths() == ['a.example/robots.txt']  # страницу не трогали
+
+
+# --- пауза сайта по претензии -------------------------------------------------------------------
+
+
+async def test__fetch__paused_site__no_request_no_robots_no_dns():
+    asked: list[str] = []
+
+    async def resolve(host: str, port: int) -> list[str]:
+        asked.append(host)
+        return [PUBLIC]
+
+    site = Site({'www.shop.example/p': ok()})
+    settings = FetchSettings(user_agent='bot (+mailto:ops@studio.example)', paused_sites=frozenset({'shop.example'}))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(site)) as http:
+        fetcher = PoliteFetcher(http, settings, sleep=FakeTime().sleep, resolver=resolve)
+        result = await fetcher.fetch('https://www.shop.example/p')
+    assert result == FetchFailure(reason='paused', detail='shop.example')
+    assert site.requests == []
+    assert asked == []
+
+
+async def test__fetch__redirect_into_paused_site__refused_before_request():
+    site = Site(
+        {
+            'a.example/p': httpx.Response(301, headers={'location': 'https://paused.example/p'}),
+            'paused.example/p': ok(),
+        }
+    )
+    fetcher, http, _ = make(site, respect_robots=False, paused_sites=frozenset({'paused.example'}))
+    async with http:
+        result = await fetcher.fetch('https://a.example/p')
+    assert result == FetchFailure(reason='paused', detail='paused.example')
+    assert site.paths() == ['a.example/p']
+
+
+@pytest.mark.parametrize('url', ['http://[::1/p', 'https://xn--zz.example/p', 'https://exa mple.com/p'])
+async def test__fetch__paused_set_but_url_broken__blocked_url_not_crash(url):
+    site = Site({})
+    fetcher, http, _ = make(site, paused_sites=frozenset({'paused.example'}))
+    async with http:
+        result = await fetcher.fetch(url)
+    assert isinstance(result, FetchFailure)
+    assert result.reason == 'blocked_url'
+    assert site.requests == []
+
+
+def test__fetch_settings__from_section__paused_sites_carried():
+    section = PricesSection(
+        products=[Product(id='p', name='P', offers=[Offer(competitor='A', url='https://www.shop.example/p')])],
+        contact_email='ops@studio.example',
+        sites={'shop.example': SiteRule(paused=True), 'www.shop.example': SiteRule()},
+    )
+    assert FetchSettings.from_section(section).paused_sites == frozenset({'shop.example'})
+
+
+async def test__fetch__shared_client_follows_redirects__fetcher_still_rechecks_each_hop():
+    # Общий клиент CoreProvider создан с follow_redirects=True; запрос загрузчика это перекрывает.
+    site = Site(
+        {
+            'a.example/p': httpx.Response(302, headers={'location': 'http://169.254.169.254/latest/meta-data'}),
+            '169.254.169.254/latest/meta-data': ok('secret'),
+        }
+    )
+    settings = FetchSettings(user_agent='bot (+mailto:ops@studio.example)', respect_robots=False)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(site), follow_redirects=True) as http:
+        fetcher = PoliteFetcher(http, settings, sleep=FakeTime().sleep, resolver=resolver())
+        result = await fetcher.fetch('https://a.example/p')
+    assert isinstance(result, FetchFailure)
+    assert result.reason == 'blocked_url'
+    assert site.paths() == ['a.example/p']  # до метаданных облака запрос не дошёл

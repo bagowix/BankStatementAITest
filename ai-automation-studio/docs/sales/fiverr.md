@@ -11,9 +11,9 @@
 >   fiverr.com и help.fiverr.com из среды проверки не открылись. 20.10.2026 я сверил часть правил по
 >   сниппетам справки Fiverr в поиске; сниппет — это тоже **НП**, проверь в кабинете (раздел 9).
 >
-> Цены и состав пакетов совпадают с `docs/sales/offers.en.md`. Если они разошлись, прав `offers.en.md`:
-> поправь этот файл. В `docs/sales/upwork.md` часть тарифов другая (ссылки в prices — 20/100/300,
-> Sheets в booking — только в Advanced). Здесь взят `offers.en.md`; выровнять Upwork — отдельная задача.
+> Цены и состав пакетов совпадают с `docs/sales/offers.en.md` и `docs/sales/upwork.md`. Если они
+> разошлись, прав `offers.en.md`: поправь этот файл. Плейсхолдеры и их формат —
+> `docs/sales/offers.md`, раздел 0.1.
 >
 > «AutoStudio» — рабочее название. На Fiverr оно не нужно: покупатель нанимает тебя лично.
 > Имя пользователя Fiverr, по распространённым сведениям, потом не меняется (**НП**): бери его от
@@ -31,7 +31,7 @@
 | **Ссылок в гиге нет** | Справка Fiverr (сниппет) разрешает ссылку на портфолио, старые правила — только fiverr.com. Мы ставим ноль ссылок: отказ в публикации гига дороже, чем ссылка. Ссылку на GitHub не даём ещё и потому, что в профиле и коммитах могут быть видны контакты. Доказательства — картинками, видео и PDF в галерее. | НП |
 | **ИИ не скрываем** | В каждом гиге написано, в каком пакете работает модель (OpenAI или Anthropic) и в каком нет. Если форма гига спрашивает про ИИ — отвечай «да» во всех трёх гигах. Результат работы модели дорабатываешь под покупателя: свои конфиги, факты, проверки. Сообщения покупателю пишешь сам; если черновик сделал ИИ, проверь каждое утверждение. | НП, бриф 3.2 |
 | **«100% без ИИ» не обещаем** | Код написан с помощью ИИ-инструментов и проверен тестами, поэтому формулировки «AI-free», «no AI used», «100% human» запрещены. Правда звучит так: «Basic doesn't call an AI model while it runs». Если покупатель просит работу без ИИ, это требование надо выполнить. Без модели работают booking Basic и prices Basic/Standard. inbox без модели не работает: такому покупателю inbox не продаём и честно говорим почему (`offers.md`, 10.4). | НП, бриф 3.2 |
-| **Пароли не просим** | Ни основной пароль, ни коды 2FA, ни вход в аккаунты покупателя. Только отзываемые доступы и только через форму требований заказа (Gig requirements), а не в чате: пароль приложения почты, токен бота, который покупатель создал сам. Таблицу и календарь покупатель расшаривает на сервисный аккаунт. | НП, бриф 3.2; практика |
+| **Пароли не просим** | Ни основной пароль, ни коды 2FA, ни вход в аккаунты покупателя. Только отзываемые доступы и никогда в чате. Токен бота, который покупатель создал сам, — через форму требований заказа (Gig requirements). Пароль приложения почты — не через форму: ответ на требования остаётся на странице заказа. Пока поддержка Fiverr письменно не ответила (2.1, п. 1), пароль передаётся на созвоне Fiverr (раздел 6.6). Таблицу покупатель расшаривает на сервисный аккаунт. | НП, бриф 3.2; практика |
 | **Запрещённые заказы** | Не берём: сайты за логином, обход CAPTCHA и антибот-защиты, сбор, который запрещают условия сайта, лид-листы и персональные данные, массовые рассылки, «ChatGPT в WhatsApp» (с 15.01.2026 Meta разрешает только бота конкретного бизнеса, **П**). Пакеты с ИИ для покупателя или его аудитории в России и Беларуси — отказ (бриф, риск 15). Отказывай до заказа, а не отменой: отмены портят статистику продавца. | НП / П |
 | **Отзывы** | Скидку, бонус или поддержку в обмен на отзыв не предлагаем. После завершения заказа можно один раз попросить честный отзыв. | не проверено |
 | **Демо до заказа** | Ссылку на демо-бота в Telegram до заказа не отправляем: это похоже на увод общения (`offers.md`, 4.5). Демо — видео в галерее и видео в сообщении. Ссылка на бота самого покупателя после начала заказа — часть работы. | НП |
@@ -47,7 +47,9 @@
    Earnings → Withdraw со способами вывода для Грузии. Письменно спроси поддержку Fiverr, можно ли
    продавать с твоим гражданством, и сохрани ответ. В том же обращении спроси, можно ли в заказе
    передать покупателю адрес сервисного аккаунта Google (вида `…@….iam.gserviceaccount.com`): это
-   технический адрес, не почтовый ящик, но фильтр контактов может принять его за e-mail.
+   технический адрес, не почтовый ящик, но фильтр контактов может принять его за e-mail. И третий
+   вопрос: можно ли получить от покупателя пароль приложения почты через форму требований заказа
+   или одноразовой ссылкой на сервис секретов (это внешняя ссылка), или только на созвоне Fiverr.
 2. **Тестовый вывод.** До первого заказа выводить нечего. Поэтому первый вывод после первого заказа и
    есть тест: выведи всё и запиши фактические списания (бриф 2.2, п. 7: PayPal — 0 со стороны Fiverr,
    Payoneer — 3 USD, банк через Payoneer — 1 или 3 USD; всё **НП**).
@@ -67,8 +69,9 @@
    Для WhatsApp на Fiverr есть и нерешённый вопрос доступа: приглашение админом в Business portfolio
    покупателя требует твоего e-mail (контакт), а токен system user — это секрет. Реши его до того,
    как включишь WhatsApp в Premium (вопрос в конце ответа).
-6. **Модель по умолчанию** — Haiku 5.5 с effort `low` (`offers.md`, 1.2). Иначе лимиты поддержки
-   уходят в минус.
+6. **Модель по умолчанию** — Haiku 5.5 с effort `low`: в коде это уже умолчание для Anthropic
+   (`offers.md`, раздел 1, пункт 2). Не ставь покупателю `openai` на своём ключе: `gpt-5.4-mini`
+   дороже, и лимиты поддержки уходят в минус.
 7. **Проект выписок** (доказательство в гиге inbox) — тестовое задание. Убедись, что вправе его
    показывать (`offers.md`, 11.7). Если нет — убери абзац «Proof of approach» и PDF из галереи.
 8. **Не покупать на старте:** Seller Plus ($15/мес, бриф 7.1). Fiverr Ads — только с Level 1
@@ -175,14 +178,18 @@ salon booking
 >   предлагает Subscriptions (раздел 7).
 > - Метаданные заполняй честно: только Telegram, пока нет WhatsApp; «AI» — да (Standard и Premium).
 > - «Clinic» в заголовке не означает медицинских данных: бот хранит только имя, телефон, услугу и
->   время. Клиника хочет хранить диагнозы — отказ от этой функции (бриф, риск 16).
+>   время. Клиника хочет хранить диагнозы — отказ от этой функции (бриф, риск 16). Но в Standard и
+>   Premium всё, что пациент напечатал, уходит модели как есть, а данные о здоровье — особая
+>   категория (НП). Клинике по умолчанию предлагай Basic (без модели); если нужен Standard —
+>   строка в приветствии бота «please don't write about your health here» (`offers.md`, 4.1) и
+>   вопрос юристу (`docs/legal/README.md`, раздел 4, п. 13).
 > - Лимиты: заголовок 80 знаков и 5 тегов — сниппет справки и сторонние гайды (**НП**); 20 знаков на
 >   тег — только сторонний гайд (**НП**).
 
 ### 4.2 Description
 
-> **Оператору.** 1 151 знак с переносами строк при лимите 1 200 (**НП**). После выхода WhatsApp
-> замени последний абзац на вариант ниже: получится 1 196 знаков.
+> **Оператору.** 1 141 знак с переносами строк при лимите 1 200 (**НП**). После выхода WhatsApp
+> замени последний абзац на вариант ниже: получится 1 186 знаков.
 
 ```text
 Customers book themselves in, 24/7, without calling you. Reminders before each visit help them remember.
@@ -202,7 +209,7 @@ Where AI is used: Standard and Premium use an AI model (OpenAI or Anthropic) to 
 
 The bot is created on your own Telegram account, so it's yours. Languages: English and Russian.
 
-Hosting is included during the free-fix period. After that, a monthly support plan, ordered here on Fiverr, keeps it running.
+From launch, a monthly support plan ordered here on Fiverr keeps it hosted. Free fixes (14 or 30 days) come on top.
 
 Need WhatsApp, Instagram or online prepayment? Message me before ordering.
 ```
@@ -267,8 +274,8 @@ Premium adds WhatsApp on your own WhatsApp Business account; Meta bills its fees
 - **Do my customers need to install anything?** No. They use Telegram and start the bot from your link or QR code. You get both for your Instagram, your Google Maps profile and your front desk.
 - **Can the bot message a customer first?** No. A Telegram bot can only reply to people who started it. That's why booking starts from your link. After that, reminders work.
 - **Will this stop no-shows?** No tool can promise that. Reminders 24 h and 2 h before, plus a one-tap cancel, mean a customer who can't come frees the slot instead of just not showing up.
-- **What does the AI see, and can it book on its own?** In Standard and Premium, the AI gets the customer's message and your services, FAQ and hours, not names or phone numbers. It can't book or cancel: only the customer's tap on "Confirm" does. Basic uses no AI model.
-- **What happens after delivery?** Free fixes and hosting for 14 days (Premium: 30). Then a monthly support plan here on Fiverr keeps the bot hosted and up to date: Care $49, Pro $149 or Business $349. Prefer your own server? Ask me for a quote.
+- **What does the AI see, and can it book on its own?** In Standard and Premium, the AI gets the customer's message and your services, FAQ and hours, not the name and phone from the booking. It can't book or cancel: only the customer's tap on "Confirm" does. Basic uses no AI model.
+- **What happens after delivery?** From launch, a monthly support plan here on Fiverr keeps the bot hosted and up to date: Care $49, Pro $149 or Business $349. Free fixes for 14 days (Premium: 30) come on top. Prefer your own server? Ask me for a quote.
 - **WhatsApp, Instagram or Messenger?** Not in these packages. Message me before ordering, and I'll tell you what is possible for your business.
 
 После выхода адаптера WhatsApp замени последний вопрос:
@@ -370,17 +377,19 @@ google sheets
 > - Тег «web scraping» приводит и покупателей, которые хотят обхода защиты. Отказывай им в чате до
 >   заказа (раздел 1). Средний заказ на сбор данных на Fiverr ≈ $106 (бриф 4.1, **НП**): деньги
 >   здесь в поддержке, а не в настройке.
-> - Состав пакетов — по `offers.en.md` (сайты 3/10/20, ссылки 200/1 000/2 000). В
->   `docs/packages/prices.md` и `upwork.md` стоят 20/100/300 ссылок: `offers.en.md` здесь главнее,
->   а расхождение — повод выровнять Upwork.
-> - Premium «до раза в час» — проверь ёмкость до заказа: пауза 5 с на сайт, это ≈ 720 страниц в час с
->   одного сайта (`offers.md`, 5.1). Premium со ступенью модели ежечасно — до 14 400 операций в месяц,
+> - Состав пакетов — по `offers.en.md` (сайты 3/10/20, ссылки 200/1 000/2 000), как и в `upwork.md`.
+>   В таблице тарифов `docs/packages/prices.md` стоят 20/100/300+ ссылок: `offers.en.md` здесь
+>   главнее, расхождение записано в `offers.md`, 5.5.
+> - Premium «до раза в час» — проверь ёмкость до заказа: пауза 5 с на сайт, это не больше ≈ 720
+>   страниц в час с одного сайта, а при длине прохода по умолчанию (`max_run_minutes` = 30) — ≈ 360
+>   ссылок с сайта и ≈ 1 440 всего. Больше — подними `max_run_minutes` и `TimeoutStartSec`
+>   (`offers.md`, 5.1). Premium со ступенью модели ежечасно — до 14 400 операций в месяц,
 >   больше лимита Pro: нужен Business, меньше страниц на модель или реже проверки (`offers.md`, 10.3).
 >   Поэтому в описании просьба написать до заказа.
 
 ### 5.2 Description
 
-> **Оператору.** 1 183 знака с переносами строк.
+> **Оператору.** 1 173 знака с переносами строк.
 
 ```text
 Stop checking competitor prices by hand in dozens of tabs. The monitor checks their product pages on a schedule and keeps one Google Sheet: your price, their price, the difference in %, stock, and the time of the check.
@@ -397,7 +406,7 @@ Polite by design: public pages only, robots.txt rules followed, a pause between 
 
 Before you order, send me up to 3 competitor links here. I'll tell you for free whether the price can be read.
 
-Hosting is included during the free-fix period. After that, a monthly support plan, ordered here on Fiverr, keeps it running and repairs it when sites change.
+From launch, a monthly support plan ordered here on Fiverr keeps it hosted and repairs it when sites change. Free fixes (14 or 30 days) come on top.
 ```
 
 ### 5.3 Packages
@@ -506,25 +515,31 @@ Programming & Tech → AI Development → AI Agents.
 ```text
 email automation
 ai automation
-invoice extraction
+email parsing
 gmail automation
 google sheets
 ```
 
 > **Оператору.**
-> - До PDF-счетов замени тег «invoice extraction» на «email parsing».
+> - После выхода PDF-счетов замени тег «email parsing» на «invoice extraction».
 > - Это главный гиг (бриф 4.1). Пакет без модели не работает: просьбу «без ИИ» встречай отказом до
 >   заказа (раздел 1).
 > - Outlook и Microsoft 365 в v1 — только через автопересылку на отдельный ящик, черновики появятся
->   там (`offers.en.md`). Говори это до заказа.
-> - Бесплатный прогон «I sort your last 20 emails» из `offers.en.md` на Fiverr до заказа не делаем:
->   для него нужен пароль приложения, а пароли не идут в чат. Здесь это первый шаг заказа
->   (`autostudio inbox dry-run … --limit 20`).
+>   там (`offers.en.md`), и только если админ M365 разрешает пересылку вовне (часто запрещено по
+>   умолчанию, НП; `offers.md`, раздел 1, пункт 9). Говори это до заказа и проверь до заказа.
+> - Пробный разбор 20 писем до заказа на Fiverr не делаем: для него нужны пароль приложения и
+>   подписанный DPA. Здесь это шаг заказа после ответа «Yes» на вопрос 9 и передачи пароля на
+>   созвоне (`autostudio inbox dry-run … --limit 20`, раздел 6.6).
 
 ### 6.2 Description
 
-> **Оператору.** 1 193 знака с переносами строк; без пункта про PDF-счета — 1 092. До выхода
-> извлечения из PDF удали строку, которая начинается с «• PDF invoices».
+> **Оператору.** 1 130 знаков с переносами строк при лимите 1 200 (**НП**). Это вариант до выхода
+> извлечения из PDF. После выхода сделай три правки, иначе текст не влезет (выйдет 1 199 знаков):
+> - после строки «• A hot lead pings you…» добавь строку
+>   `• PDF invoices: supplier, number, date, total and currency go to an Invoices tab (Standard, Premium)`;
+> - абзац «Nothing is sent without you. …» замени на «Nothing is sent without you: it reads, files
+>   and drafts, and never sends or deletes email.»;
+> - из последней строки убери «Hosting: see the FAQ.».
 
 ```text
 Leads, invoices and questions all land in one inbox. Some get a late answer, some get none. I set up an assistant that sorts each new email for you.
@@ -534,7 +549,6 @@ Every 10–15 minutes:
 • Key details go to a Google Sheet: name, company, phone, request, budget
 • A reply draft in the sender's language waits in your Drafts folder (Standard, Premium)
 • A hot lead pings you on Telegram (Standard, Premium)
-• PDF invoices: supplier, number, date, total and currency go to an Invoices tab (Standard, Premium)
 
 Nothing is sent without you. The assistant reads, files and drafts. It never sends or deletes email.
 
@@ -542,7 +556,7 @@ AI suggests, code checks. It uses AI models from OpenAI or Anthropic. A phone nu
 
 Proof of approach: I built a bank statement extractor that checks every period against the totals printed on the statement. If they don't match to the cent, it flags the gap instead of passing it.
 
-Works with Gmail, Google Workspace, Zoho and most IMAP mailboxes. Hosting: see the FAQ.
+Works with Gmail, Google Workspace (your admin may need to allow access), Zoho and most IMAP mailboxes. Hosting: see the FAQ.
 ```
 
 > **Оператору.** Абзац «Proof of approach» — правда только в таком виде: это отдельный проект, а не
@@ -590,13 +604,13 @@ Works with Gmail, Google Workspace, Zoho and most IMAP mailboxes. Hosting: see t
 - **Will it send emails on its own?** No. Drafts only, in your Drafts folder. You read, edit and send. There is no code in it that sends or deletes email.
 - **Does my email go to an AI company? Can it work without AI?** The sender, subject and text of each email go to the AI provider, OpenAI or Anthropic, through their API. Newsletters and auto-replies don't. Sorting needs AI, so there is no AI-free version of this service.
 - **What do you store?** Not your emails. Only what's needed to avoid doing anything twice: message IDs, category and actions taken. Extracted fields are deleted once they are in your sheet. Records older than 90 days are removed.
-- **Which mailboxes work?** Gmail, Google Workspace, Zoho and most IMAP mailboxes. Your Workspace admin may need to allow access. Outlook and Microsoft 365 work through a forwarding rule to a separate mailbox; drafts then appear there.
-- **Scanned invoices, QuickBooks or Xero?** Invoice PDFs must contain text. Scans and photos, and exports to QuickBooks, Xero or HubSpot, are custom work. I quote them after I see a sample.
-- **What happens after delivery?** Free fixes and hosting for 14 days (Premium: 30). Then a monthly support plan here on Fiverr keeps it hosted and up to date: Care $49, Pro $149 or Business $349. Prefer your own server? Ask me for a quote.
-
-До выхода извлечения из PDF замени пятый вопрос:
-
+- **Which mailboxes work?** Gmail, Google Workspace, Zoho and most IMAP mailboxes. Your Workspace admin may need to allow access. Outlook and Microsoft 365 can work through forwarding to a separate mailbox, if your admin allows forwarding outside your company; drafts then appear there. I check this before you order.
 - **Can it read invoices, or export to QuickBooks or Xero?** Invoice emails are sorted and filed. Reading invoice PDFs, scans and photos, and exports to QuickBooks, Xero or HubSpot are custom work. I quote them after I see a sample.
+- **What happens after delivery?** From launch, a monthly support plan here on Fiverr keeps it hosted and up to date: Care $49, Pro $149 or Business $349. Free fixes for 14 days (Premium: 30) come on top. Prefer your own server? Ask me for a quote.
+
+После выхода извлечения из PDF замени пятый вопрос:
+
+- **Scanned invoices, QuickBooks or Xero?** Invoice PDFs must contain text. Scans and photos, and exports to QuickBooks, Xero or HubSpot, are custom work. I quote them after I see a sample.
 
 > **Оператору.** Когда извлечение из PDF выйдет, проверь, что именно уходит модели (текст PDF или
 > нет), и допиши это во второй ответ. Сейчас ответ верен для v1: вложения модели не передаются,
@@ -607,22 +621,28 @@ Works with Gmail, Google Workspace, Zoho and most IMAP mailboxes. Hosting: see t
 | # | Question to the buyer | Тип | Обязательно |
 |---|---|---|---|
 | 1 | Which mailbox should I connect? The provider (Gmail, Google Workspace, Zoho, other) and the mailbox address. Is there an admin for it? | текст | да |
-| 2 | An app password for this mailbox, not your main password. Gmail: turn on 2-Step Verification, then Google Account → Security → 2-Step Verification → App passwords. You can revoke it at any time, and access stops at once. Paste it here, never in chat. If your admin blocks app passwords, write "admin". | текст | да |
+| 2 | Please don't paste any password here or in chat. Once the order starts, I'll send you the steps to create an app password for this mailbox (not your main password), and you'll pass it to me on a short Fiverr call. You can revoke it at any time, and access stops at once. Does your admin block app passwords? | выбор: No / Yes, ask my admin / Not sure | да |
 | 3 | What kinds of emails do you get, and what should happen with each: draft a reply, alert you, move to a folder? | текст | да |
 | 4 | Standard and Premium: the facts a reply draft may use: prices, hours, how to book or order, cancellation and refund policy, address. Drafts won't promise anything that isn't here. | текст | нет |
-| 5 | How should we tune the sorting: you attach 20–50 typical emails (remove anything sensitive), or I sort your last 20 emails without changing anything and we review them together? | выбор: Example emails / Dry run | да |
-| 6 | The language of the sheet and alerts (English or Russian). Should names, addresses and phones be masked in the sheet? | выбор | да |
+| 5 | How should we tune the sorting: you attach 20–50 typical emails (remove anything sensitive), or, after you accept the data processing terms (question 9), I sort your last 20 emails without changing anything and we review them together? | выбор: Example emails / Dry run | да |
+| 6 | The language of the sheet and alerts (English or Russian). Should email addresses, names and phone numbers be masked in the sheet? The subject and the one-line summary are not masked. | выбор | да |
 | 7 | Standard and Premium, alerts: a Telegram bot you own (search "BotFather", send /newbot, paste the token) plus your numeric Telegram ID (from "userinfobot"). Or paste a Slack or Make webhook URL instead. | текст | нет |
 | 8 | Can you create an empty Google Sheet and share it with a service address I'll give you in a setup file? | выбор: Yes / No / Not sure | да |
 | 9 | Before I connect the mailbox, I'll attach the data processing terms: what is processed, where, for how long, and which AI provider receives it. Do you agree to review and accept them first? | выбор: Yes / I have questions | да |
 
 > **Оператору.**
-> - Ответ «admin» на вопрос 2 означает Google Workspace с запретом паролей приложений. Варианты из
+> - Ответ «Yes, ask my admin» на вопрос 2 означает Google Workspace с запретом паролей приложений. Варианты из
 >   `docs/packages/inbox.md`: админ разрешает пароли приложений или автопересылка на отдельный ящик.
 >   Когда выйдет вход через XOAUTH2, пароль для Workspace не нужен вовсе: вопрос 2 тогда допиши
 >   вариантом «your admin grants access, no password».
-> - Пароль приложения — сразу в `.env` (`INBOX_IMAP_PASSWORD`); в лог и тексты ошибок он не попадает.
->   При отказе от поддержки покупатель отзывает его.
+> - **Как передаётся пароль приложения.** Не через форму требований и не в чате: ответ на требования
+>   остаётся на странице заказа, а договор (12.3) обещает, что паролей в сообщениях нет. Пока
+>   поддержка Fiverr письменно не ответила на вопрос из 2.1 (п. 1), — только на созвоне Fiverr:
+>   покупатель диктует пароль, ты сразу кладёшь его в `.env` (`INBOX_IMAP_PASSWORD`); в лог и тексты
+>   ошибок он не попадает. Есть ли у тебя встроенные созвоны Fiverr — раздел 9. Если поддержка
+>   разрешит форму или одноразовую ссылку — можно так, но после настройки попроси покупателя
+>   отозвать этот пароль и выпустить новый, переданный на созвоне. При отказе от поддержки
+>   покупатель отзывает пароль.
 > - Вопрос 9: DPA — из `docs/legal/` (черновик, покажи юристу). В версии для Fiverr не должно быть
 >   твоих e-mail, телефона и адреса как контакта. Достаточно ли согласия кнопкой в форме и сообщением
 >   в заказе — вопрос юристу (вопрос в конце ответа).
@@ -635,15 +655,15 @@ Works with Gmail, Google Workspace, Zoho and most IMAP mailboxes. Hosting: see t
    замаскированными отправителями. Подпись «Demo data».
 2. **The flow.** Email → category and urgency → sheet row → draft in Drafts → hot-lead alert. Плашка
    «AI suggests, code checks».
-3. **The checks.** Три строки из демо: «dropped unverified: phone», «BLOCKED: injection, nothing
-   done», «second run: nothing done twice».
+3. **The checks.** Три строки из демо: «dropped unverified: phone», «BLOCKED: injection, operator
+   alerted», «second run: nothing done twice».
 4. **PDF (если галерея принимает PDF, НП): «A bank statement extractor that checks its own
    numbers».** Одна страница: скриншот заключения веб-стенда, вырезка страницы с рамкой вокруг
    строки, таблица точности, где имена файлов заменены на «Statement 1–4». Только синтетическая
    выписка из `tests/conftest.py` проекта выписок, ни одной цифры реальных клиентов банков. Текст:
 
 ```text
-A bank statement extractor that checks its own numbers. Every statement prints its own check: opening balance + deposits − withdrawals = closing balance. A period counts as correct only if the extracted transactions reconcile to the cent. Otherwise it is flagged with the difference and a likely cause. Every number keeps its page and position, and a corrected number shows the original reading. Result on 4 real statements from different banks (13 periods): all 13 reconciled, 2,258 transactions, $0.69 in AI costs for the whole run; without the AI step, 5 of 13. A small sample, not a benchmark. Screens show a synthetic statement.
+A bank statement extractor that checks its own numbers. Every statement prints its own check: opening balance + deposits − withdrawals = closing balance. A period counts as correct only if the extracted transactions reconcile to the cent. Otherwise it is flagged with the difference and a likely cause. Every number keeps its page; numbers read from text or OCR also keep their exact position, and a corrected number shows the original reading. Result on 4 real statements from different banks (13 periods): all 13 reconciled, 2,258 transactions, $0.69 in AI costs for the whole run; without the AI step, 5 of 13. A small sample, not a benchmark. Screens show a synthetic statement.
 ```
 
 > **Оператору.** Цифры — из README проекта выписок (прогон с `gpt-5.4-mini,gpt-5.6-sol`). Перезапустил
@@ -671,7 +691,9 @@ A bank statement extractor that checks its own numbers. Every statement prints i
 
 ## 7. Monthly support on Fiverr
 
-> **Оператору.** Хостинг входит только в тариф поддержки (`offers.en.md`, Support plans). Клиент с
+> **Оператору.** Хостинг входит только в тариф поддержки (`offers.en.md`, Support plans), и тариф
+> начинается в день запуска; бесплатные исправления (14 / 30 дней) идут поверх него, а не вместо
+> (`offers.md`, 7.4; договор 7.2). Бесплатного хостинга на период исправлений нет. Клиент с
 > Fiverr платит за поддержку только через Fiverr (бриф 3.2, **НП**). Gig extra для этого не подходит:
 > опция оплачивается один раз в заказе, а поддержка идёт месяцами после его закрытия.
 
@@ -683,12 +705,14 @@ A bank statement extractor that checks its own numbers. Every statement prints i
 | Hosting, uptime monitoring, daily backups, monthly security updates, monthly report | ✓ | ✓ | ✓ |
 | I reply within | 2 business days | 1 business day | 4 business hours |
 | Hours for changes | 1 hour | 4 hours | 10 hours |
-| Repairs after outside changes | within the 1 hour | included | included |
+| Repairs after outside changes | counts toward your 1 hour | included | included |
 | AI operations per month | 2,000 | 10,000 | 30,000 |
 | One new small automation per quarter, up to 6 hours | — | — | ✓ |
 
 Рабочее время: пн–пт, 10:00–19:00 по Тбилиси (UTC+4), кроме праздников Грузии. Сверх часов — $40 в
 час, шагом 30 минут, только после согласования оценки: на Fiverr это отдельный custom offer.
+ИИ-операции — месячный потолок: на нём ИИ встаёт до 1-го числа, платы сверх лимита нет
+(`offers.md`, 7.2). Покупателю: «AI operations are a monthly cap, with no charges above it.»
 
 ### 7.2 Three ways to bill it, in order of preference
 
@@ -706,21 +730,22 @@ A bank statement extractor that checks its own numbers. Every statement prints i
 
 ### 7.3 When to offer it
 
-1. **В гиге** — с первого дня: FAQ «What happens after delivery?» и строка про хостинг в описании.
-   Покупатель знает до заказа, что системе нужен уход.
-2. **В период бесплатных исправлений** — раз в неделю короткая заметка из журнала событий, только
-   настоящие числа: «This week the bot made [N] bookings, [N] of them after hours, and sent [N]
-   reminders».
-3. **За 3–4 дня до конца периода** — первый отчёт и предложение (шаблон 7.4).
+1. **В гиге** — с первого дня: FAQ «What happens after delivery?» и строка про тариф с запуска в
+   описании. Покупатель знает до заказа, что системе нужен уход.
+2. **За 2–3 дня до сдачи** — когда показал работу на данных покупателя (раздел 8, шаг 4):
+   предложение (шаблон 7.4). Заказ поддержки должен начаться в день запуска.
+3. **В первый месяц** — раз в неделю короткая заметка из журнала событий, только настоящие числа:
+   «This week the bot made [N] bookings, [N] of them after hours, and sent [N] reminders». В конце
+   месяца — первый отчёт (7.2).
 
 ### 7.4 Offer message
 
 ```text
-Your free-fix period ends on [date]. To keep [the bot / the monitor / the inbox assistant] hosted and up to date after that, I offer monthly support here on Fiverr:
-• Care, $49/month: hosting, monitoring, backups, fixes up to 1 hour, a monthly report. Reply within 2 business days.
+[The bot / The monitor / The inbox assistant] goes live on [date]. From that day, a monthly support plan here on Fiverr keeps it hosted and up to date. Free fixes until [date] come on top of any plan.
+• Care, $49/month: hosting, monitoring, backups, a monthly report, 1 hour of changes or repairs after outside changes; my own bugs are always fixed free. Reply within 2 business days.
 • Pro, $149/month: up to 4 hours of changes, repairs when [sites / your setup] change, reply within 1 business day.
 • Business, $349/month: up to 10 hours, reply within 4 business hours, one new small automation per quarter.
-If you'd like to continue, I'll send an offer here for the plan you choose. If not, we agree on a date here, I export your data as CSV files, and I switch the system off.
+Which plan would you like? I'll send an offer here that starts on [date]. If you'd rather not continue, we agree on a date here, I export your data as CSV files, and I switch the system off. Prefer your own server? I'll quote the handover.
 ```
 
 ### 7.5 If the buyer says no
@@ -746,11 +771,13 @@ If you'd like to continue, I'll send an offer here for the plan you choose. If n
 3. **Настройка** — по чек-листам `docs/packages/<pkg>.md`: `check`, затем `chat`, `dry-run` или
    `probe`.
 4. **Показ на данных покупателя.** Скриншоты или видео в заказе; ссылка на бота самого покупателя.
-   Правки — два круга.
+   Правки — два круга. Здесь же — предложение поддержки (7.3, шаблон 7.4).
 5. **Сдача (Deliver).** Короткое сообщение плюс PDF «Handover»: что работает и по какому расписанию,
    какие данные где хранятся, как отозвать доступы, как устроена поддержка. Без твоих контактов.
-6. **После закрытия.** Бесплатные исправления 14 или 30 дней — в сообщениях, без нового заказа.
-   Предложение поддержки — раздел 7.3.
+   Заказ поддержки начинается в день запуска; не оформлен — система не запускается, договорись о
+   выгрузке и дате отключения (7.5).
+6. **После закрытия.** Бесплатные исправления 14 или 30 дней — в сообщениях, без нового заказа,
+   поверх тарифа поддержки.
 7. **Отзыв.** Один раз попроси честный отзыв, без условий.
 
 ## 9. Check in your account before relying on it (НП)
@@ -771,6 +798,7 @@ If you'd like to continue, I'll send an offer here for the plan you choose. If n
 | Способы и цена вывода для Грузии: PayPal, Payoneer, банк через Payoneer | Earnings → Withdraw |
 | Срок до вывода (14 дней, 7 для Top Rated, Pro и Seller Plus) и автозакрытие заказа через 3 дня | справка «How Fiverr works for freelancers» |
 | Продление срока заказа и правила отмены | страница заказа, справка |
-| Встроенные созвоны в Fiverr: доступны ли тебе | раздел сообщений |
+| Встроенные созвоны в Fiverr: доступны ли тебе (через них передаётся пароль приложения почты, 6.6) | раздел сообщений |
+| Можно ли получить пароль приложения почты через форму требований или одноразовой ссылкой | письменный ответ поддержки (2.1, п. 1) |
 | Пороги Level 1 и условия Fiverr Ads | справка «freelancer levels» и «Fiverr Ads» |
 | Меняется ли имя пользователя после регистрации | форма регистрации |

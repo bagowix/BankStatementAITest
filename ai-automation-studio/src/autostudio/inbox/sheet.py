@@ -1,17 +1,24 @@
-"""Строка вкладки «Inbox» в таблице клиента и маскирование персональных данных.
+"""Строки вкладок «Inbox» и «Invoices» в таблице клиента и маскирование персональных данных.
 
 Формулы в ячейках (тема `=HYPERLINK(...)`) обезвреживает сам `TableSink` ядра;
 здесь — только формат и маскирование, которое клиент включает в конфиге.
+
+Суммы сверенного счёта пишутся числами (`Decimal`): клиент складывает и фильтрует их в
+таблице без VALUE(). Суммы НЕ сверенного счёта пишутся текстом со знаком «⚠»: СУММ() по
+колонке их не подхватит, и непроверенное число не попадёт в итог как проверенное.
 """
 
 import datetime as dt
 import re
+from decimal import Decimal
 from typing import Final
 from zoneinfo import ZoneInfo
 
 from autostudio.inbox import texts
+from autostudio.inbox.invoices import InvoiceRecord
 from autostudio.inbox.mail import ParsedEmail
 from autostudio.inbox.triage import TriageResult
+from autostudio.sinks import Cell
 
 _DIGIT: Final = re.compile(r'\d')
 _KEEP_DIGITS: Final = 2
@@ -43,7 +50,8 @@ def mask_name(name: str) -> str:
     return ' '.join(f'{part[0]}.' for part in name.split() if part)
 
 
-def _sender(email: ParsedEmail, mask: bool) -> str:
+def sender_cell(email: ParsedEmail, mask: bool) -> str:
+    """Отправитель для таблицы: «Имя <адрес>», замаскированный, если клиент так решил."""
     address = mask_email(email.from_addr) if mask and email.from_addr else email.from_addr
     if not email.from_name:
         return address
@@ -84,7 +92,7 @@ def build_row(
         name = mask_name(name) if name else ''
     return [
         email.date.astimezone(zone).strftime('%Y-%m-%d %H:%M'),
-        _sender(email, mask),
+        sender_cell(email, mask),
         email.subject,
         triage.category,
         texts.text(language, f'urgency_{triage.urgency}'),
@@ -111,7 +119,7 @@ def failure_row(
         return [now.astimezone(zone).strftime('%Y-%m-%d %H:%M'), '', '', '', '', summary, *[''] * 7, '', manual]
     return [
         email.date.astimezone(zone).strftime('%Y-%m-%d %H:%M'),
-        _sender(email, mask),
+        sender_cell(email, mask),
         email.subject,
         '',
         '',
@@ -119,4 +127,49 @@ def failure_row(
         *[''] * 7,
         texts.text(language, 'no'),
         manual,
+    ]
+
+
+_UNVERIFIED_MARK: Final = '⚠ '
+
+
+def _money(value: Decimal | None, verified: bool) -> Cell:
+    if value is None:
+        return ''
+    return value if verified else f'{_UNVERIFIED_MARK}{value}'
+
+
+def invoice_row(record: InvoiceRecord, *, zone: ZoneInfo, language: str) -> list[Cell]:
+    """Строка вкладки «Invoices».
+
+    Args:
+        record: Сверенный (или не сверенный) счёт.
+        zone: Часовой пояс клиента.
+        language: Язык клиента.
+
+    Returns:
+        Значения ячеек в порядке `texts.invoice_header`.
+    """
+    verified = record.status == 'verified'
+    notes = texts.invoice_reasons(language, record.reasons)
+    if record.tax_included:
+        notes.append(texts.text(language, 'note_tax_included'))
+    read = record.status != 'manual'
+    return [
+        record.received.astimezone(zone).strftime('%Y-%m-%d %H:%M'),
+        record.sender,
+        record.file,
+        texts.text(language, f'invoice_{record.status}'),
+        record.vendor or '',
+        record.invoice_number or '',
+        record.invoice_date.isoformat() if record.invoice_date else '',
+        record.due_date.isoformat() if record.due_date else '',
+        record.currency or '',
+        _money(record.total, verified),
+        _money(record.tax, verified),
+        _money(record.lines_sum, verified),
+        # Расхождение посчитал код, а не модель: это число, даже у не сверенного счёта.
+        record.delta if record.delta is not None else '',
+        record.line_count if read else '',
+        '; '.join(notes),
     ]

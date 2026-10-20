@@ -2,8 +2,9 @@
 
 Каскад стоимости: автоответы и рассылки узнаются по заголовкам и до модели не
 доходят. Ответ модели проходит схему `Triage`, а затем код: категория обязана быть
-из конфига, телефон и адрес — буквально встречаться в письме, бюджет — состоять из
-чисел письма. Признаки prompt-инъекции ищутся и моделью, и правилами: хватает одного.
+из конфига, телефон — совпадать в E.164 с номером из письма, адрес — буквально
+встречаться в письме, бюджет — состоять из чисел письма. Признаки prompt-инъекции ищутся
+и моделью, и правилами: хватает одного.
 """
 
 import datetime as dt
@@ -13,6 +14,8 @@ from collections.abc import Iterable, Sequence
 from typing import Final, Literal
 
 import msgspec
+import phonenumbers
+from phonenumbers import Leniency, PhoneNumber, PhoneNumberFormat, PhoneNumberMatcher
 
 from autostudio.errors import LLMError
 from autostudio.inbox import texts
@@ -23,17 +26,9 @@ from autostudio.llm import LLMClient
 SUMMARY_LIMIT: Final = 200
 _FIELD_LIMIT: Final = 120
 _DRAFT_LIMIT: Final = 3000
-_MIN_PHONE_DIGITS: Final = 7
-# Голая цепочка цифр без «+» и разделителей короче этого — номер брони, сумма, артикул.
-_PLAIN_PHONE_DIGITS: Final = 9
-# Совпадение «хвостом» засчитывается, только если хвост — целый национальный номер, а
-# разница — код страны или префикс (+995 599… ↔ 599…, 8 916… ↔ +7 916…).
-_SUFFIX_DIGITS: Final = 9
-_PREFIX_DIGITS: Final = 4
 _NAME_WORDS: Final = 5
-
-_PHONE: Final = re.compile(r'(?:\+|\b00)?\d[\d\s().\-‑]{5,25}\d')
-_DATE_LIKE: Final = re.compile(r'\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[-./]\d{1,2}[-./]\d{2,4}')
+# Регион по умолчанию, если проверку вызвали без конфига (тесты, демо).
+DEFAULT_PHONE_REGIONS: Final = ('GE', 'RU')
 _NAME_LIKE: Final = re.compile(r"^[^\W\d_][^\W\d_ .'\-]*(?:[ .'\-]+[^\W\d_]+)*\.?$", re.UNICODE)
 _NUMBER: Final = re.compile(r"\d(?:[\d,.:' ]{0,40}\d)?")
 _DIGITS: Final = re.compile(r'\d+')
@@ -184,6 +179,8 @@ class TriageResult(msgspec.Struct, frozen=True, kw_only=True):
 
     Attributes:
         source: `prefilter` — правила без модели, `model` — модель и проверка кодом.
+        phone: Телефон, как он написан в письме (так его видит владелец в таблице).
+        phone_e164: Тот же телефон в E.164 — для звонка в один тап и сравнения.
         injection_markers: Что нашли правила (пусто — пометила только модель).
         corrected: Поля, которые код исправил или выбросил как непроверенные.
     """
@@ -194,6 +191,7 @@ class TriageResult(msgspec.Struct, frozen=True, kw_only=True):
     sender_name: str | None = None
     company: str | None = None
     phone: str | None = None
+    phone_e164: str | None = None
     email: str | None = None
     intent: str | None = None
     budget: str | None = None
@@ -409,50 +407,85 @@ def _digits(value: str) -> str:
     return ''.join(_DIGITS.findall(value))
 
 
-def _phone_literals(texts_: Iterable[str]) -> Iterable[tuple[str, str]]:
-    for text in texts_:
-        for match in _PHONE.finditer(text):
-            literal = match.group(0).strip()
-            digits = _digits(literal)
-            if len(digits) < _MIN_PHONE_DIGITS or _DATE_LIKE.fullmatch(literal):
-                continue
-            if literal.isdigit() and len(digits) < _PLAIN_PHONE_DIGITS:
-                continue
-            yield literal, digits
+class VerifiedPhone(msgspec.Struct, frozen=True):
+    """Телефон, найденный в письме.
+
+    Attributes:
+        literal: Как он написан в письме — так он идёт в таблицу и уведомление.
+        e164: Тот же номер в E.164 (`+995599123456`) — по нему и сравниваем.
+    """
+
+    literal: str
+    e164: str
 
 
-def _same_number(found: str, wanted: str) -> bool:
-    if found == wanted:
-        return True
-    short, long_ = sorted((found, wanted), key=len)
-    if len(long_) - len(short) > _PREFIX_DIGITS:
-        return False
-    if len(short) >= _SUFFIX_DIGITS and long_.endswith(short):
-        return True
-    # Одинаковые последние 10 цифр при разном префиксе: «8 916…» и «+7 916…».
-    return len(short) >= 10 and found[-10:] == wanted[-10:]
+def _e164(number: PhoneNumber) -> str:
+    return phonenumbers.format_number(number, PhoneNumberFormat.E164)
 
 
-def verify_phone(phone: str | None, texts_: Iterable[str]) -> str | None:
-    """Телефон, только если он буквально есть в письме; возвращает запись из письма.
+def _phone_regions(proposal: str, regions: Sequence[str]) -> list[str]:
+    # Регион из кода страны, который модель написала сама («+7 916…»), тоже пробуется для
+    # номеров письма: «8 (916) 123-45-67» становится +7 916… только при разборе в регионе RU.
+    found = list(regions)
+    try:
+        number = phonenumbers.parse(proposal, None)
+    except phonenumbers.NumberParseException:
+        return found
+    if number.country_code is not None:
+        found += phonenumbers.region_codes_for_country_code(number.country_code)
+    return list(dict.fromkeys(found))
 
-    Сравнение по цифрам: модель могла переписать `8 (916) 123-45-67` как
-    `+7 916 123 45 67`. В таблицу идёт именно то, что написано в письме. Даты, номера
-    брони и суммы телефоном не считаются, даже если модель «достроила» их до номера.
+
+def normalize_phone(value: str, regions: Sequence[str]) -> str | None:
+    """Номер в E.164, если он существует хотя бы в одном из регионов (по порядку).
+
+    Args:
+        value: Номер в любой записи (`8 (916) 123-45-67`, `+995 599 12 34 56`, `599123456`).
+        regions: Регионы для номеров без кода страны, в порядке предпочтения.
+
+    Returns:
+        `+79161234567` или None, если такого номера нет ни в одном регионе.
+    """
+    for region in regions:
+        try:
+            number = phonenumbers.parse(value, region)
+        except phonenumbers.NumberParseException:
+            continue
+        if phonenumbers.is_valid_number(number):
+            return _e164(number)
+    return None
+
+
+def verify_phone(
+    phone: str | None, texts_: Iterable[str], regions: Sequence[str] = DEFAULT_PHONE_REGIONS
+) -> VerifiedPhone | None:
+    """Телефон, только если в письме есть номер с тем же E.164.
+
+    Модель могла переписать `8 (916) 123-45-67` как `+7 916 123 45 67` — это тот же номер.
+    А `+44 599 12 34 56` вместо `599 12 34 56` — уже другой: модель «достроила» местный
+    номер чужим кодом страны. Номера в тексте ищет `phonenumbers.PhoneNumberMatcher`
+    (только существующие номера: даты, номера брони и суммы им не становятся). Сравнение
+    цифр «хвостом», как было раньше, второй случай пропускало (var/review_inbox/compare_phones.py).
 
     Args:
         phone: Телефон от модели.
         texts_: Тексты письма (без адресов самого бизнеса).
+        regions: Регионы для номеров без кода страны: основной, затем запасные.
 
     Returns:
-        Телефон из письма или None.
+        Запись из письма и E.164 или None.
     """
-    wanted = _digits(phone or '')
-    if len(wanted) < _MIN_PHONE_DIGITS:
+    if not phone or not phone.strip():
         return None
-    for literal, found in _phone_literals(texts_):
-        if _same_number(found, wanted):
-            return literal
+    all_regions = _phone_regions(phone, regions)
+    wanted = normalize_phone(phone, all_regions)
+    if wanted is None:
+        return None
+    for text in texts_:
+        for region in all_regions:
+            for match in PhoneNumberMatcher(text, region, leniency=Leniency.VALID):
+                if _e164(match.number) == wanted:
+                    return VerifiedPhone(literal=match.raw_string.strip(), e164=wanted)
     return None
 
 
@@ -533,7 +566,8 @@ def validate_triage(raw: Triage, email: ParsedEmail, section: InboxSection, mark
         return verified
 
     hay = _haystack(email)
-    phone = checked('phone', raw.phone, verify_phone(raw.phone, hay))
+    found_phone = verify_phone(raw.phone, hay, section.phone_regions)
+    phone = checked('phone', raw.phone, found_phone.literal if found_phone else None)
     address = checked('email', raw.email, verify_email(raw.email, email))
     budget = checked('budget', raw.budget, verify_budget(raw.budget, email))
     name_ok = _words_present(raw.sender_name, email, all_words=True)
@@ -561,6 +595,7 @@ def validate_triage(raw: Triage, email: ParsedEmail, section: InboxSection, mark
         sender_name=sender_name,
         company=company,
         phone=phone,
+        phone_e164=found_phone.e164 if found_phone else None,
         email=address,
         intent=_clip(raw.intent, SUMMARY_LIMIT),
         budget=budget,

@@ -10,6 +10,7 @@ from dishka import make_async_container
 from autostudio.clientconf import ClientInfo, NotifyConfig, SinkConfig, load_client_config
 from autostudio.clientconf import ClientInfo as Client
 from autostudio.errors import AutoStudioError, ConfigError
+from autostudio.events import EventLog
 from autostudio.llm import FakeLLM, ResilientLLM
 from autostudio.prices import cli, demo
 from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product
@@ -18,6 +19,7 @@ from autostudio.prices.fetch import PoliteFetcher
 from autostudio.prices.heuristics import guess_price
 from autostudio.prices.monitor import PricesDeps, RunResult
 from autostudio.prices.providers import PricesProvider, price_model
+from autostudio.prices.store import PriceStore
 from autostudio.providers import CoreProvider
 from autostudio.settings import LLMProvider, Settings
 
@@ -250,7 +252,7 @@ def test__summary__failures_listed():
     assert cli.summary(result) == 'prices: прочитано 1, не прочитано 2 (timeout 2), событий 0, страниц модели 1'
 
 
-def test__summary__model_tokens_and_skipped_run():
+def test__summary__model_tokens_and_paused_offers():
     used = RunResult(
         checked=1,
         failed=0,
@@ -260,10 +262,12 @@ def test__summary__model_tokens_and_skipped_run():
         llm_pages=2,
         llm_input_tokens=3000,
         llm_output_tokens=40,
+        paused=3,
     )
-    assert cli.summary(used).endswith('страниц модели 2, токенов модели 3000 вх. / 40 вых.')
-    skipped = RunResult(checked=0, failed=0, changes=(), digest=None, operator_alert=None, llm_pages=0, skipped=True)
-    assert cli.summary(skipped) == 'prices: пропущено — предыдущий проход по этому клиенту ещё идёт'
+    assert cli.summary(used) == (
+        'prices: прочитано 1, не прочитано 0, на паузе 3, событий 0, страниц модели 2, '
+        'токенов модели 3000 вх. / 40 вых.'
+    )
 
 
 # --- probe ---------------------------------------------------------------------------------
@@ -571,3 +575,129 @@ async def test__prices_provider__real_model__closed_with_container(tmp_path, mon
     assert isinstance((await container.get(PricesDeps)).llm, Model)
     await container.close()
     assert closed == [True]
+
+
+# --- ёмкость, пауза, .env клиента, пропуск прохода -----------------------------------------------
+
+
+def big_catalog_toml(tmp_path: Path, offers: int, extra: str = '', host: str = 'big.example') -> Path:
+    products = '\n'.join(
+        f'[[prices.products]]\nid = "p{i}"\nname = "P{i}"\n\n  [[prices.products.offers]]\n'
+        f'  competitor = "Big"\n  url = "https://{host}/p/{i}"\n'
+        for i in range(offers)
+    )
+    text = (
+        f'[client]\nid = "acme-shop"\nname = "Acme"\n\n[notify]\nconsole = true\n\n[sink]\n'
+        f'csv_dir = "{tmp_path / "out"}"\n\n[prices]\ncontact_email = "ops@studio.example"\n{extra}\n\n{products}'
+    )
+    path = tmp_path / 'client.toml'
+    path.write_text(text, encoding='utf-8')
+    return path
+
+
+def test__check__example__site_load_and_schedule_hint(clean_env, capsys):
+    invoke('check', str(EXAMPLE))
+    out = capsys.readouterr().out
+    assert 'Нагрузка на сайты (пауза 5 с между запросами, плюс robots.txt; без Crawl-delay):' in out
+    assert 'shop-a.example                   ссылок 3, запросов за проход 4, ≈ 20 с, до 4 запросов/ч' in out
+    assert (
+        'Весь проход ≈ 20 с (сайтов одновременно до 4); без наложений — не чаще раза в 1 ч; '
+        'расписание не задано (check --every-hours N сверит его)'
+    ) in out
+
+
+def test__check__whole_catalog_hourly__capacity_note_strict_problem(clean_env, tmp_path, capsys):
+    path = big_catalog_toml(tmp_path, 800)
+    invoke('check', str(path), '--every-hours', '1')
+    out = capsys.readouterr().out
+    assert 'расписание — раз в 1 ч' in out
+    assert '! big.example: проход по сайту ≈ 67 мин — не уложится в max_run_minutes = 30' in out
+    assert '! big.example: проход по сайту ≈ 67 мин — дольше интервала 1 ч' in out
+    with pytest.raises(ConfigError, match='не готово к боевому запуску'):
+        invoke('check', str(path), '--every-hours', '1', '--strict')
+    assert '✗ big.example: проход по сайту' in capsys.readouterr().out
+
+
+def test__check__many_sites__top_ten_shown(clean_env, tmp_path, capsys):
+    path = client_toml(tmp_path)
+    offers = ''.join(
+        f'\n  [[prices.products.offers]]\n  competitor = "S{i}"\n  url = "https://s{i}.example/p"\n' for i in range(11)
+    )
+    path.write_text(path.read_text() + offers)
+    invoke('check', str(path))
+    assert '… и ещё сайтов: 2' in capsys.readouterr().out
+
+
+def test__check__every_hours_out_of_range__config_error(clean_env):
+    with pytest.raises(ConfigError, match='every-hours'):
+        invoke('check', str(EXAMPLE), '--every-hours', '0.5')
+
+
+def test__check__paused_site__marked_in_table_and_noted_not_a_problem(clean_env, tmp_path, capsys):
+    extra = '[prices.sites."big.example"]\npaused = true\npaused_reason = "письмо владельца 2026-10-21"'
+    path = big_catalog_toml(tmp_path, 2, extra=extra)
+    invoke('check', str(path))
+    out = capsys.readouterr().out
+    assert 'PAUSED (auto)' in out
+    assert '! сайт big.example на паузе (письмо владельца 2026-10-21): ссылок не проверяется: 2' in out
+    no_reason = big_catalog_toml(tmp_path, 1, extra='[prices.sites."big.example"]\npaused = true')
+    invoke('check', str(no_reason))
+    assert '! сайт big.example на паузе (причина не указана): ссылок не проверяется: 1' in capsys.readouterr().out
+
+
+def test__check__client_env_next_to_config__picked_up(clean_env, tmp_path, capsys):
+    creds = tmp_path / 'sa.json'
+    creds.write_text('{}')
+    # Переменная, которую загрузит .env, вернётся в исходное состояние после теста.
+    clean_env.setenv('GOOGLE_APPLICATION_CREDENTIALS', 'placeholder')
+    clean_env.delenv('GOOGLE_APPLICATION_CREDENTIALS')
+    (tmp_path / '.env').write_text(f'GOOGLE_APPLICATION_CREDENTIALS={creds}\n')
+    path = client_toml(tmp_path)
+    text = path.read_text().replace(f'csv_dir = "{tmp_path / "out"}"', 'backend = "google"\nspreadsheet_id = "X"')
+    path.write_text(text.replace('ops@studio.example', 'ops@studio.ge'))
+    invoke('check', str(path), '--strict')
+    assert '✓ конфиг и окружение в порядке' in capsys.readouterr().out
+
+
+@respx.mock
+def test__run__client_env_next_to_config__loaded_before_settings(clean_env, tmp_path, capsys):
+    clean_env.setenv('AUTOSTUDIO_HEALTHCHECK_URL', 'placeholder')
+    clean_env.delenv('AUTOSTUDIO_HEALTHCHECK_URL')
+    (tmp_path / '.env').write_text('AUTOSTUDIO_HEALTHCHECK_URL=https://hc.example/ping/abc\n')
+    start = respx.post('https://hc.example/ping/abc/start').mock(return_value=httpx.Response(200))
+    done = respx.post('https://hc.example/ping/abc').mock(return_value=httpx.Response(200))
+    respx.get(f'http://{IP}/p/1').mock(
+        return_value=httpx.Response(200, headers={'content-type': 'text/html'}, text=PAGE)
+    )
+    invoke('run', str(client_toml(tmp_path)))
+    assert start.called and done.called
+
+
+async def test__serve__another_pass_holds_lock__skipped_not_failed(clean_env, tmp_path, capsys):
+    path = client_toml(tmp_path)
+    store = PriceStore(tmp_path / 'data' / 'acme-shop' / 'prices.sqlite')
+    with store.exclusive() as locked:
+        assert locked
+        ok = await cli.serve(path, every_hours=None)
+    assert ok is True  # сознательный пропуск — не ошибка для cron/systemd
+    assert cli.SKIPPED in capsys.readouterr().out
+    events = EventLog(tmp_path / 'data' / 'acme-shop' / 'events.sqlite')
+    assert events.last('prices', ('system.run_skipped',)) is not None
+    assert events.last('prices', ('system.run_ok', 'system.run_failed')) is None
+
+
+async def test__serve__overloaded_site__capacity_warning_logged_pass_still_runs(clean_env, tmp_path, caplog):
+    async def no_dns(host: str, port: int) -> list[str]:
+        raise OSError('нет сети в тесте')
+
+    path = big_catalog_toml(tmp_path, 13, extra='respect_robots = false\nmax_run_minutes = 1')
+    with caplog.at_level('WARNING', logger='autostudio.prices.cli'):
+        ok = await cli.serve(path, every_hours=None, provider=lambda: PricesProvider(resolver=no_dns))
+    assert ok is True
+    assert 'ёмкость: big.example: проход по сайту ≈ 65 с — не уложится в max_run_minutes = 1' in caplog.text
+
+
+def test__probe__paused_site_from_config__no_request(clean_env, tmp_path, capsys):
+    path = big_catalog_toml(tmp_path, 1, extra='[prices.sites."big.example"]\npaused = true')
+    invoke('probe', 'https://big.example/p/0', '--config', str(path))
+    assert '✗ загрузка: paused big.example' in capsys.readouterr().out

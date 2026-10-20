@@ -1,0 +1,29 @@
+# Письмо со счётом, который НЕ сходится: строки 420 + 480 = 900, а итог 1 000 (расхождение 100).
+# Такой счёт попадает в таблицу как «не проверено» с расхождением, а не как проверенные числа.
+message_id = "<wc-0931@kakheti-wine.example>"
+date = "Tue, 20 Oct 2026 09:05:00 +0400"
+from = "Kakheti Wine Cellars <accounts@kakheti-wine.example>"
+to = "info@demotours.example"
+subject = "Invoice WC-0931 - tasting for your group"
+body = """Dear partners,
+
+Attached is invoice WC-0931 for the wine tasting and lunch on 16 October.
+Kindly arrange the payment by 15 November.
+
+Best,
+Accounts, Kakheti Wine Cellars
+"""
+filename = "WC-0931.pdf"
+pdf = [
+    "KAKHETI WINE CELLARS",
+    "Telavi, Kakheti, Georgia",
+    "INVOICE",
+    "Invoice No: WC-0931",
+    "Invoice date: 2026-10-16",
+    "Due date: 2026-11-15",
+    "",
+    "Wine tasting, 12 guests   12 x 35.00 = 420.00",
+    "Lunch at the cellar   12 x 40.00 = 480.00",
+    "",
+    "Total: 1,000.00 GEL",
+]

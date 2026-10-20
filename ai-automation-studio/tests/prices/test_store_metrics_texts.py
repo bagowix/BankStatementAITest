@@ -12,7 +12,7 @@ from autostudio.prices.extract import Availability, Method, PriceReading
 from autostudio.prices.metrics import METRICS, highlights
 from autostudio.prices.money import Qualifier
 from autostudio.prices.store import OfferKey, OfferState, OutboxEntry, PriceStore
-from autostudio.prices.urls import ip_is_public, origin, redact, url_problem
+from autostudio.prices.urls import covering_site, ip_is_public, origin, redact, url_problem
 
 T0 = dt.datetime(2026, 10, 20, 6, 0, tzinfo=dt.UTC)
 KEY = OfferKey('p1', 'Shop A', 'https://shop-a.example/p/1')
@@ -294,3 +294,71 @@ def test__url_problem__public_ok_invalid_rejected():
     assert url_problem('http://[::1') == 'не URL'
     assert url_problem('http://xn--/') == 'не URL'
     assert url_problem('http://exa\nmple.com') == 'не URL'
+
+
+# --- числа в очереди, пауза в отчёте, числовые ячейки ---------------------------------------------
+
+
+def test__store__outbox_numbers__decimal_round_trip_not_text(tmp_path):
+    store = PriceStore(tmp_path / 'p.sqlite')
+    row = ['Phone', Decimal('2749.00'), 'GEL', Decimal('-5.5'), 3, '-15%']
+    store.commit(T0, [], [], outbox=[OutboxEntry(channel='sheet', tab='History', header=['a'], rows=[row])])
+    (entry,) = store.pending()
+    assert entry.rows == [['Phone', Decimal('2749.00'), 'GEL', Decimal('-5.5'), Decimal(3), '-15%']]
+    assert [type(cell).__name__ for cell in entry.rows[0]] == ['str', 'Decimal', 'str', 'Decimal', 'Decimal', 'str']
+
+
+def test__store__outbox_from_first_release__text_rows_still_read(tmp_path):
+    path = tmp_path / 'p.sqlite'
+    store = PriceStore(path)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute(
+            'INSERT INTO outbox (created_at, channel, body) VALUES (?, ?, ?)',
+            (T0.isoformat(), 'sheet', '{"tab":"History","header":["a"],"rows":[["2749.00","GEL"]],"text":""}'),
+        )
+    assert store.pending()[0].rows == [['2749.00', 'GEL']]
+
+
+@pytest.mark.parametrize(
+    ('amount', 'expected'),
+    [('2749', '2749.00'), ('2749.5', '2749.50'), ('1.299', '1.299'), ('1E+3', '1000.00'), ('0.0001', '0.0001')],
+)
+def test__num_amount__cents_when_exact_else_as_is(amount, expected):
+    value = texts.num_amount(Decimal(amount))
+    assert isinstance(value, Decimal)
+    assert str(value) == expected
+
+
+@pytest.mark.parametrize(('pct', 'expected'), [('-3.75', '-3.8'), ('3.75', '3.8'), ('-0.04', '0.0'), ('12', '12.0')])
+def test__num_pct__one_decimal_half_up_no_negative_zero(pct, expected):
+    assert str(texts.num_pct(Decimal(pct))) == expected
+
+
+def test__metrics__paused_sites__counted_and_named_in_highlights():
+    assert 'prices.paused' in {spec.kind for spec in METRICS}
+    events = [
+        event('prices.paused', sites='shop-b.example', offers='3'),
+        event('prices.paused', sites='shop-b.example, shop-c.example', offers='5'),
+    ]
+    assert highlights(events, 'en') == ['Not checked: monitoring of shop-b.example, shop-c.example is paused']
+    assert highlights(events[:1], 'ru') == ['Не проверялись: мониторинг shop-b.example на паузе']
+
+
+@pytest.mark.parametrize(
+    ('reason', 'expected'),
+    [
+        ('paused', 'paused: this site is not being checked for now'),
+        ('llm_outage', 'not checked this time — will be checked on the next run'),
+        ('llm_config', 'not checked this time — will be checked on the next run'),
+        ('llm_error', 'price not found on the page'),
+    ],
+)
+def test__failure_text__pause_and_model_kinds__client_words(reason, expected):
+    assert texts.failure_text(reason, 'en') == expected
+
+
+def test__covering_site__subdomain_and_longest_rule_win():
+    sites = {'shop.ge', 'm.shop.ge'}
+    assert covering_site('M.Shop.ge.', sites) == 'm.shop.ge'
+    assert covering_site('www.shop.ge', sites) == 'shop.ge'
+    assert covering_site('myshop.ge', sites) is None

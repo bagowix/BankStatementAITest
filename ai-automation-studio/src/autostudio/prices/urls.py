@@ -8,6 +8,7 @@
 
 import ipaddress
 import re
+from collections.abc import Iterable
 from typing import Final
 
 import httpx
@@ -90,6 +91,22 @@ def url_problem(url: str) -> str | None:
     if parsed.port not in _PORTS:
         return f'порт {parsed.port} не разрешён'
     return host_problem(host)
+
+
+def covering_site(host: str, sites: Iterable[str]) -> str | None:
+    """Домен из списка, под который попадает хост: он сам или его поддомен.
+
+    Args:
+        host: Хост из URL.
+        sites: Домены строчными (ключи `[prices.sites]`).
+
+    Returns:
+        Самый точный из подходящих доменов или None.
+    """
+    name = host.rstrip('.').lower()
+    # «shop.ge» накрывает «www.shop.ge», но не «myshop.ge»: сравниваем по границе метки.
+    matches = [site for site in sites if name == site or name.endswith(f'.{site}')]
+    return max(matches, key=len) if matches else None
 
 
 def origin(url: str) -> str:

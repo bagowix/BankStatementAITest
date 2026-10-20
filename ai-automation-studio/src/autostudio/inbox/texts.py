@@ -25,6 +25,7 @@ _TEXTS: Final[dict[str, dict[str, str]]] = {
         'flag_failed_notify': 'alert to you was not delivered — please reply yourself',
         'flag_failed_draft': 'reply draft could not be saved — please reply yourself',
         'flag_failed_model': 'reply draft not prepared (AI unavailable) — please reply yourself',
+        'flag_failed_invoice': 'invoice PDF was not processed (AI unavailable) — please check it yourself',
         'flag_failed_copy': 'could not copy to folder {folder}',
         'flag_failed_other': 'not every step finished — please check this email yourself',
         'flag_vanished': 'left the folder before processing finished',
@@ -46,6 +47,26 @@ _TEXTS: Final[dict[str, dict[str, str]]] = {
         'numbers_warning': (
             '⚠ CHECK BEFORE SENDING — not in your company facts: {numbers}. Delete this line when checked.'
         ),
+        'flag_invoice_ok': 'invoice checked: lines and total match (Invoices tab)',
+        'flag_invoice_check': 'invoice NOT verified — see the Invoices tab',
+        'invoice_verified': 'verified',
+        'invoice_unverified': 'NOT verified — check by hand',
+        'invoice_manual': 'not read — open the PDF',
+        'reason_no_total': 'no total found',
+        'reason_total_not_in_pdf': 'this total is not printed in the PDF',
+        'reason_tax_not_in_pdf': 'this tax amount is not printed in the PDF',
+        'reason_lines_sum': 'lines do not add up to the total',
+        'reason_lines_incomplete': 'some lines have no amount',
+        'reason_bad_date': 'a date could not be read',
+        'reason_due_before_issue': 'due date is before the invoice date',
+        'reason_number_not_in_pdf': 'this invoice number is not printed in the PDF',
+        'reason_no_text': 'scanned PDF without a text layer — needs OCR or manual entry',
+        'reason_encrypted': 'password-protected PDF',
+        'reason_unreadable': 'PDF could not be read (damaged or cut off)',
+        'reason_too_large': 'PDF is too large to process',
+        'reason_too_many_pages': 'too many pages for an invoice',
+        'reason_suspicious': 'suspicious instructions inside the PDF — not processed',
+        'note_tax_included': 'VAT is included in the line prices',
     },
     'ru': {
         'auto_reply': 'Автоответ или уведомление о доставке — делать ничего не нужно.',
@@ -64,6 +85,7 @@ _TEXTS: Final[dict[str, dict[str, str]]] = {
         'flag_failed_notify': 'сообщение вам не доставлено — ответьте, пожалуйста, сами',
         'flag_failed_draft': 'черновик не сохранился в ящике — ответьте, пожалуйста, сами',
         'flag_failed_model': 'черновик не подготовлен (ИИ недоступен) — ответьте, пожалуйста, сами',
+        'flag_failed_invoice': 'счёт из PDF не разобран (ИИ недоступен) — проверьте его сами',
         'flag_failed_copy': 'не удалось скопировать в папку {folder}',
         'flag_failed_other': 'не все шаги выполнены — проверьте письмо сами',
         'flag_vanished': 'письмо ушло из папки до конца обработки',
@@ -85,6 +107,26 @@ _TEXTS: Final[dict[str, dict[str, str]]] = {
         'numbers_warning': (
             '⚠ ПРОВЕРЬТЕ ПЕРЕД ОТПРАВКОЙ — этого нет в фактах компании: {numbers}. Удалите эту строку после проверки.'
         ),
+        'flag_invoice_ok': 'счёт сверен: строки и итог сходятся (вкладка Invoices)',
+        'flag_invoice_check': 'счёт НЕ сверен — см. вкладку Invoices',
+        'invoice_verified': 'сверен',
+        'invoice_unverified': 'НЕ сверен — проверьте вручную',
+        'invoice_manual': 'не разобран — откройте PDF',
+        'reason_no_total': 'итог не найден',
+        'reason_total_not_in_pdf': 'такого итога нет в тексте PDF',
+        'reason_tax_not_in_pdf': 'такой суммы налога нет в тексте PDF',
+        'reason_lines_sum': 'строки не сходятся с итогом',
+        'reason_lines_incomplete': 'у части строк нет суммы',
+        'reason_bad_date': 'дата не разбирается',
+        'reason_due_before_issue': 'срок оплаты раньше даты счёта',
+        'reason_number_not_in_pdf': 'такого номера счёта нет в тексте PDF',
+        'reason_no_text': 'скан без текстового слоя — нужен OCR или ручной ввод',
+        'reason_encrypted': 'PDF защищён паролем',
+        'reason_unreadable': 'PDF не читается (повреждён или обрезан)',
+        'reason_too_large': 'PDF слишком большой для разбора',
+        'reason_too_many_pages': 'слишком много страниц для счёта',
+        'reason_suspicious': 'в PDF подозрительные инструкции — не разбирался',
+        'note_tax_included': 'НДС включён в цены строк',
     },
 }
 
@@ -96,6 +138,17 @@ _HEADERS: Final[dict[str, list[str]]] = {
     'ru': [
         'Получено', 'От', 'Тема', 'Категория', 'Срочность', 'Кратко', 'Имя', 'Компания', 'Телефон', 'Email',
         'Запрос', 'Бюджет', 'Язык', 'Черновик', 'Отметки',
+    ],
+}  # fmt: skip
+
+_INVOICE_HEADERS: Final[dict[str, list[str]]] = {
+    'en': [
+        'Received', 'From', 'File', 'Status', 'Vendor', 'Invoice #', 'Invoice date', 'Due date', 'Currency',
+        'Total', 'Tax', 'Lines sum', 'Difference', 'Lines', 'Notes',
+    ],
+    'ru': [
+        'Получено', 'От', 'Файл', 'Статус', 'Поставщик', 'Номер счёта', 'Дата счёта', 'Оплатить до', 'Валюта',
+        'Итого', 'Налог', 'Сумма строк', 'Расхождение', 'Строк', 'Отметки',
     ],
 }  # fmt: skip
 
@@ -123,6 +176,17 @@ def text(language: str, key: str, **values: str) -> str:
 def sheet_header(language: str) -> list[str]:
     """Заголовок вкладки таблицы на языке клиента."""
     return list(_HEADERS[lang(language)])
+
+
+def invoice_header(language: str) -> list[str]:
+    """Заголовок вкладки счетов на языке клиента."""
+    return list(_INVOICE_HEADERS[lang(language)])
+
+
+def invoice_reasons(language: str, reasons: list[str]) -> list[str]:
+    """Причины «не сверено» словами владельца; незнакомый код остаётся кодом."""
+    known = _TEXTS[lang(language)]
+    return [known.get(f'reason_{reason}', reason) for reason in reasons]
 
 
 def field_names(language: str, fields: list[str]) -> str:

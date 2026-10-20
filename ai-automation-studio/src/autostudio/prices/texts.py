@@ -134,6 +134,7 @@ FAILURES: Final[dict[str, dict[str, str]]] = {
         'no_price': 'price not found on the page',
         'internal_error': 'check failed',
         'later': 'not checked this time — will be checked on the next run',
+        'paused': 'paused: this site is not being checked for now',
     },
     'ru': {
         'robots_disallowed': 'пропущено: сайт просит роботов не заходить на эту страницу',
@@ -145,6 +146,7 @@ FAILURES: Final[dict[str, dict[str, str]]] = {
         'no_price': 'цена на странице не найдена',
         'internal_error': 'проверка не удалась',
         'later': 'в этот раз не проверено — проверим в следующий раз',
+        'paused': 'на паузе: этот сайт сейчас не проверяем',
     },
 }
 
@@ -160,6 +162,9 @@ _FAILURE_GROUPS: Final[dict[str, str]] = {
     # Бюджет модели на проход и срок прохода кончились — со страницей всё в порядке.
     'llm_budget': 'later',
     'run_timeout': 'later',
+    # Провайдер модели лёг или не настроен — тоже не «цены на странице нет».
+    'llm_outage': 'later',
+    'llm_config': 'later',
 }
 
 STATUS: Final[dict[str, dict[str, str]]] = {
@@ -257,6 +262,21 @@ def cell_amount(amount: Decimal) -> str:
 def cell_pct(value: Decimal) -> str:
     """Процент для ячейки: один знак после точки, без «+» (иначе таблица примет его за формулу)."""
     return f'{value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP):.1f}'
+
+
+def num_amount(amount: Decimal) -> Decimal:
+    """Сумма числом для таблицы: два знака, если их не больше («2749.00»), иначе как есть.
+
+    Числом, а не строкой: клиент сортирует, суммирует и строит графики без VALUE().
+    """
+    cents = amount.quantize(Decimal('0.01'))
+    return cents if cents == amount else amount
+
+
+def num_pct(value: Decimal) -> Decimal:
+    """Процент числом для таблицы: один знак после точки, без «−0.0»."""
+    rounded = value.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)
+    return rounded.copy_abs() if rounded == 0 else rounded
 
 
 def show_amount(amount: Decimal, language: str) -> str:

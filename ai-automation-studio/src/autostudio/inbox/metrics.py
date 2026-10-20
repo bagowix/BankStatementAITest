@@ -2,8 +2,10 @@
 
 Минуты — честная оценка ручной работы на одно действие: прочитать письмо, понять,
 что это, и занести в таблицу ≈ 2 минуты; набросать ответ по шаблону ≈ 4 минуты;
-отметить лид ≈ 1 минута; смахнуть рассылку или автоответ ≈ 0,5 минуты.
-Заблокированные инъекции и сбои времени не экономят — их минуты 0.
+отметить лид ≈ 1 минута; смахнуть рассылку или автоответ ≈ 0,5 минуты; открыть PDF-счёт,
+перепечатать поставщика, номер, даты, итог и строки в таблицу и сложить их ≈ 5 минут.
+Заблокированные инъекции, сбои и НЕ сверенные счета времени не экономят — их минуты 0:
+не сверенный счёт человек всё равно проверяет руками.
 """
 
 from collections import Counter
@@ -40,6 +42,16 @@ METRICS: Final[list[MetricSpec]] = [
         minutes_saved=0,
     ),
     MetricSpec(
+        kind='inbox.invoice_extracted',
+        label={'en': 'Invoices extracted and reconciled', 'ru': 'Счетов извлечено и сверено'},
+        minutes_saved=5,
+    ),
+    MetricSpec(
+        kind='inbox.invoice_unverified',
+        label={'en': 'Invoices flagged for a manual check', 'ru': 'Счетов отмечено на ручную сверку'},
+        minutes_saved=0,
+    ),
+    MetricSpec(
         kind='inbox.failed',
         label={'en': 'Emails left for manual review', 'ru': 'Писем оставлено на ручную проверку'},
         minutes_saved=0,
@@ -59,6 +71,7 @@ _TEXT: Final[dict[str, dict[str, str]]] = {
         'hours': 'About {hours} h of manual email work saved (estimate).',
         'injections_one': '1 email with hidden instructions to the AI was blocked — no action was taken on it.',
         'injections': '{n} emails with hidden instructions to the AI were blocked — no action was taken on them.',
+        'invoices': 'Invoices from PDF attachments: {ok} reconciled automatically, {check} flagged for a manual check.',
     },
     'ru': {
         'leads_one': 'Найдено новых лидов: 1{urgent}.',
@@ -69,6 +82,7 @@ _TEXT: Final[dict[str, dict[str, str]]] = {
         'hours': 'Сэкономлено около {hours} ч ручной работы с почтой (оценка).',
         'injections_one': 'Заблокировано писем со скрытыми инструкциями для ИИ: 1 — по нему ничего не делалось.',
         'injections': 'Заблокировано писем со скрытыми инструкциями для ИИ: {n} — по ним ничего не делалось.',
+        'invoices': 'Счета из PDF-вложений: сверено автоматически — {ok}, отмечено на ручную сверку — {check}.',
     },
 }
 
@@ -102,6 +116,9 @@ def highlights(events: Sequence[Event], language: str) -> list[str]:
     minutes = sum(counts[spec.kind] * spec.minutes_saved for spec in METRICS)
     if minutes:
         out.append(t['hours'].format(hours=f'{minutes / 60:.1f}'))
+    invoices_ok, invoices_check = counts['inbox.invoice_extracted'], counts['inbox.invoice_unverified']
+    if invoices_ok or invoices_check:
+        out.append(t['invoices'].format(ok=invoices_ok, check=invoices_check))
     blocked = counts['inbox.injection_blocked']
     if blocked == 1:
         out.append(t['injections_one'])

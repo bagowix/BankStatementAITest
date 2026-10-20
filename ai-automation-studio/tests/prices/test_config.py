@@ -5,7 +5,7 @@ import pytest
 
 from autostudio.clientconf import load_client_config
 from autostudio.errors import ConfigError
-from autostudio.prices.config import ROBOTS_AGENT, Offer, PricesConfig, PricesSection, Product
+from autostudio.prices.config import ROBOTS_AGENT, Offer, PricesConfig, PricesSection, Product, SiteRule
 
 EXAMPLE = Path(__file__).resolve().parents[2] / 'examples' / 'prices' / 'client.toml'
 
@@ -189,3 +189,51 @@ def test__section__no_products_or_duplicate_ids__rejected():
     product = Product(id='p1', name='Phone')
     with pytest.raises(ConfigError, match='повторяются'):
         PricesSection(products=[product, product], contact_email='a@b.example')
+
+
+# --- пауза сайта по претензии (бриф 5.8) -------------------------------------------------------
+
+
+def test__config__site_paused_in_toml__subdomains_covered_lookalike_not(write_toml):
+    extra = '[prices.sites."shop-a.example"]\npaused = true\npaused_reason = "письмо владельца 2026-10-20"\n'
+    section = load_client_config(write(write_toml, extra=extra, url='https://www.shop-a.example/p/1'), PricesConfig)
+    section = section.prices
+    assert section.sites['shop-a.example'] == SiteRule(paused=True, paused_reason='письмо владельца 2026-10-20')
+    assert section.paused_sites == frozenset({'shop-a.example'})
+    assert section.paused_site('https://www.shop-a.example/p/1') == 'shop-a.example'
+    assert section.paused_site('https://shop-a.example./x') == 'shop-a.example'
+    assert section.paused_site('https://myshop-a.example/p/1') is None  # граница метки, а не хвост строки
+
+
+def test__config__site_rule_not_paused__nothing_paused(write_toml):
+    extra = '[prices.sites."shop-a.example"]\npaused = false\n'
+    section = load_client_config(write(write_toml, extra=extra), PricesConfig).prices
+    assert section.paused_sites == frozenset()
+    assert section.paused_site('https://shop-a.example/p/1') is None
+
+
+def test__config__paused_site_typo__rejected_not_silently_scraped(write_toml):
+    extra = '[prices.sites."shop-aa.example"]\npaused = true\n'
+    with pytest.raises(ConfigError, match=r'prices\.sites\."shop-aa\.example": ни одна ссылка'):
+        load_client_config(write(write_toml, extra=extra), PricesConfig)
+
+
+@pytest.mark.parametrize(
+    ('site', 'message'),
+    [
+        ('Shop-A.example', 'строчными'),
+        ('shop-a.example.', 'строчными'),
+        ('localhost', 'локальное имя'),
+        ('shop a.example', 'недопустимое имя хоста'),
+    ],
+)
+def test__config__bad_site_key__rejected(write_toml, site, message):
+    extra = f'[prices.sites."{site}"]\npaused = true\n'
+    with pytest.raises(ConfigError, match=message):
+        load_client_config(write(write_toml, extra=extra), PricesConfig)
+
+
+@pytest.mark.parametrize('reason', ['', '   ', 'a\nb', 'x' * 201])
+def test__site_rule__bad_paused_reason__rejected(reason):
+    with pytest.raises(ConfigError, match='paused_reason'):
+        SiteRule(paused=True, paused_reason=reason)

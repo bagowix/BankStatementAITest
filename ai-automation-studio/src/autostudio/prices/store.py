@@ -27,6 +27,7 @@ import msgspec
 
 from autostudio.prices.extract import Availability, Method, PriceReading
 from autostudio.prices.money import Qualifier
+from autostudio.sinks import Cell
 
 _SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS readings (
@@ -77,6 +78,8 @@ _TABLE_COLUMNS: Final[dict[str, str]] = {
 }
 
 type Channel = Literal['sheet', 'owner']
+# Строка вкладки: текст — текстом, суммы и проценты — числами (в Google Sheets — числа).
+type SheetRow = list[Cell]
 
 
 class OfferKey(msgspec.Struct, frozen=True):
@@ -132,7 +135,7 @@ class OutboxEntry(msgspec.Struct, frozen=True, kw_only=True):
         channel: `sheet` — дописать строки во вкладку; `owner` — сообщение владельцу.
         tab: Вкладка (для `sheet`).
         header: Заголовок вкладки (для `sheet`).
-        rows: Строки (для `sheet`).
+        rows: Строки (для `sheet`): текст и числа.
         text: Текст сообщения (для `owner`).
     """
 
@@ -140,15 +143,33 @@ class OutboxEntry(msgspec.Struct, frozen=True, kw_only=True):
     channel: Channel
     tab: str = ''
     header: list[str] = msgspec.field(default_factory=list)
-    rows: list[list[str]] = msgspec.field(default_factory=list)
+    rows: list[SheetRow] = msgspec.field(default_factory=list)
     text: str = ''
+
+
+class _Number(msgspec.Struct, frozen=True):
+    # Числовая ячейка в очереди. В JSON Decimal — строка, и без обёртки «2749.00» вернулось бы
+    # из очереди текстом: в таблицу клиента ушла бы строка вместо числа.
+    n: Decimal
+
+
+type _StoredCell = str | _Number
 
 
 class _Body(msgspec.Struct, frozen=True, kw_only=True):
     tab: str = ''
     header: list[str] = msgspec.field(default_factory=list)
-    rows: list[list[str]] = msgspec.field(default_factory=list)
+    # Очередь первых версий хранила только строки — они читаются так же.
+    rows: list[list[_StoredCell]] = msgspec.field(default_factory=list)
     text: str = ''
+
+
+def _store_cell(cell: Cell) -> _StoredCell:
+    return cell if isinstance(cell, str) else _Number(Decimal(cell))
+
+
+def _load_cell(cell: _StoredCell) -> Cell:
+    return cell.n if isinstance(cell, _Number) else cell
 
 
 class PriceStore:
@@ -185,12 +206,16 @@ class PriceStore:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                yield False
-                return
+                locked = False
+            else:
+                locked = True
+            # yield — вне except: исключение из тела `with` (RunSkipped) не должно тащить за собой
+            # BlockingIOError как «причину» в логе.
             try:
-                yield True
+                yield locked
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                if locked:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def last_reading(self, key: OfferKey) -> StoredReading | None:
         """Последняя прочитанная цена ссылки или None, если её ещё не читали."""
@@ -310,7 +335,12 @@ class PriceStore:
                         stamp,
                         entry.channel,
                         msgspec.json.encode(
-                            _Body(tab=entry.tab, header=entry.header, rows=entry.rows, text=entry.text)
+                            _Body(
+                                tab=entry.tab,
+                                header=entry.header,
+                                rows=[[_store_cell(cell) for cell in row] for row in entry.rows],
+                                text=entry.text,
+                            )
                         ).decode(),
                     )
                     for entry in outbox
@@ -330,7 +360,7 @@ class PriceStore:
                     channel='owner' if channel == 'owner' else 'sheet',
                     tab=data.tab,
                     header=data.header,
-                    rows=data.rows,
+                    rows=[[_load_cell(cell) for cell in row] for row in data.rows],
                     text=data.text,
                 )
             )

@@ -7,7 +7,7 @@
 #
 # Образец настроен как тариф Basic: проверка раз в день, без ступени модели. Перед боевым
 # запуском замените адреса *.example, contact_email и sink, затем
-# `autostudio prices check <config> --strict`.
+# `autostudio prices check <config> --strict --every-hours 24` (нагрузка на сайты — под расписание).
 
 [client]
 id = "demo-prices"
@@ -39,6 +39,13 @@ llm_max_pages_per_run = 5  # потолок платных страниц за �
 failure_alert_after = 2    # Basic проверяет раз в день: два дня сбоев подряд — повод вмешаться
 max_run_minutes = 30       # проход дольше — недочитанное «не проверено», следующий запуск не ждёт
 sheet_history = "changes"  # в «History» только новые значения; полная история — в SQLite
+
+# Претензия владельца сайта — пауза в тот же день (бриф 5.8): раскомментируйте, поставьте
+# домен (поддомены тоже под паузой) и запустите `autostudio prices check <config>`. Со следующего
+# прохода к сайту нет ни одного запроса; в таблице — «на паузе» и последняя известная цена.
+# [prices.sites."shop-b.example"]
+# paused = true
+# paused_reason = "письмо владельца 2026-10-20: просит не собирать цены"
 
 [[prices.products]]
 id = "iphone-15-128"

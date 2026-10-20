@@ -217,10 +217,10 @@ EN:
 9. Attachments: do invoices arrive as PDF files, or as scans and photos?
 10. Do emails contain health details, legal cases, card numbers or ID documents?
 11. Do people from the EU write to you?
-12. Should names, addresses and phones be masked in the sheet?
-13. Who gets alerts about hot leads: in Telegram, or by a webhook to Slack or Make?
+12. Should email addresses, names and phone numbers be masked in the sheet? (The subject and the one-line summary are not.)
+13. Who gets alerts about hot leads: in Telegram, from a bot you own, or by a webhook to Slack or Make?
 14. Where do you write your replies: in Gmail on the web, in Outlook, on the phone?
-15. To tune the sorting: can you share 20–50 typical emails after we sign the data agreement, or would you prefer a test run on your last 20 emails, with nothing changed in the mailbox?
+15. To tune the sorting, after we sign the data agreement: can you share 20–50 typical emails, or would you prefer a test run on your last 20 emails, with nothing changed in the mailbox?
 
 RU:
 1. Какая почта: Gmail, Google Workspace, Microsoft 365 или Outlook, Zoho, Яндекс, Mail.ru, почта хостинга? Какой адрес? Это общий адрес вроде info@ или sales@?
@@ -234,10 +234,10 @@ RU:
 9. Вложения: счета приходят PDF-файлами или сканами и фото?
 10. Бывают ли в письмах сведения о здоровье, судебные дела, номера карт, документы?
 11. Пишут ли вам из ЕС?
-12. Маскировать ли в таблице имена, адреса и телефоны?
-13. Кому сообщать о горячих лидах: в Telegram или вебхуком в Slack или Make?
+12. Маскировать ли в таблице e-mail, имена и телефоны? (Тема и суть письма не маскируются.)
+13. Кому сообщать о горячих лидах: в Telegram, через вашего собственного бота, или вебхуком в Slack или Make?
 14. Где вы пишете ответы: Gmail в браузере, Outlook, телефон?
-15. Для настройки: пришлёте 20–50 типичных писем после подписания соглашения о данных или лучше пробный разбор последних 20 писем, без изменений в ящике?
+15. Для настройки, после подписания соглашения о данных: пришлёте 20–50 типичных писем или лучше пробный разбор последних 20 писем, без изменений в ящике?
 ```
 
 **Что значат ответы:**
@@ -362,8 +362,13 @@ RU:
 5. **Ёмкость.** Монитор делает не больше одного запроса к сайту раз в 5 секунд, а если robots.txt
    просит больше (`Crawl-delay`, до 60 с) — соблюдает это (`docs/packages/prices.md`). Условие:
    ссылок на одном сайте × пауза ≤ интервал проверки.
-   - Каждый час при паузе 5 с — не больше ≈ 720 ссылок с одного сайта. Оставь запас: план на
-     ≈ 600.
+   - Каждый час при паузе 5 с — не больше ≈ 720 ссылок с одного сайта. Но проход ограничен ещё и
+     `max_run_minutes` (по умолчанию 30): с сайта за проход — не больше min(720, `max_run_minutes` ×
+     12), при умолчании ≈ 360, всего ≈ 1 440 (4 сайта параллельно). Что не успели — «в этот раз не
+     проверено».
+   - Больше ≈ 1 400 ссылок всего или больше 360 на одном сайте — в конфиге клиента
+     `max_run_minutes` ≈ 50, в systemd-юните `TimeoutStartSec` ≥ 55min. Ежечасный проход должен
+     укладываться меньше чем в 60 минут: план — не больше ≈ 600 ссылок с сайта (`offers.md`, 5.1).
    - `Crawl-delay: 30` — не больше 120 ссылок с сайта в час.
    - Не помещается — реже проверки или меньше ссылок, а не «быстрее».
 6. Итог клиенту: какие сайты читаются, какие нет и почему. Нечитаемые сайты в оценку не входят.
@@ -414,9 +419,9 @@ Provider: {{NAME}}, individual entrepreneur, Georgia, ID [number]          (dire
 
 3. PRICE
    Setup: [amount] [USD/GEL] + options [amount] = [total]   [Pilot: 50% off setup, case study terms attached]
-   Support plan: [ ] Care  [ ] Pro  [ ] Business — [amount] per month from launch. Monthly, cancel any month.
+   Support plan: [ ] Care  [ ] Pro  [ ] Business — [amount] per month from launch; free fixes come on top. Monthly, cancel any month.
    You pay directly, not through me: [WhatsApp message fees (Meta) / a Meta partner's monthly fee / none].
-   AI use above the plan limit: [ ] keep working, [amount] per 1,000 operations   [ ] hard cap until the 1st
+   AI limit: [ ] the plan's limit as a monthly cap: at the limit, the AI pauses until the 1st, no charges above it   [ ] none: your own AI account
    Change requests and extra hours: [USD 40 / GEL 100] per hour, in 30-minute steps, after you approve the estimate.
    Payment: 50% before work starts, 50% after acceptance. [Upwork/Fiverr: platform milestones only.]
 
@@ -430,7 +435,8 @@ Provider: {{NAME}}, individual entrepreneur, Georgia, ID [number]          (dire
    Inbox:   [ ] mailbox address and server   [ ] app password, sent via a one-time secret link
             [ ] categories and what to do with each   [ ] approved facts and signature
             [ ] 20–50 example emails or OK for a test run   [ ] Google Sheet shared with my service address
-            [ ] Telegram ID or webhook for alerts   [ ] signed data processing agreement
+            [ ] alerts: your own Telegram bot (token via a one-time secret link) and your Telegram ID, or a webhook
+            [ ] signed data processing agreement
    Booking: [ ] services: name, duration, price   [ ] staff and hours   [ ] opening hours, holidays
             [ ] booking and cancellation rules, reminder times   [ ] 5–10 FAQ answers
             [ ] numeric Telegram IDs of everyone who gets booking messages   [ ] a 15-minute call to create the bot on your account

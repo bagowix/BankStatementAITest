@@ -31,7 +31,7 @@ import httpx
 import msgspec
 from selectolax.lexbor import LexborHTMLParser, LexborNode, SelectolaxError
 
-from autostudio.errors import LLMError
+from autostudio.errors import LLMError, LLMErrorKind
 from autostudio.llm import LLMClient
 from autostudio.prices.config import Offer
 from autostudio.prices.money import (
@@ -85,6 +85,11 @@ _PAGE_TAG: Final = re.compile(r'</?page_text>', re.IGNORECASE)
 _NUMBER_JOINERS: Final = frozenset(" '’.,")
 
 MULTIPLE_PRODUCTS: Final = 'multiple_products'
+# Причина сбоя модели — по виду ошибки ядра, а не по её тексту: `outage` (провайдер лёг,
+# 429/5xx) — подождать; `config` (ключ, права, имя модели) — чинит оператор, и сразу;
+# `content` (отказ, ответ не по схеме) — не справилась с этой страницей.
+LLM_CONFIG: Final = 'llm_config'
+_LLM_REASONS: Final[dict[LLMErrorKind, str]] = {'outage': 'llm_outage', 'config': LLM_CONFIG, 'content': 'llm_error'}
 AMBIGUOUS_DECIMAL: Final = 'schema_ambiguous_decimal'
 # Предупреждения, при которых под сомнением само число: оператору — сигнал, клиенту —
 # «нужна проверка» вместо уведомлений «цена изменилась» и «дешевле вас».
@@ -155,7 +160,7 @@ class ExtractionFailure(msgspec.Struct, frozen=True, kw_only=True):
 
     Attributes:
         reason: Код причины (`selector_not_found`, `no_price`, `llm_unverified`, `llm_error`,
-            `llm_budget`, …).
+            `llm_outage`, `llm_config`, `llm_budget`, …).
         detail: Что сказала каждая ступень — для оператора.
     """
 
@@ -883,7 +888,8 @@ async def ask_model(
         allow_free: Принимать ли цену 0.
 
     Returns:
-        Проверенная цена или отказ (`llm_error`, `llm_unverified`, `llm_not_found`, `no_price`).
+        Проверенная цена или отказ (`llm_outage`, `llm_config`, `llm_error`, `llm_unverified`,
+        `llm_not_found`, `no_price`).
     """
     if not text:
         return ExtractionFailure(reason='no_price', detail='на странице нет видимого текста')
@@ -891,7 +897,7 @@ async def ask_model(
     try:
         guess = await llm.extract(system=SYSTEM_PROMPT, prompt=prompt, schema=PriceGuess)
     except LLMError as exc:
-        return ExtractionFailure(reason='llm_error', detail=str(exc)[:200])
+        return ExtractionFailure(reason=_LLM_REASONS[exc.kind], detail=str(exc)[:200])
     return verify_guess(guess, text, offer, allow_free=allow_free)
 
 

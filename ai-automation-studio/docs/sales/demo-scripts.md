@@ -141,7 +141,7 @@ inbox, prices начал писать `report.md`, а в образце booking 
 |---|---|---|
 | **Upwork** | `Demo data, fictional business.` / `Message me here on Upwork.` | Видео загружается в Upwork (портфолио, отклик). Никаких имён других площадок, ссылок и контактов (НП, `upwork.md`, раздел 1) |
 | **Fiverr** | `Demo data, fictional business.` / `Order or message me here on Fiverr.` | Галерея гига, сообщения. Без ссылок и контактов (НП, `fiverr.md`, раздел 1). Лимит длины и размера видео в галерее проверь в форме гига (НП) |
-| **Прямые клиенты** | `{{NAME}}` / `Book a 20-minute call: {{CALENDAR_LINK}}` / `{{DOMAIN}}` | YouTube без публикации в поиске (unlisted), лендинг, личное сообщение |
+| **Прямые клиенты** | `{{NAME}}` / `Book a 15-minute call: {{CALENDAR_LINK}}` / `{{DOMAIN}}` | YouTube без публикации в поиске (unlisted), лендинг, личное сообщение |
 
 В версиях для площадок нет цен в лари и нет пилотной скидки: это выглядит как приглашение уйти с
 площадки (`offers.md`, раздел 1, п. 7).
@@ -389,7 +389,7 @@ uv run poe extract ~/demo-rec/"Sample Bank 2025.pdf" --json-out ~/demo-rec/sampl
 | 0–6 | `Title` | A tool I built that reads bank statements. The screen shows a synthetic statement. | Synthetic statement. Not a client document. |
 | 6–20 | Загрузка PDF в стенд → разбор | It extracts every transaction from a PDF, including scans. Then it checks the statement's own arithmetic: opening balance plus deposits minus withdrawals must equal the closing balance. | Opening + deposits − withdrawals = closing |
 | 20–32 | Заключение «подтверждено»; 🔄 затем несведённый период с расхождением | If the numbers match to the cent, the period is confirmed. If not, it is flagged with the gap and a likely cause, and never passed as correct. | Confirmed / not confirmed |
-| 32–42 | Клик по номеру страницы → вырезка с рамкой; фрагмент JSON с `sources` | Every number keeps its page and position. Click the page number, and you see that line on the original page. | Every number traceable |
+| 32–42 | Клик по номеру страницы → вырезка с рамкой; фрагмент JSON с `sources` | Every number keeps its page, and numbers read from text or OCR keep their exact place. Click the page number, and you see that line on the original page. | Every number traceable |
 | 42–52 | Таблица замера из README, имена файлов заменены на «Statement 1–4» | On real statements from four banks, two AI models re-reading the hard pages reconciled all thirteen periods, for sixty-nine cents. A small sample, not a benchmark. | 13 of 13 with AI, $0.69. Without AI: 5 of 13. |
 | 52–60 | `End card` | My inbox setup follows the same rule: a number that isn't in the source never reaches your sheet. + фраза канала из 1.7 | Карточка канала |
 

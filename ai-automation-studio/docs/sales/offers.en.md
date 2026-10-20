@@ -1,22 +1,32 @@
 <!--
-Operator note (not shown when rendered):
-- Upwork and Fiverr clients: before sharing, remove "Contact (direct clients)" and
-  "Prices for businesses in Georgia (GEL)". Share only through the platform's messages.
-  Before a contract, replace "Ask for the demo bot link" with a demo video sent on the platform.
+Operator note (hidden when rendered). Never send the raw .md file: send a PDF made from the
+version for that client. The commands are in docs/sales/offers.md, section 1, item 7.
+- Direct clients: the whole file, with these notes removed.
+- Upwork clients: only after the contract has started, through Upwork messages, and only the
+  platform version. It drops every block between the direct-only markers: lari prices and the
+  pilot, both "Before you order" lines (demo bot link, test run on 20 emails), and the Contact
+  block with {{GITHUB}}.
+- Fiverr buyers: never. The gig is the price list (docs/sales/fiverr.md, section 1).
+- Features still being built (WhatsApp, Google Calendar, PDF invoice fields) are NOT in the text
+  below. The wording to add after each one is merged and described in docs/packages/*.md sits in
+  "AFTER RELEASE" notes next to the place it goes.
 - Before publishing, check the pre-publication list in docs/sales/offers.md, section 1.
 -->
 
 # AutoStudio — Services and Prices
 
-{{PHOTO}}
+![{{NAME}}]({{PHOTO}})
 
 I'm {{NAME}}, a Python developer with {{YEARS}} years of experience, based in Tbilisi, Georgia.
 I set up three ready-made automations for small businesses: an inbox assistant, a booking bot and
 a competitor price monitor. Then I keep them running for a monthly fee. AutoStudio is one person.
 You talk to the person who builds and runs your system.
 
-Prices are in US dollars, valid from October 2026. Prices for businesses in Georgia are in lari,
-further down.
+Prices are in US dollars, valid from October 2026.
+
+<!-- direct-only:start -->
+Prices for businesses in Georgia are in lari, further down.
+<!-- direct-only:end -->
 
 ## How every package works
 
@@ -25,8 +35,8 @@ further down.
   people who write to you. Nothing is sent in your name unless you set that up.
 - **AI suggests, code checks.** I use AI models from OpenAI or Anthropic. Code checks their answers
   before you see them. A phone number, budget or price that isn't in the source is thrown out.
-- **Your accounts, your data.** The Google Sheet, the Telegram bot and the WhatsApp account belong
-  to you. You can withdraw my access at any time.
+- **Your accounts, your data.** The Google Sheet, the Telegram bots and the mailbox belong to you.
+  You can withdraw my access at any time.
 - **A monthly report.** It shows what was done: emails sorted, bookings taken, prices checked. It
   also estimates the hours saved and shows how the estimate was made.
 
@@ -34,8 +44,8 @@ further down.
 
 | Package | Basic | Standard | Premium |
 |---|---|---|---|
-| **Inbox** — emails and invoices sorted for you | $150 | $400 | $900 |
-| **Booking bot** — bookings 24/7, fewer no-shows | $200 | $450 | $950 |
+| **Inbox** — every email sorted, every lead logged | $150 | $400 | $900 |
+| **Booking bot** — bookings 24/7, a reminder before every visit | $200 | $450 | $950 |
 | **Price monitor** — competitor prices in your sheet | $120 | $300 | $700 |
 
 | Support plan | Care | Pro | Business |
@@ -64,59 +74,76 @@ a hot lead. Nothing is sent without you.
 | Newsletters and auto-replies are filtered out by rules, without AI | ✓ | ✓ | ✓ |
 | Copies go to folders or labels. Nothing is deleted. Emails stay unread | ✓ | ✓ | ✓ |
 | Emails that try to give orders to the AI are flagged, and nothing is done with them | ✓ | ✓ | ✓ |
-| Optional: names, addresses and phones masked in the sheet | ✓ | ✓ | ✓ |
+| Optional: email addresses, names and phone numbers masked in the sheet (the subject and the summary are not) | ✓ | ✓ | ✓ |
 | Reply drafts in your Drafts folder, in the sender's language, using only facts you approved. Never sent automatically | — | ✓ | ✓ |
-| Hot-lead alerts in Telegram, or by webhook to Slack or Make | — | ✓ | ✓ |
-| PDF invoices from emails go to an "Invoices" tab: supplier, number, date, total, currency | — | ✓ | ✓ |
+| Hot-lead alerts from your own Telegram bot, or by webhook to Slack or Make | — | ✓ | ✓ |
 | One custom addition, up to 6 hours of work (see below) | — | — | ✓ |
 | Monthly report | ✓ | ✓ | ✓ |
 | Delivery | 3 business days | 6 business days | 12 business days |
 | Free fixes after launch | 14 days | 14 days | 30 days |
 
+<!-- AFTER RELEASE (PDF invoice fields): add this row after "Hot-lead alerts":
+| PDF invoices from emails go to an "Invoices" tab: supplier, number, date, total, currency | — | ✓ | ✓ |
+-->
+
 **Premium custom addition — pick one:**
 - your own fields to extract, such as an order number or travel dates;
-- each new lead sent to your CRM, Zapier or Make by webhook;
+- each new lead sent to your CRM, Zapier or Make by webhook.
+
+<!-- AFTER RELEASE (PDF invoice fields): add a third option:
 - invoice data as a CSV file in the column layout your accountant uses.
+-->
 
 **Works with:** Gmail, Google Workspace, Zoho, Yandex and other mailboxes with IMAP access. For
-Google Workspace, your admin may need to allow access. Outlook and Microsoft 365 work through a
-forwarding rule to a separate mailbox. Reply drafts then appear in that mailbox.
+Google Workspace, your admin may need to allow access. Outlook and Microsoft 365 can work through a
+forwarding rule to a separate mailbox, if your Microsoft 365 admin allows forwarding outside your
+organisation. I check this before you pay. Reply drafts then appear in that separate mailbox.
 
-**Before you order.** If you like, I sort your last 20 emails and show you the result. Nothing in
-your mailbox changes. You can withdraw access right after.
+<!-- direct-only:start -->
+**Before you order.** I show you the assistant on a set of sample emails. To see it on your own mail
+first, we sign a short data processing agreement, and then I sort your last 20 emails as a test
+run. Nothing in your mailbox changes, and you can withdraw access right after.
+<!-- direct-only:end -->
 
 **What you provide**
 - Mailbox access with an app password, not your main password. You can withdraw it at any time.
 - Your categories and what should happen with each one: draft, alert, folder.
 - The facts a draft may use: prices, hours, how to order, cancellation policy, address (Standard,
   Premium). If a draft mentions a figure that isn't in your facts, the draft starts with a warning.
-- 20–50 example emails, or permission for the test run above.
+- 20–50 example emails, or a test run on your last 20 emails after we sign the data processing
+  agreement.
 - A Google Sheet shared with my service account. I send you the address.
-- A Telegram account for alerts (Standard, Premium).
-- A signed data processing agreement. I provide the template.
+- For alerts (Standard, Premium): a Telegram bot of your own, which you create in a minute with
+  @BotFather, and your Telegram account. Or a Slack or Make webhook.
+- A signed data processing agreement, before I connect to the mailbox. I provide the template.
 
 **Not included**
 - Sending emails. Drafts are never sent automatically.
 - Deleting emails.
-- Attachments other than PDF invoices. Invoice PDFs must contain text: scans and photos are custom
-  work.
-- A direct connection to Outlook or Microsoft 365. Forwarding works.
+- Reading attachments, including PDF invoices. Invoice emails are sorted and filed; reading the
+  invoice itself is custom work for now.
+- A direct connection to Outlook or Microsoft 365. Forwarding can work (see above).
 - A direct export to QuickBooks, Xero or HubSpot, or invoice reconciliation. These are custom work.
 - Instant processing: new emails are checked every 10–15 minutes.
 - Cold outreach or bulk email.
+
+<!-- AFTER RELEASE (PDF invoice fields): replace the "Reading attachments" line with:
+- Attachments other than PDF invoices. Invoice PDFs must contain text: scans and photos are custom
+  work.
+-->
 
 **Proof.** I built an agent that reads bank statements from PDF files, including scans. It extracts
 every transaction and checks each period against the balances printed in the statement. If the
 numbers don't add up to the cent, the period is marked "not verified", with the size of the gap and
 a likely cause. It is never passed as correct. I tested it on real statements from four different
 banks. Three were fully reconciled without any paid AI. The fourth was a 99-page bundle of ten
-poorly scanned statements: all ten were reconciled with two AI models, for under $1 in total. Code
-and write-up: {{GITHUB}}. The inbox package follows the same rule: a phone number or budget that
-isn't in the email never reaches your sheet.
+poorly scanned statements: all ten were reconciled with two AI models, for under $1 in total. This
+is a small sample, not a benchmark. The inbox package follows the same rule: a phone number or
+budget that isn't in the email never reaches your sheet.
 
 ---
 
-## 2. Booking bot — bookings around the clock, fewer no-shows
+## 2. Booking bot — bookings around the clock, a reminder before every visit
 
 **The problem.** Customers write when you are busy or closed. Some book somewhere else. Some forget
 their appointment and don't come.
@@ -127,7 +154,7 @@ Customers can cancel or move a booking themselves. You get a message for every b
 | | Basic | Standard | Premium |
 |---|---|---|---|
 | **Setup price** | **$200** | **$450** | **$950** |
-| Channels | Telegram | Telegram | Telegram and WhatsApp, on your own WhatsApp Business account |
+| Channel | Telegram | Telegram | Telegram |
 | Staff with their own schedules | 1 | up to 3 | up to 10 |
 | Booking with buttons: service, staff, day, time, name and phone, confirm | ✓ | ✓ | ✓ |
 | Free times from your hours, breaks and days off. The same time can't be booked twice | ✓ | ✓ | ✓ |
@@ -138,17 +165,27 @@ Customers can cancel or move a booking themselves. You get a message for every b
 | Understands plain messages like "tomorrow after 5 for a haircut?" | simple rules: dates, times, service names | AI | AI |
 | Answers questions from your FAQ only. Other questions come to you, and you reply in Telegram | — | ✓ | ✓ |
 | Bookings log and schedule in Google Sheets | — | ✓ | ✓ |
-| Each booking appears in your Google Calendar | — | ✓ | ✓ |
 | Your own wording for every bot message. A shared chat for your staff | — | — | ✓ |
 | Languages for your customers | English, Russian | English, Russian | English, Russian |
 | Monthly report, including how many bookings came in while you were closed | ✓ | ✓ | ✓ |
-| Delivery | 4 business days | 7 business days | 14 business days, plus Meta's review time |
+| Delivery | 4 business days | 7 business days | 14 business days |
 | Free fixes after launch | 14 days | 14 days | 30 days |
 
-A booking is made only when the customer presses "Confirm". The AI can read a message, but it can't
-book or cancel anything on its own. Customer names and phone numbers are not sent to the AI.
+<!-- AFTER RELEASE (WhatsApp adapter): Channel row, Premium cell: "Telegram and WhatsApp, on your
+own WhatsApp Business account"; Premium delivery: "14 business days, plus Meta's review time".
+AFTER RELEASE (Google Calendar sync): add this row after "Bookings log":
+| Each booking appears in your Google Calendar | — | ✓ | ✓ |
+-->
 
+A booking is made only when the customer presses "Confirm". The AI can read a message, but it can't
+book or cancel anything on its own. Names and phone numbers from the booking are not sent to the AI.
+
+<!-- direct-only:start -->
 **Before you order.** Ask for the demo bot link and make a test booking yourself.
+<!-- direct-only:end -->
+
+<!-- AFTER RELEASE (WhatsApp adapter, with the opt-in step at booking checked in the code): add this
+section here.
 
 **WhatsApp (Premium) — what to know**
 - The bot runs on your own WhatsApp Business account and number, through Meta's WhatsApp Cloud API.
@@ -163,6 +200,7 @@ book or cancel anything on its own. Customer names and phone numbers are not sen
   option separately.
 - Meta allows a business to run its own booking and FAQ bot. Meta doesn't allow general-purpose AI
   assistants. This bot handles bookings and your FAQ only.
+-->
 
 **What you provide**
 - Your services with duration and price. Your staff and their hours. Opening hours, breaks and
@@ -171,22 +209,27 @@ book or cancel anything on its own. Customer names and phone numbers are not sen
 - 5–10 common questions and their answers (Standard, Premium).
 - A short call to create the bot on your own Telegram account, so the bot belongs to you. You and
   your staff press /start once.
-- An empty Google Sheet and your Google Calendar, shared with my service account (Standard,
-  Premium).
-- For WhatsApp: a Meta Business account, a phone number, a payment card in WhatsApp Manager, and
-  your approval of the consent text (Premium).
+- An empty Google Sheet, shared with my service account (Standard, Premium).
+
+<!-- AFTER RELEASE: "An empty Google Sheet and your Google Calendar, shared with my service account
+(Standard, Premium)." WhatsApp: "For WhatsApp: a Meta Business account, a phone number, a payment
+card in WhatsApp Manager, and your approval of the consent text (Premium)." -->
 
 **Not included**
-- Instagram and Facebook Messenger. Phone calls and voice.
+- WhatsApp, Instagram and Facebook Messenger: custom work for now. Phone calls and voice.
 - Online prepayment. Tracking whether a customer came.
 - Sync with other booking software such as YCLIENTS, Altegio or Fresha.
 - Group classes, where more than one person books the same slot.
 - More than one location or time zone per bot. Each location is a separate setup.
 - A general chatbot. Promotions or mass messages.
-- Storing medical information. A clinic's bot keeps only the name, phone, service and time.
-- WhatsApp message fees, which Meta charges you directly.
+- Storing medical information. A clinic's bot keeps only the name, phone, service and time. What a
+  customer types is sent to the AI as written (Standard, Premium), so for clinics I recommend Basic,
+  which uses no AI, or a line in the bot asking customers not to type medical details.
 - A Georgian-language bot. Available on request and quoted separately; the Georgian text is
   written by a native speaker.
+
+<!-- AFTER RELEASE (WhatsApp adapter): first line becomes "Instagram and Facebook Messenger. Phone
+calls and voice." and add "WhatsApp message fees, which Meta charges you directly." -->
 
 ---
 
@@ -216,14 +259,14 @@ A **link** is one product on one competitor's site. 50 products on 3 sites make 
 | Delivery | 3 business days | 5 business days | 10 business days |
 | Free fixes after launch | 14 days | 14 days | 30 days |
 
-\* The monitor sends no more than one request every 5 seconds to each site. That is at most about
-700 pages an hour from one site. Before you order, I check that your links fit the schedule you
-want.
+\* The monitor waits at least 5 seconds between requests to the same site, and longer if the site
+asks for it. That is at most about 700 pages an hour from one site. Before you order, I check that
+your links fit the schedule you want.
 
-**How prices are collected.** Only public pages that anyone can see without logging in. Each site's
-robots.txt rules are followed. Requests carry the monitor's name and a contact email, so a site
-owner can reach me. Your name is never in the requests. If a site owner asks me to stop, I stop the
-same day.
+**How prices are collected.** Only public pages that anyone can see without logging in. I follow
+each site's robots.txt rules, and make an exception only with the site owner's written permission.
+Requests carry the monitor's name and a contact email, so a site owner can reach me. Your name is
+never in the requests. If a site owner asks me to stop, I stop the same day.
 
 **Before you order.** Send me up to 3 competitor pages. I tell you for free whether the price can be
 read. A site that can't be read is left out of the quote, before you pay.
@@ -233,7 +276,8 @@ read. A site that can't be read is left out of the quote, before you pay.
 - For each product, links to the same product on competitor sites, in the exact variant (color,
   size, volume).
 - A Google Sheet shared with my service account.
-- A Telegram account for alerts, and your alert threshold. The default is a 3% price change.
+- For alerts: a Telegram bot of your own, which you create in a minute with @BotFather, your
+  Telegram account, and your alert threshold. The default is a 3% price change.
 - Written confirmation that, as far as you know, the sites' terms allow monitoring these pages.
 
 **Not included**
@@ -250,8 +294,9 @@ read. A site that can't be read is left out of the quote, before you pay.
 
 ## Support plans
 
-Hosting is part of every plan. While I host your system, a plan is required. Prefer to host it
-yourself? Ask me for a quote.
+Hosting is part of every plan. A plan starts on the day of launch and is required while I host your
+system. The free fixes after launch come on top of it. Prefer to host it yourself? Ask me for a
+quote.
 
 | | Care | Pro | Business |
 |---|---|---|---|
@@ -260,7 +305,7 @@ yourself? Ask me for a quote.
 | Hosting, uptime monitoring, daily backups, monthly security updates, monthly report | ✓ | ✓ | ✓ |
 | I reply within | 2 business days | 1 business day | 4 business hours |
 | Hours for changes: prices, services, hours, FAQ, categories, competitors, texts | 1 hour | 4 hours | 10 hours |
-| Repairs after outside changes: a competitor redesigns their site, a password changes, a provider changes its service | within the 1 hour | included | included |
+| Repairs after outside changes: a competitor redesigns their site, a password changes, a provider changes its service | counts toward your 1 hour | included | included |
 | Fixes for my own bugs | always free | always free | always free |
 | AI operations per month | 2,000 | 10,000 | 30,000 |
 | One new small automation per quarter, up to 6 hours. For example, a weekly Telegram summary or a new report tab | — | — | ✓ |
@@ -276,22 +321,28 @@ holidays. Monitoring alerts me, not you, when a scheduled run fails or the servi
 Buttons, newsletters filtered by rules, and prices read from page markup are not counted. The Basic
 booking bot uses no AI at all.
 
-**Above the limit.** I tell you when you reach 80%. By default, everything keeps working, and extra
-operations cost $2 per 1,000 on the next invoice. You can choose a hard cap instead. Then, until
-the 1st of the month, the system uses simple built-in rules. Buttons, reminders and prices from page
-markup work as usual. Typed messages and emails are understood less well, and only in English and
-Russian. Nothing is lost.
+**If you reach the limit.** The limit is a monthly spending cap on the AI key that only your system
+uses. There are no charges above it. When it is reached, I tell you, and the AI pauses until the
+1st, or until you move to a higher plan:
+- the booking bot keeps taking bookings with buttons and sending reminders, and reads typed
+  messages with simple rules, in English and Russian;
+- new emails wait, unsorted, with no drafts or lead alerts, and are sorted when the AI is back;
+- competitor pages without price markup show "not checked this time"; prices from page markup are
+  checked as usual.
+
+If you reach the limit two months in a row, I'll suggest the next plan. Prefer no limit? Use your
+own AI account: you then pay the AI provider directly.
 
 **Extra hours** cost $40 an hour, in 30-minute steps, and only after you approve the estimate.
 Unused hours don't carry over. If you go over your plan two months in a row, I'll suggest the next
 plan.
 
-**Not included in support:** new features, new integrations or channels, WhatsApp message fees
-(Meta bills you), and third-party subscriptions such as a Meta partner's monthly fee.
+**Not included in support:** new features, new integrations or channels, and the fees and
+subscriptions of other services you use.
 
 **Cancelling.** Plans are monthly. Cancel any time. The service runs to the end of the paid month.
-Your Google Sheet, Telegram bot and WhatsApp account are already yours. On request, I export your
-bookings or price history as CSV files. Then I delete your data from my server within 30 days.
+Your Google Sheet and Telegram bots are already yours. On request, I export your bookings or price
+history as CSV files. Then I delete your data from my server within 30 days.
 
 ---
 
@@ -301,19 +352,24 @@ Custom work is quoted per client. I estimate the hours before starting, and we a
 at $40 an hour. Payment terms are the same as for setup.
 
 - Direct export to QuickBooks, Xero or HubSpot. Invoice reconciliation and duplicate checks.
+- Reading invoice PDFs from emails. Scanned or photographed documents.
 - Bank statements to a spreadsheet, with every period checked against the printed balances. Quoted
   after a test on your sample statements.
-- Scanned or photographed documents.
 - A direct Outlook or Microsoft 365 connection.
-- Instagram or Facebook Messenger for the booking bot. Online prepayment for bookings.
+- WhatsApp for the booking bot, on your own WhatsApp Business account. Instagram or Facebook
+  Messenger. Online prepayment for bookings.
 - A Georgian-language booking bot.
 - Price monitoring of sites that need a full browser. Automatic product matching. Dashboards.
+
+<!-- AFTER RELEASE: remove "Reading invoice PDFs from emails" (PDF invoice fields) and "WhatsApp for
+the booking bot, on your own WhatsApp Business account" (WhatsApp adapter) from this list. -->
 
 I don't build voice assistants, general-purpose chatbots, cold outreach, or lead lists scraped from
 the web.
 
 ---
 
+<!-- direct-only:start -->
 ## Prices for businesses in Georgia (GEL)
 
 The same packages and plans as above, paid in lari.
@@ -338,22 +394,28 @@ I don't ask for ratings or reviews on Google Maps or anywhere else. The publishe
 you received a discount. Support plans are at the regular price.
 
 ---
+<!-- direct-only:end -->
 
 ## Terms
 
 **Payment.** For setup, you pay 50% before I start and 50% after you accept the work. Support is
-paid monthly in advance: the invoice comes on the 1st, and payment is due within 7 days.
+paid monthly in advance, from launch.
 
 **Upwork and Fiverr.** If you found me on Upwork or Fiverr, every payment goes through that
-platform, including setup and support. I use the platform's milestones, weekly payments or
-recurring orders. I will never ask you to pay outside the platform.
+platform, including setup and support. Support is a separate contract or order there, starting at
+launch. I use the platform's milestones, weekly payments or recurring orders. I will never ask you
+to pay outside the platform.
 
+<!-- direct-only:start -->
 **Direct clients.** You get an invoice in US dollars, with the payment methods listed on it.
-Businesses in Georgia pay in lari by bank transfer.
+Businesses in Georgia pay in lari by bank transfer. The support invoice comes on the 1st, and
+payment is due within 7 days. The first month is charged by days, from launch, with the final
+setup invoice.
+<!-- direct-only:end -->
 
 **Delivery time** starts when I have everything from "What you provide" and the first payment.
-Approvals by others, such as Meta or your Google Workspace admin, are outside my control and are
-not counted.
+Approvals by others, such as your Google Workspace or Microsoft 365 admin, are outside my control
+and are not counted.
 
 **Revisions.** Before launch, you get two rounds of changes within your package: texts,
 categories, FAQ, alert settings. Anything new is a change request with a quote.
@@ -368,9 +430,9 @@ you're on a support plan.
 
 **Price changes.** Your setup price doesn't change once agreed. A support price can change with 30
 days' written notice, and you can cancel instead. This can happen in two cases:
-- Meta changes its WhatsApp prices or rules. Meta changes prices only on the first day of a
-  quarter, with at least a month's notice.
 - An AI provider changes its prices, which changes what your AI operations cost.
+- If your bot uses WhatsApp: Meta changes its WhatsApp prices or rules. Meta changes prices only on
+  the first day of a quarter, with at least a month's notice.
 
 **Your data.** I sign a data processing agreement with you and keep only what the work needs. For
 the booking bot, that is the customer's name, phone, service and time. For the inbox, I keep the
@@ -382,14 +444,17 @@ no-shows: these depend on your customers. AI can make mistakes. That's why draft
 their own, a price needs a matching quote from the page, and the bot books only on "Confirm". Not
 every competitor site can be read, and I tell you which ones before you pay.
 
+<!-- direct-only:start -->
 ---
 
 ## Contact (direct clients)
 
 - {{NAME}}
 - Email: {{EMAIL}}
-- Telegram: {{TELEGRAM}}
-- WhatsApp: {{WHATSAPP}}
-- Book a 20-minute call: {{CALENDAR_LINK}}
-- Website: {{DOMAIN}}
-- Code samples: {{GITHUB}}
+- Telegram: [@{{TELEGRAM}}](https://t.me/{{TELEGRAM}})
+- WhatsApp: [+{{WHATSAPP}}](https://wa.me/{{WHATSAPP}})
+- Book a 15-minute call: {{CALENDAR_LINK}}
+- Website: https://{{DOMAIN}}
+- Code samples, including the bank statement agent: {{GITHUB}}
+- I reply in {{LANGUAGES}}.
+<!-- direct-only:end -->

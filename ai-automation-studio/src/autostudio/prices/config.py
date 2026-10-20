@@ -4,13 +4,14 @@ import re
 from decimal import Decimal
 from typing import Final, Literal
 
+import httpx
 import msgspec
 from selectolax.lexbor import LexborHTMLParser, SelectolaxError
 
 from autostudio.clientconf import ClientInfo, NotifyConfig, SinkConfig
 from autostudio.errors import ConfigError
 from autostudio.prices.money import MAX_AMOUNT, MAX_DECIMALS, bounded_amount
-from autostudio.prices.urls import url_problem
+from autostudio.prices.urls import covering_site, host_problem, url_problem
 
 _PRODUCT_ID: Final = re.compile(r'^[A-Za-z0-9][\w.-]{0,63}$')
 _CURRENCY: Final = re.compile(r'^[A-Z]{3}$')
@@ -19,10 +20,16 @@ _EMAIL: Final = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 _PLACEHOLDERS: Final = frozenset({'contact_email', 'token', 'version'})
 _MIN_CHANGE_PCT: Final = Decimal('0.1')
 _MAX_CHANGE_PCT: Final = Decimal(100)
+_MAX_REASON: Final = 200
 
 # Токен, по которому robots.txt сайта может обратиться именно к нам (`User-agent: autostudio-prices`).
 ROBOTS_AGENT: Final = 'autostudio-prices'
 DEFAULT_USER_AGENT: Final = 'Mozilla/5.0 (compatible; {token}/{version}; +mailto:{contact_email})'
+# Сколько сайтов проверяется одновременно. Страницы одного сайта всё равно идут по очереди
+# с паузой — параллельность ускоряет проход, не увеличивая нагрузку ни на один сайт.
+PARALLEL_SITES: Final = 4
+# Причина «не проверено», которая сбоем не считается: сайт поставлен на паузу в конфиге.
+PAUSED: Final = 'paused'
 
 
 class ConfigFieldError(ConfigError, ValueError):
@@ -113,6 +120,26 @@ class Product(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=T
             raise ConfigFieldError(f'product {self.id}: один конкурент указан дважды — уведомления станут неоднозначны')
 
 
+class SiteRule(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """Правила одного сайта конкурента: `[prices.sites."shop.ge"]`.
+
+    Ключ — домен; правило действует и на его поддомены (`www.shop.ge`, `m.shop.ge`).
+
+    Attributes:
+        paused: Не обращаться к сайту совсем — ни к страницам, ни к robots.txt, ни после
+            редиректа с другого сайта. Ставится в день претензии владельца сайта (бриф 5.8).
+        paused_reason: Почему (видит оператор в `check`): «письмо владельца 2026-10-20».
+    """
+
+    paused: bool = False
+    paused_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        reason = self.paused_reason
+        if reason is not None and (not reason.strip() or len(reason) > _MAX_REASON or '\n' in reason):
+            raise ConfigFieldError(f'paused_reason={reason!r}: непустая строка до {_MAX_REASON} символов')
+
+
 class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
     """Секция `[prices]`.
 
@@ -134,6 +161,7 @@ class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
         sheet_history: `changes` — в «History» только новые значения; `all` — каждая проверка.
         max_run_minutes: Предел длины прохода: что не успели проверить — «не проверено» в этот раз,
             а не зависший проход, который держит и следующие запуски таймера.
+        sites: Правила по сайтам (домен → `SiteRule`): например, пауза по претензии владельца.
     """
 
     products: list[Product]
@@ -152,6 +180,7 @@ class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
     failure_alert_after: int = 3
     sheet_history: Literal['changes', 'all'] = 'changes'
     max_run_minutes: float = 30.0
+    sites: dict[str, SiteRule] = msgspec.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.products:
@@ -173,14 +202,46 @@ class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
         _check_range('llm_max_pages_per_run', self.llm_max_pages_per_run, 0, 1000)
         _check_range('failure_alert_after', self.failure_alert_after, 1, 100)
         _check_range('max_run_minutes', self.max_run_minutes, 1, 360)
+        _check_sites(self)
 
     @property
     def offer_count(self) -> int:
         return sum(len(product.offers) for product in self.products)
 
+    @property
+    def paused_sites(self) -> frozenset[str]:
+        """Домены на паузе (ключи `[prices.sites]` с `paused = true`)."""
+        return frozenset(site for site, rule in self.sites.items() if rule.paused)
+
+    def paused_site(self, url: str) -> str | None:
+        """Домен на паузе, под который попадает адрес, или None.
+
+        Args:
+            url: Адрес страницы (уже проверенный `url_problem`).
+
+        Returns:
+            Ключ `[prices.sites]` или None.
+        """
+        return covering_site(httpx.URL(url).host, self.paused_sites)
+
     def render_user_agent(self, version: str) -> str:
         """User-Agent, который увидит сайт конкурента."""
         return self.user_agent.format(contact_email=self.contact_email, token=ROBOTS_AGENT, version=version)
+
+
+def _check_sites(section: PricesSection) -> None:
+    hosts = {httpx.URL(offer.url).host for product in section.products for offer in product.offers}
+    for site in section.sites:
+        where = f'prices.sites."{site}"'
+        if site != site.strip().rstrip('.').lower():
+            raise ConfigError(f'{where}: домен строчными, без пробелов и точки в конце')
+        problem = host_problem(site)
+        if problem is not None:
+            raise ConfigError(f'{where}: {problem}')
+        if not any(covering_site(host, (site,)) for host in hosts):
+            # Опечатка в домене на паузе — это сбор с сайта, который просил перестать: такой
+            # конфиг не должен молча работать.
+            raise ConfigError(f'{where}: ни одна ссылка не ведёт на этот сайт — опечатка? Правило не сработает')
 
 
 def _check_range(name: str, value: float, low: float, high: float) -> None:

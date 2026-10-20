@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator
 import httpx
 from dishka import Provider, Scope, from_context, provide
 
-from autostudio.clientconf import client_data_dir
+from autostudio.clientconf import client_data_dir, events_path
 from autostudio.events import EventLog
 from autostudio.llm import LLMClient, make_llm
 from autostudio.notify import make_notifier
@@ -31,8 +31,9 @@ def price_model(settings: Settings, config: PricesConfig) -> LLMClient | None:
     Эвристика `FakeLLM` (первое число с валютой на странице) в боевой запуск не попадает
     никогда: в таблице клиента её ответ выглядел бы «ИИ, проверенная цитата», а это часто
     порог бесплатной доставки или зачёркнутая старая цена. По той же причине настоящая модель
-    подключается без запасных эвристик: сбой провайдера (квота, ключ) — это `llm_error`,
-    видимый оператору, а не тихая подмена догадкой.
+    подключается без запасных эвристик — `make_llm(settings)` без `fake`, а не `ResilientLLM`:
+    сбой провайдера — это `llm_outage`/`llm_config`/`llm_error` по `LLMError.kind`, видимый
+    оператору, а клиенту — «в этот раз не проверено», а не тихая подмена догадкой.
 
     Args:
         settings: Настройки процесса.
@@ -84,7 +85,7 @@ class PricesProvider(Provider):
                 new_fetcher=new_fetcher,
                 store=PriceStore(base / 'prices.sqlite'),
                 # Тот же файл, что читает `autostudio report`: отчёт клиенту строится из него.
-                events=EventLog(base / 'events.sqlite'),
+                events=EventLog(events_path(settings.data_dir, config.client)),
                 sink=make_sink(config.sink),
                 notifier=make_notifier(config.notify, http),
                 operator=operator.notifier,

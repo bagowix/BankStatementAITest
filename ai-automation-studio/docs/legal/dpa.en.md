@@ -36,7 +36,8 @@ the processor.
 
 2.2. The Developer processes personal data only to provide the Services and only on the Client's
 documented instructions. The instructions are: the Agreement, the Order Forms, the Configuration,
-and the Client's written requests (email or messenger messages are enough).
+and the Client's written requests (email or messenger messages are enough; for a marketplace
+client, only messages on the marketplace).
 
 2.3. If the Developer believes an instruction breaks the law, it tells the Client and may pause that
 instruction until the Client confirms or changes it.
@@ -67,9 +68,10 @@ tells the Client in advance. That person must be bound by confidentiality before
 
 6.1. The Client authorises the Developer to use the sub-processors listed in **Annex 3**.
 
-6.2. To add or replace a sub-processor, the Developer tells the Client by email at least **30 days**
-in advance. If a sub-processor must be replaced urgently, for security or because it stops its
-service, the Developer tells the Client as soon as possible.
+6.2. To add or replace a sub-processor, the Developer tells the Client by email (for a marketplace
+client, only through the marketplace's messages) at least **30 days** in advance. If a sub-processor
+must be replaced urgently, for security or because it stops its service, the Developer tells the
+Client as soon as possible.
 
 6.3. The Client may object within 14 days on reasonable data protection grounds. The parties then
 look for a solution. If there is none, the Client may end the affected Services without penalty. The
@@ -96,7 +98,8 @@ needed and attach them.]
 ## 8. Requests from people
 
 8.1. If a person asks the Developer directly to see, correct, delete or export their data, the
-Developer forwards the request to the Client within 2 Business Days. The Developer does not answer
+Developer forwards the request to the Client within 2 Business Days (for a marketplace client,
+through the marketplace's messages). The Developer does not answer
 it itself unless the Client asks.
 
 8.2. Within 10 Business Days of the Client's request, the Developer finds, exports, corrects or
@@ -199,7 +202,7 @@ Only the sections for the packages in the Client's Order Forms apply.
 | **Customer data** | Name, phone number, messenger ID (Telegram chat ID, or a WhatsApp user ID if WhatsApp is enabled), language, booked service, staff member, date and time, booking status and code, marks that reminders were sent. |
 | **Messages customers type** | Processed to understand the request. The system does not store the conversation. A question the bot cannot answer is forwarded to the Client's staff in Telegram. |
 | **Staff data** | Name, Telegram ID, working hours. |
-| **Not processed** | Health data, diagnoses, medical history, payment card data, photos. |
+| **Not requested or stored** | Health data, diagnoses, medical history, payment card data, photos. The bot does not ask for them and does not store them. A customer may still type them into a message. In Standard and Premium, that message is sent to the AI provider as typed and is not stored. [For clinics: the Client may add a line to the bot's greeting asking customers not to write about their health, or choose the Basic bot, which sends nothing to an AI provider.] |
 | **Stored on the Developer's server** | The booking database: bookings, reminder marks, customer profiles (messenger ID, name, phone, language). The event log for the monthly report holds no names and no phone numbers. |
 | **Stored in Client Accounts** | Bookings log and schedule in the Client's Google Sheet (Standard, Premium). Booking events in the Client's Google Calendar, if enabled. Chats in the Client's Telegram bot and WhatsApp account. |
 | **Sent to the AI provider** | Standard and Premium only: the message the customer typed, the list of services and prices, staff names, opening hours and the FAQ. The customer's name and phone from the booking profile are not sent. A customer may type anything into a message, and it is sent as typed. The Basic bot sends nothing to an AI provider. |
@@ -213,8 +216,8 @@ Only the sections for the packages in the Client's Order Forms apply.
 | **Processed but not stored** | Email subject, sender's name and address, date, body text (without quoted earlier messages, up to a size limit), signature, names of attachments. The text of PDF invoices, if invoice extraction is enabled. Emails may contain any data the sender chose to include. The system does not look for special categories of data. |
 | **Extracted fields** | Category, urgency, a one-line summary, name, company, phone, email, request, budget, language. For invoices: supplier, invoice number, date, total, currency. |
 | **Stored on the Developer's server** | Extracted fields and the draft text: only until the row is written to the Client's sheet and the draft is placed in the mailbox, then erased. Processing records (Message-ID, category, urgency, actions done): deleted after 90 days. Email bodies and attachments: never stored. |
-| **Stored in Client Accounts** | Rows in the Client's Google Sheet. Names, addresses and phones can be masked there if the Client chooses. Reply drafts in the mailbox's Drafts folder. Copies in the folders or labels the Client chose. |
-| **Alerts** | Hot-lead alert to the Client's Telegram: who, what they want, phone, budget. The email text is not included. An email that tries to give orders to the AI: alert to the Developer with the sender's domain and the subject line only. |
+| **Stored in Client Accounts** | Rows in the Client's Google Sheet. If the Client chooses, the sender's name and email address and the extracted name, phone number and email address are masked there; the subject, the one-line summary and the other fields are not. Reply drafts in the mailbox's Drafts folder. Copies in the folders or labels the Client chose. |
+| **Alerts** | Hot-lead alert to the Client's Telegram, sent through a bot the Client owns (or to the Client's webhook): who, what they want, phone, budget. The email text is not included. An email that tries to give orders to the AI: alert to the Developer with the sender's domain, the subject line and up to three short phrases that triggered the flag (for example, "ignore previous instructions"). No other email text. |
 | **Sent to the AI provider** | Subject, sender's name and address, date, attachment names, signature, and body text without quoted earlier messages, up to a size limit. The text of PDF invoices, if invoice extraction is enabled. Newsletters and auto-replies recognised by rules are not sent. Hidden text in HTML emails is not sent. |
 | **Mailbox actions** | The system reads emails and leaves them unread, creates drafts, and copies emails to folders. It cannot send or delete emails. |
 
@@ -235,8 +238,8 @@ Only the sections for the packages in the Client's Order Forms apply.
 | **People** | The Client's staff who receive alerts and reports or contact support. |
 | **Data** | Name, email, Telegram ID, messages exchanged with the Developer. |
 | **Event log** | The record the monthly report is built from: counts, categories, times and run results. No names, phone numbers or email text. Kept while the Agreement is in force. |
-| **Technical logs** | Errors and identifiers, such as a booking code or a message number. They are designed not to record email text or conversations. They are rotated automatically and kept for no more than 30 days. |
-| **Backups** | Copies of the data stored on the Developer's server. Encrypted, kept for up to 30 days. |
+| **Technical logs** | Errors and identifiers, such as a booking code or a message number. They are designed not to record email text or conversations. They are rotated by size (at most about 30 MB per service) and deleted when the service is redeployed, which happens at least once a month with the security updates (Support Terms, 2.4), and when the deployment is removed. |
+| **Backups** | [VERIFY: backups, as in the Support Terms, 2.3.] Copies of the data stored on the Developer's server. Encrypted, kept for up to 30 days. |
 
 ## Annex 2. Security measures
 
@@ -298,10 +301,10 @@ Only the sections for the packages in the Client's Order Forms apply.
   formulas.
 
 **Backups, updates and logs**
-- Daily backups to separate storage, encrypted, kept for up to 30 days.
+- [VERIFY: backups.] Daily backups to separate storage, encrypted, kept for up to 30 days.
 - Monthly updates of software components, with automated tests before each deployment.
-- Monitoring alerts the Developer when a run fails or stops. Technical logs are rotated and kept for
-  no more than 30 days.
+- Monitoring alerts the Developer when a run fails or stops. Technical logs are rotated by size and
+  deleted at each redeployment, at least once a month.
 
 **Breaches**
 - As set in section 9 of this DPA.
@@ -314,7 +317,7 @@ Only the sections for the packages in the Client's Order Forms apply.
 | Hosting provider: {{HOSTING_PROVIDER}} | Servers that run the system; the system's databases | All data stored on the Developer's server (Annex 1) | {{SERVER_LOCATION}} |
 | Backup storage: {{BACKUP_PROVIDER}} | Encrypted backups | Same as hosting, encrypted | {{BACKUP_LOCATION}} |
 | Google | The Developer's service account writes rows to the Client's Google Sheet and events to the Client's Google Calendar | Rows and events as in Annex 1 | As set in Google's terms |
-| Telegram | The Developer's alert channel | Error messages. For the Inbox: the sender's domain and subject line of a suspicious email | As set in Telegram's terms |
+| Telegram | The Developer's alert channel | Error messages. For the Inbox: the sender's domain, the subject line and up to three short flagged phrases of a suspicious email | As set in Telegram's terms |
 
 Links to the current terms of each sub-processor: [list of links, attached on the date of signing].
 
@@ -324,7 +327,7 @@ Links to the current terms of each sub-processor: [list of links, attached on th
 
 **The Client's own providers** (the Client contracts with them directly; they are not the
 Developer's sub-processors):
-- Telegram, for the Client's own bot;
+- Telegram, for the Client's own bots: the booking bot and the bot that sends the Client's alerts;
 - Meta, for the Client's WhatsApp Business account, and a Meta partner if the Client uses one;
 - the Client's mailbox provider;
 - Google, for storing the Client's Sheet and Calendar;
@@ -342,7 +345,8 @@ Protection".]
 > time you booked. We use them to confirm your booking, send you reminders and contact you about
 > it. Messages you type to the bot may be processed by an AI service ([Anthropic / OpenAI]) to
 > understand your request. Our contractor runs the bot for us. To have your data deleted, contact us
-> at [contact].
+> at [contact]. [For clinics: Please don't write about your health or diagnoses in messages to the
+> bot.]
 
 **WhatsApp consent (opt-in)**
 

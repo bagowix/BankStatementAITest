@@ -10,8 +10,8 @@
 **Between:**
 
 1. **{{NAME}}**, an individual entrepreneur registered in Georgia, identification number
-   {{IE_ID}}, registered address {{ADDRESS}}, email {{EMAIL}} [, working name "AutoStudio"]
-   (the **Developer**); and
+   {{IE_ID}}[, direct clients only: registered address {{ADDRESS}}, email {{EMAIL}}] [, working
+   name "AutoStudio"] (the **Developer**); and
 2. **[Client's legal name]**, [legal form], registered in [country] under number
    [registration number], address [address], represented by [name, position]
    (the **Client**).
@@ -114,7 +114,8 @@ plan. All other support work follows the Support Terms.
 integration or channel, a new data source, a limit above the tier.
 
 6.2. The Developer estimates the hours first. Work starts only after the Client approves the
-estimate in writing. An email or a messenger message is enough. The work is paid at the hourly rate
+estimate in writing. An email or a messenger message is enough; for a marketplace client, only a
+message on the marketplace. The work is paid at the hourly rate
 in the Order Form, in 30-minute steps. Larger work can instead get a fixed price in a new Order
 Form.
 
@@ -123,9 +124,12 @@ Form.
 7.1. **Setup.** The Client pays 50% before work starts and 50% after acceptance. Each invoice is due
 within 7 days.
 
-7.2. **Support.** Support is paid monthly in advance. The invoice comes on the 1st of the month and
-is due within 7 days. Support starts at Launch. The first month is charged pro rata, by days, with
-the final setup invoice.
+7.2. **Support.** Support starts at Launch and is paid monthly in advance. The invoice comes on the
+1st of the month and is due within 7 days. The first month is charged pro rata, by days, with the
+final setup invoice. The free fixes in section 5 come on top of the support plan; hosting is
+provided only under a support plan. For a marketplace client, the support plan is a separate
+contract or order on that marketplace, starting at Launch, and is billed as the marketplace allows
+(7.4); the pro rata rule does not apply.
 
 7.3. **How to pay.** The currency is set in the Order Form. Direct clients pay by bank transfer to
 the Developer's business account {{BANK_DETAILS}}, or by another method listed on the invoice. Each
@@ -175,7 +179,7 @@ The parts of the system that depend on that access then stop working.
 |---|---|
 | AI model use, up to the support plan's limit | Included in the support plan. The Developer's AI account is used. |
 | AI model use, if the Order Form says the Client uses its own AI account | The Client, directly to the provider. |
-| AI operations above the plan's limit | The Client, as set in the Support Terms. |
+| AI use above the plan's limit | Not charged. At the limit, the AI pauses (Support Terms, 6.3), unless the Client moves to a higher plan or uses its own AI account. |
 | WhatsApp messages | The Client, directly to Meta, by the Client's card in WhatsApp Manager. The Developer does not resell messages or add a margin. |
 | A Meta partner's fee, if the Client keeps using the WhatsApp Business app on the same number | The Client, directly or as quoted in the Order Form. |
 | Hosting on the Developer's shared server | Included in the support plan. |
@@ -223,18 +227,27 @@ Services, as long as they contain no Client Data and no Client confidential info
 change request adds a general feature, that feature becomes part of the Framework. The Client's
 Configuration and Client Data never do.
 
-10.3. **Licence.** The Developer grants the Client a perpetual, worldwide, non-exclusive licence to
-use the Framework, as delivered under this agreement (including updates delivered during support),
-for the Client's own business.
-- The licence is included in the fees for the Services. There is no separate licence fee.
-- The licence continues after this agreement ends.
-- The Client may let its contractors run the software for the Client.
-- The Client may not sell, sublicense or offer the Framework to others as a product or a service.
-- The Client may transfer the licence only together with the business that uses it.
+10.3. **Result of the Services.** The result of the Services is the Client's system: the
+Configuration and the copy of the software as deployed for the Client, including updates delivered
+during support. It passes to the Client as the result of the Services the Client pays for. The
+Client may use and modify it for its own business, without time limit, also after this agreement
+ends. The Client receives the copy itself under 10.4.
+- The fees are for the Services. No separate fee is charged for this right.
+- The Client may let its contractors run and modify the system for the Client.
+- The Client may not sell or offer the Framework to others as a product or a service.
+- The Client may transfer these rights only together with the business that uses the system.
+- The Developer keeps ownership of the Framework (10.2) and may use it for other clients.
 
-[ACCOUNTANT: could this licence make part of the fees "royalties", which are outside the 1% small
-business regime? If yes, discuss with the lawyer whether to state the licence as part of the service
-result instead.]
+[ACCOUNTANT/LAWYER: this follows the advice to pass code as the result of a service, not as a
+licence (research brief, 4.2.5, unverified). Do not sign either version until the accountant answers
+question 8 of the brief: is the fee for support and hosting a service fee or a royalty? Alternative
+wording, only if the accountant and the lawyer prefer it: "10.3. Licence. The Developer grants the
+Client a perpetual, worldwide, non-exclusive licence to use the Framework, as delivered under this
+agreement (including updates delivered during support), for the Client's own business. The licence
+is included in the fees for the Services. There is no separate licence fee. The licence continues
+after this agreement ends. The Client may let its contractors run the software for the Client. The
+Client may not sell, sublicense or offer the Framework to others as a product or a service. The
+Client may transfer the licence only together with the business that uses it."]
 
 10.4. **A copy of the software.** While the Developer hosts the system, the Client does not need a
 copy. When the Services end, and the Client asks within 30 days:
@@ -283,10 +296,11 @@ Client is not subject to sanctions that prohibit the Developer from working with
   site owners for this choice and for how it uses the prices.
 - (d) **No personal data.** The monitor collects prices, currency and availability. It does not
   collect personal data, such as seller names on marketplaces.
-- (e) **Polite collection.** The Developer follows each site's robots.txt rules. The monitor sends no
-  more than one request every 5 seconds to a site. Each request names the monitor and gives a
-  contact email, so a site owner can reach the Developer. The Client's name is never in the
-  requests.
+- (e) **Polite collection.** The Developer follows each site's robots.txt rules, and departs from
+  them only with the site owner's written permission. The monitor waits at least 5 seconds between
+  requests to the same site, and longer if the site's robots.txt asks for a delay (up to 60
+  seconds). Each request names the monitor and gives a contact email, so a site owner can reach the
+  Developer. The Client's name is never in the requests.
 - (f) **Stop on complaint.** If a site owner objects or blocks the monitor, or if the Developer
   reasonably believes that monitoring a site breaks its terms or the law, the Developer stops
   monitoring that site on the same day and tells the Client. This is not a breach of this agreement.
@@ -306,11 +320,15 @@ business's own booking and FAQ bot. Meta does not allow general-purpose AI assis
 12.1. The Developer provides the Services with reasonable skill and care, as described in the Order
 Form.
 
-12.2. The Developer has the right to grant the licence in 10.3. As far as the Developer knows, the
+12.2. The Developer has the right to grant the rights in 10.3. As far as the Developer knows, the
 Framework does not infringe anyone else's rights.
 
-12.3. The Developer follows the DPA. Passwords, keys and tokens are kept only on the server and in the
-Developer's encrypted password manager. They are never put in code repositories, logs or messages.
+12.3. The Developer follows the DPA. The Developer never asks for the Client's main passwords or
+login codes. It uses access that the Client can revoke: an app password, a bot token, sharing with a
+service account. The Developer keeps passwords, keys and tokens only on the server and in its
+encrypted password manager, and never puts them in code repositories or logs. The Developer does
+not ask for them in chat messages. It suggests a safe way to pass them, such as a one-time secret
+link or a call. If one was passed in writing, the Client may replace it after setup.
 
 12.4. The Developer uses access to Client Accounts only to provide the Services.
 
@@ -400,17 +418,18 @@ Support Terms.
   new bot token in @BotFather, stop sharing the Google Sheet.
 - (c) The Developer deletes Client Data from its servers and backups within 30 days after the end, as
   set in the DPA, and confirms this in writing on request.
-- (d) The licence (10.3), confidentiality (14), liability (13) and unpaid fees survive the end of
-  this agreement.
+- (d) The Client's rights under 10.3, confidentiality (14), liability (13) and unpaid fees survive
+  the end of this agreement.
 
 ## 16. Communication
 
-16.1. Day-to-day matters go by email, Telegram, or the marketplace's messages. Approving an estimate
-in these channels is enough.
+16.1. Day-to-day matters go by email or Telegram. For a marketplace client, they go only through the
+marketplace's messages. Approving an estimate in these channels is enough.
 
-16.2. Formal notices go by email to the addresses in the Order Form, or through the marketplace's
-messages. Formal notices are: ending an Order Form or this agreement, a notice of breach, a price
-change, a change of sub-processor. A notice takes effect on the Business Day after it is sent.
+16.2. Formal notices go by email to the addresses in the Order Form. For a marketplace client, they
+go only through the marketplace's messages. Formal notices are: ending an Order Form or this
+agreement, a notice of breach, a price change, a change of sub-processor. A notice takes effect on
+the Business Day after it is sent.
 
 16.3. This agreement is made in [English] [and Russian]. If the versions differ, the [English]
 version prevails. [LAWYER: is a Georgian version needed for clients in Georgia?]
@@ -469,15 +488,15 @@ clients outside Georgia, arbitration may be easier to enforce.]
 | 4 | Payment | 50% prepayment: [amount], invoice due within 7 days. 50% after acceptance: [amount] |
 | 5 | Delivery time | [N] Business Days after the prepayment and everything under "What you provide" |
 | 6 | Free fixes | [14 / 30] days after Launch |
-| 7 | Support plan | [None / Care / Pro / Business], [amount] per month, from Launch |
+| 7 | Support plan | [None / Care / Pro / Business], [amount] per month, from Launch. Free fixes come on top of it. [Marketplace: a separate contract or order on the marketplace, from Launch] |
 | 8 | AI provider | [Anthropic / OpenAI / none (Basic booking bot)] |
 | 9 | AI account | [The Developer's, included up to the plan's limit / The Client's own, paid by the Client directly] |
-| 10 | Above the AI limit | [Keep working, pay per use as in the Support Terms / Hard cap: built-in rules until the 1st of the next month] |
+| 10 | AI limit | [The plan's limit, as a spending cap: at the limit the AI pauses until the 1st of the next month (Support Terms, 6.3) / None: the Client's own AI account] |
 | 11 | Hosting | [The Developer's shared server in {{SERVER_LOCATION}} / Dedicated server: [details, monthly cost] / The Client's server: quoted separately] |
 | 12 | Hourly rate for change requests and extra hours | [USD 40 / GEL 100] per hour, in 30-minute steps |
 | 13 | How long booking records are kept | [While this agreement is in force / Bookings older than [12] months are deleted each month] |
 | 14 | Where the Client found the Developer | [Direct / Upwork / Fiverr: all payments go through the marketplace] |
-| 15 | Contacts for notices | Direct clients: Developer {{EMAIL}}, {{TELEGRAM}}; Client [name, email, messenger]. Marketplace clients: the marketplace's messages only |
+| 15 | Contacts for notices | [Direct clients: Developer {{EMAIL}}, Telegram @{{TELEGRAM}}; Client [name, email, messenger].] [Marketplace clients: the marketplace's messages only.] |
 | 16 | Special terms | [none] |
 
 Signatures of both parties.

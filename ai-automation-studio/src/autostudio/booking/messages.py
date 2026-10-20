@@ -1,12 +1,15 @@
 """Сообщения движка: что пришло от покупателя и что ему ответить — без привязки к каналу.
 
-Адаптер канала (Telegram, консоль, в будущем WhatsApp) переводит свои апдейты во
-`Incoming`, а `Outgoing` — в свою разметку. Отправка спрятана за протоколом `Sender`:
-тестам и напоминаниям не нужен настоящий бот.
+Адаптер канала (Telegram, WhatsApp, консоль) переводит свои апдейты во `Incoming`, а
+`Outgoing` — в свою разметку. Отправка спрятана за протоколом `Sender`: тестам и
+напоминаниям не нужен настоящий бот. Ключ чата начинается с префикса канала (`tg:`,
+`wa:`), и `RoutingSender` по нему выбирает канал: ответ администратора из Telegram
+`/reply wa:…` уходит покупателю в WhatsApp, а уведомление владельцу о записи из
+WhatsApp — в Telegram.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Final, Protocol
 
 import msgspec
@@ -26,6 +29,14 @@ TEXT_LIMIT: Final = 4000
 ADMINS: Final = '@admins'
 # Так `deliver` называет в списке сбоев дополнительный канал владельца `[notify]`.
 NOTIFY_CHANNEL: Final = '@notify'
+# Префикс ключа чата → канал (для журнала и отчёта: откуда пришла запись).
+CHANNELS: Final[Mapping[str, str]] = {'tg': 'telegram', 'wa': 'whatsapp', 'console': 'console'}
+
+
+def channel_of(key: str) -> str:
+    """Канал по ключу чата: `tg:123` → `telegram`, `wa:…` → `whatsapp`, иначе `other`."""
+    prefix, sep, _ = key.partition(':')
+    return CHANNELS.get(prefix, 'other') if sep else 'other'
 
 
 class Button(msgspec.Struct, frozen=True):
@@ -112,6 +123,8 @@ class Incoming(msgspec.Struct, frozen=True, kw_only=True):
         phone: Телефон из карточки контакта.
         phone_verified: Это собственный номер отправителя («Отправить мой номер»: адаптер
             сверил владельца карточки с отправителем), а не чужой контакт.
+        source: Откуда пришёл покупатель: метка deep link (`/start instagram` в Telegram),
+            реклама Click-to-WhatsApp; адаптер передаёт как есть, движок проверяет.
     """
 
     user: str
@@ -123,6 +136,24 @@ class Incoming(msgspec.Struct, frozen=True, kw_only=True):
     data: str | None = None
     phone: str | None = None
     phone_verified: bool = False
+    source: str | None = None
+
+
+class Reminder(msgspec.Struct, frozen=True, kw_only=True):
+    """Сообщение — напоминание, которое бизнес шлёт первым, и его параметры.
+
+    Telegram отправляет обычный текст. WhatsApp вне 24-часового окна обязан отправить
+    одобренный шаблон, и параметры шаблона берёт отсюда, а не разбирает текст.
+
+    Attributes:
+        service: Название услуги на языке покупателя (`{{1}}` шаблона).
+        when: Дата и время визита на языке покупателя (`{{2}}` шаблона).
+        language: Язык покупателя.
+    """
+
+    service: str
+    when: str
+    language: str
 
 
 class Outgoing(msgspec.Struct, frozen=True, kw_only=True):
@@ -136,6 +167,7 @@ class Outgoing(msgspec.Struct, frozen=True, kw_only=True):
         remove_keyboard: Убрать такую клавиатуру.
         to: Кому: None — отправителю, `ADMINS` — администраторам, иначе ключ чата.
         receipt: Сообщить отправителю, доставлено ли это сообщение (для `to` — другой чат).
+        reminder: Это напоминание (бизнес пишет первым) и его параметры для шаблона канала.
     """
 
     text: str
@@ -145,6 +177,7 @@ class Outgoing(msgspec.Struct, frozen=True, kw_only=True):
     remove_keyboard: bool = False
     to: str | None = None
     receipt: Receipt | None = None
+    reminder: Reminder | None = None
 
 
 class Sender(Protocol):
@@ -169,6 +202,59 @@ class DeliveryError(AutoStudioError):
 
 class RecipientGoneError(DeliveryError):
     """Получатель недоступен навсегда (заблокировал бота, удалил чат) — повторять незачем."""
+
+
+class RoutingSender:
+    """`Sender`, который выбирает канал по префиксу ключа чата (`tg:`, `wa:`).
+
+    Args:
+        routes: Префикс без двоеточия → отправка этого канала.
+    """
+
+    def __init__(self, routes: Mapping[str, Sender]) -> None:
+        self._routes = dict(routes)
+
+    async def send(self, chat: str, message: Outgoing) -> None:
+        prefix, sep, _ = chat.partition(':')
+        sender = self._routes.get(prefix) if sep else None
+        if sender is None:
+            raise RecipientGoneError(f'нет канала для чата {chat!r}')
+        await sender.send(chat, message)
+
+
+def coalesce(messages: Sequence[Outgoing], limit: int) -> list[Outgoing]:
+    """Склеивает подряд идущие сообщения одному адресату, если первое — просто текст.
+
+    Движок часто отвечает парой «уведомление + меню». В Telegram это бесплатно, а в
+    WhatsApp каждое сообщение платное и считается в лимит «одно сообщение в 6 секунд
+    одному пользователю»: склейка делает из пары одно сообщение, если текст помещается.
+
+    Args:
+        messages: Ответы движка по порядку.
+        limit: Предел длины склеенного текста (у интерактивного сообщения WhatsApp — 1024).
+
+    Returns:
+        Те же ответы, где возможно — склеенные.
+    """
+    out: list[Outgoing] = []
+    for message in messages:
+        previous = out[-1] if out else None
+        mergeable = (
+            previous is not None
+            and previous.to == message.to
+            and not previous.buttons
+            and previous.request_contact is None
+            and previous.receipt is None
+            and previous.reminder is None
+            and message.receipt is None
+            and message.reminder is None
+        )
+        merged_text = f'{previous.text}\n\n{message.text}' if previous is not None else message.text
+        if previous is not None and mergeable and len(merged_text) <= limit:
+            out[-1] = msgspec.structs.replace(message, text=merged_text)
+        else:
+            out.append(message)
+    return out
 
 
 async def deliver(

@@ -12,7 +12,12 @@
 - напоминание сначала «застолбляется» строкой в `reminders`, потом отправляется: после
   перезапуска процесса или при двух процессах одно напоминание не уходит дважды;
 - лимит предстоящих записей одного покупателя проверяется в той же транзакции, что и
-  вставка: два быстрых «Подтвердить» не обойдут его.
+  вставка: два быстрых «Подтвердить» не обойдут его;
+- отметка «синхронизировать с Google Calendar» ставится в той же транзакции, что и сама
+  запись, отмена или перенос: падение процесса между ними не оставит календарь без события.
+
+Здесь же — состояние каналов, без которого не работают правила WhatsApp: когда покупатель
+писал последним (24-часовое окно), дал ли согласие на напоминания и не отписался ли.
 """
 
 import datetime as dt
@@ -70,7 +75,32 @@ CREATE TABLE IF NOT EXISTS customers (
     language TEXT,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS calendar_sync (
+    booking_id TEXT PRIMARY KEY,
+    calendar_id TEXT NOT NULL,
+    event_id TEXT,
+    pending INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    attempts INTEGER NOT NULL,
+    next_try_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS calendar_sync_due ON calendar_sync (pending, next_try_at);
+CREATE TABLE IF NOT EXISTS channel_contacts (
+    key TEXT PRIMARY KEY,
+    channel TEXT NOT NULL,
+    user_id TEXT,
+    phone TEXT,
+    last_inbound_at TEXT NOT NULL,
+    opted_in_at TEXT,
+    opted_out_at TEXT
+);
+CREATE INDEX IF NOT EXISTS channel_contacts_user ON channel_contacts (channel, user_id);
+CREATE INDEX IF NOT EXISTS channel_contacts_phone ON channel_contacts (channel, phone);
 """
+# Колонка, добавленная после первого выпуска: базы уже работающих клиентов получают её
+# через ALTER TABLE при открытии (CREATE TABLE IF NOT EXISTS старую таблицу не меняет).
+_CUSTOMER_COLUMNS: Final = 'PRAGMA table_info(customers)'
+_ADD_SOURCE: Final = 'ALTER TABLE customers ADD COLUMN source TEXT'
 
 # Без I, O, 0, 1: код записи диктуют по телефону и набирают руками.
 _ID_ALPHABET: Final = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -106,6 +136,37 @@ _REMINDER_CANDIDATES: Final = (
 )
 
 _SENT: Final = 'SELECT minutes_before FROM reminders WHERE booking_id = ?'
+_CALENDAR_MARK: Final = (
+    'INSERT INTO calendar_sync (booking_id, calendar_id, event_id, pending, version, attempts, next_try_at) '
+    'VALUES (?, ?, NULL, 1, 1, 0, ?) ON CONFLICT(booking_id) DO UPDATE SET pending = 1, '
+    'version = version + 1, attempts = 0, next_try_at = excluded.next_try_at'
+)
+_CALENDAR_TOUCH: Final = (
+    'UPDATE calendar_sync SET pending = 1, version = version + 1, attempts = 0, next_try_at = ? WHERE booking_id = ?'
+)
+_CALENDAR_DUE: Final = (
+    'SELECT b.*, c.calendar_id, c.event_id, c.version, c.attempts FROM calendar_sync c '
+    'JOIN bookings b ON b.id = c.booking_id WHERE c.pending = 1 AND c.next_try_at <= ? '
+    'ORDER BY c.next_try_at LIMIT ?'
+)
+_CONTACT_BY_KEY: Final = (
+    'SELECT key, channel, user_id, phone, last_inbound_at, opted_in_at, opted_out_at '
+    'FROM channel_contacts WHERE key = ?'
+)
+_CONTACT_BY_USER: Final = 'SELECT key FROM channel_contacts WHERE channel = ? AND user_id = ?'
+_CONTACT_BY_PHONE: Final = 'SELECT key FROM channel_contacts WHERE channel = ? AND phone = ?'
+_CONTACT_INSERT: Final = (
+    'INSERT INTO channel_contacts (key, channel, user_id, phone, last_inbound_at, opted_in_at, opted_out_at) '
+    'VALUES (?, ?, ?, ?, ?, NULL, NULL)'
+)
+# Адрес дополняется, а не затирается: сообщение без телефона (username) не стирает известный
+# номер, а время окна только растёт (вебхуки приходят не по порядку).
+_CONTACT_UPDATE: Final = (
+    'UPDATE channel_contacts SET user_id = COALESCE(?, user_id), phone = COALESCE(?, phone), '
+    'last_inbound_at = MAX(last_inbound_at, ?) WHERE key = ?'
+)
+_OPT_IN: Final = 'UPDATE channel_contacts SET opted_in_at = ? WHERE key = ?'
+_OPT_OUT: Final = 'UPDATE channel_contacts SET opted_out_at = ? WHERE key = ?'
 _RELEASE: Final = 'DELETE FROM reminders WHERE booking_id = ? AND minutes_before = ?'
 _CLAIM: Final = 'INSERT OR IGNORE INTO reminders (booking_id, minutes_before, sent_at) VALUES (?, ?, ?)'
 
@@ -165,6 +226,79 @@ def _booking(row: _Row) -> Booking:
     )
 
 
+class CalendarTask(msgspec.Struct, frozen=True, kw_only=True):
+    """Запись, событие которой в Google Calendar надо привести в соответствие с базой.
+
+    Attributes:
+        booking: Запись как она есть сейчас (активная — событие должно быть, отменённая — нет).
+        calendar_id: Календарь события.
+        event_id: id события, если оно уже создано.
+        version: Номер изменения записи: отметка «готово» не снимает более позднее изменение.
+        attempts: Сколько попыток подряд не удалось.
+    """
+
+    booking: Booking
+    calendar_id: str
+    event_id: str | None
+    version: int
+    attempts: int
+
+
+class ChannelContact(msgspec.Struct, frozen=True, kw_only=True):
+    """Покупатель в канале с адресом отправки, отдельным от ключа чата.
+
+    Ключ чата (`wa:3f9c…`) — наш, случайный и постоянный: в логах и `/reply` нет номера
+    телефона, а смена адресации у Meta (телефон → BSUID) не меняет ключ, к которому
+    привязаны записи покупателя.
+
+    Attributes:
+        key: Ключ чата в движке.
+        channel: Канал (`whatsapp`).
+        user_id: Идентификатор пользователя в канале (BSUID WhatsApp) или None.
+        phone: Телефон (wa_id) или None — у пользователя с username его может не быть.
+        last_inbound_at: Когда покупатель писал последним (24-часовое окно WhatsApp).
+        opted_in_at: Когда дал согласие на напоминания или None.
+        opted_out_at: Когда отписался или None.
+    """
+
+    key: str
+    channel: str
+    user_id: str | None
+    phone: str | None
+    last_inbound_at: dt.datetime
+    opted_in_at: dt.datetime | None
+    opted_out_at: dt.datetime | None
+
+    @property
+    def subscribed(self) -> bool:
+        """Согласие на напоминания дано и не отозвано позже."""
+        if self.opted_in_at is None:
+            return False
+        return self.opted_out_at is None or self.opted_out_at < self.opted_in_at
+
+
+def _optional_moment(value: _Value) -> dt.datetime | None:
+    return dt.datetime.fromisoformat(value) if isinstance(value, str) and value else None
+
+
+def _contact(row: _Row) -> ChannelContact:
+    return ChannelContact(
+        key=_text(row[0]),
+        channel=_text(row[1]),
+        user_id=_optional(row[2]),
+        phone=_optional(row[3]),
+        last_inbound_at=_moment(row[4]),
+        opted_in_at=_optional_moment(row[5]),
+        opted_out_at=_optional_moment(row[6]),
+    )
+
+
+def _int(value: _Value) -> int:
+    if not isinstance(value, int):
+        raise BookingError(f'повреждённое число в базе записей: {value!r}')
+    return value
+
+
 class _AlreadyClaimedError(BookingError):
     """Отметку напоминания уже поставил другой процесс."""
 
@@ -203,6 +337,8 @@ class BookingStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            if 'source' not in {row[1] for row in conn.execute(_CUSTOMER_COLUMNS)}:
+                conn.execute(_ADD_SOURCE)
 
     @property
     def path(self) -> Path:
@@ -262,6 +398,7 @@ class BookingStore:
         now: dt.datetime,
         buffer: dt.timedelta,
         max_active: int | None = None,
+        calendar_id: str | None = None,
     ) -> Booking:
         """Создаёт запись, если слот всё ещё свободен у этого мастера.
 
@@ -275,6 +412,7 @@ class BookingStore:
             now: Текущий момент.
             buffer: Пауза между записями мастера.
             max_active: Не больше стольких предстоящих записей у этого чата; None — без лимита.
+            calendar_id: Календарь Google, куда записать событие, или None.
 
         Returns:
             Созданная запись.
@@ -330,6 +468,8 @@ class BookingStore:
                     language,
                 ),
             )
+            if calendar_id is not None:
+                conn.execute(_CALENDAR_MARK, (booking.id, calendar_id, _ts(now)))
         return booking
 
     def get(self, booking_id: str) -> Booking | None:
@@ -386,6 +526,7 @@ class BookingStore:
         with self._write() as conn:
             booking = self._editable(conn, booking_id, now=now, by_admin=by_admin, customer=customer, notice=notice)
             conn.execute('UPDATE bookings SET status = ? WHERE id = ?', (BookingStatus.CANCELLED.value, booking_id))
+            conn.execute(_CALENDAR_TOUCH, (_ts(now), booking_id))
         return msgspec.structs.replace(booking, status=BookingStatus.CANCELLED)
 
     def reschedule(
@@ -433,6 +574,7 @@ class BookingStore:
                 (slot.staff_id, _ts(slot.start), _ts(slot.end), _ts(now), booking_id),
             )
             conn.execute('DELETE FROM reminders WHERE booking_id = ?', (booking_id,))
+            conn.execute(_CALENDAR_TOUCH, (_ts(now), booking_id))
         new = msgspec.structs.replace(old, staff_id=slot.staff_id, start=slot.start, end=slot.end, scheduled_at=now)
         return old, new
 
@@ -529,11 +671,17 @@ class BookingStore:
 
     def customer(self, key: str) -> Customer | None:
         """Что известно о покупателе, или None."""
-        rows = self._rows('SELECT key, name, phone, language FROM customers WHERE key = ?', (key,))
+        rows = self._rows('SELECT key, name, phone, language, source FROM customers WHERE key = ?', (key,))
         if not rows:
             return None
-        found, name, phone, language = rows[0][:4]
-        return Customer(key=_text(found), name=_optional(name), phone=_optional(phone), language=_optional(language))
+        found, name, phone, language, source = rows[0][:5]
+        return Customer(
+            key=_text(found),
+            name=_optional(name),
+            phone=_optional(phone),
+            language=_optional(language),
+            source=_optional(source),
+        )
 
     def find_customer(self, ref: str) -> str | None:
         """Ключ покупателя по ключу целиком (`tg:123`) или по номеру чата без префикса (`123`).
@@ -558,12 +706,134 @@ class BookingStore:
         return _text(rows[0][0]) if len(rows) == 1 else None
 
     def save_customer(self, customer: Customer, now: dt.datetime) -> None:
-        """Запоминает покупателя (поля None не затирают известные)."""
+        """Запоминает покупателя (поля None не затирают известные).
+
+        Источник (`source`) — первое касание: метка ссылки, по которой покупатель пришёл
+        впервые, не перезаписывается следующими ссылками. Так отчёт честно отвечает, какой
+        канал приводит новых клиентов.
+        """
         with self._write() as conn:
             conn.execute(
-                'INSERT INTO customers (key, name, phone, language, updated_at) VALUES (?, ?, ?, ?, ?) '
+                'INSERT INTO customers (key, name, phone, language, source, updated_at) VALUES (?, ?, ?, ?, ?, ?) '
                 'ON CONFLICT(key) DO UPDATE SET name = COALESCE(excluded.name, name), '
                 'phone = COALESCE(excluded.phone, phone), language = COALESCE(excluded.language, language), '
-                'updated_at = excluded.updated_at',
-                (customer.key, customer.name, customer.phone, customer.language, _ts(now)),
+                'source = COALESCE(source, excluded.source), updated_at = excluded.updated_at',
+                (customer.key, customer.name, customer.phone, customer.language, customer.source, _ts(now)),
             )
+
+    # Синхронизация с Google Calendar
+
+    def calendar_due(self, now: dt.datetime, limit: int) -> list[CalendarTask]:
+        """Записи, события которых пора привести в соответствие с базой.
+
+        Args:
+            now: Текущий момент (не раньше `next_try_at` после сбоя).
+            limit: Не больше стольких за проход.
+
+        Returns:
+            Задачи по времени постановки.
+        """
+        tasks: list[CalendarTask] = []
+        for row in self._rows(_CALENDAR_DUE, (_ts(now), limit)):
+            tasks.append(
+                CalendarTask(
+                    booking=_booking(row[:13]),
+                    calendar_id=_text(row[13]),
+                    event_id=_optional(row[14]),
+                    version=_int(row[15]),
+                    attempts=_int(row[16]),
+                )
+            )
+        return tasks
+
+    def calendar_done(self, booking_id: str, version: int, event_id: str | None) -> None:
+        """Отмечает успешную синхронизацию.
+
+        id события сохраняется всегда (оно уже есть в календаре), а отметка «ждёт синхронизации»
+        снимается, только если запись не менялась с начала прохода: перенос, сделанный пока шёл
+        запрос к Google, будет синхронизирован следующим проходом.
+
+        Args:
+            booking_id: Код записи.
+            version: Номер изменения, которое синхронизировали.
+            event_id: id события (None — события больше нет).
+        """
+        with self._write() as conn:
+            conn.execute('UPDATE calendar_sync SET event_id = ? WHERE booking_id = ?', (event_id, booking_id))
+            conn.execute(
+                'UPDATE calendar_sync SET pending = 0, attempts = 0 WHERE booking_id = ? AND version = ?',
+                (booking_id, version),
+            )
+
+    def calendar_failed(self, booking_id: str, version: int, next_try_at: dt.datetime) -> None:
+        """Откладывает повтор синхронизации после сбоя Google.
+
+        Args:
+            booking_id: Код записи.
+            version: Номер изменения, которое не удалось синхронизировать.
+            next_try_at: Когда попробовать снова.
+        """
+        with self._write() as conn:
+            conn.execute(
+                'UPDATE calendar_sync SET attempts = attempts + 1, next_try_at = ? WHERE booking_id = ? AND version = ?',
+                (_ts(next_try_at), booking_id, version),
+            )
+
+    def calendar_pending(self) -> int:
+        """Сколько записей ждут синхронизации с календарём (для `check` и тестов)."""
+        rows = self._rows('SELECT COUNT(*) FROM calendar_sync WHERE pending = 1', ())
+        value = rows[0][0] if rows else 0
+        return value if isinstance(value, int) else 0
+
+    # Контакты каналов (WhatsApp)
+
+    def touch_contact(
+        self, channel: str, *, user_id: str | None, phone: str | None, at: dt.datetime, new_key: str
+    ) -> ChannelContact:
+        """Находит покупателя канала по BSUID или телефону (или заводит) и отмечает входящее.
+
+        Args:
+            channel: Канал (`whatsapp`).
+            user_id: BSUID или None.
+            phone: wa_id или None.
+            at: Когда покупатель написал (начало 24-часового окна).
+            new_key: Ключ для нового покупателя (случайный; вызывающий его придумал).
+
+        Returns:
+            Контакт с постоянным ключом и обновлённым временем входящего.
+
+        Raises:
+            BookingError: Нет ни BSUID, ни телефона.
+        """
+        if not user_id and not phone:
+            raise BookingError('у входящего сообщения нет ни BSUID, ни телефона')
+        with self._write() as conn:
+            row = conn.execute(_CONTACT_BY_USER, (channel, user_id)).fetchone() if user_id else None
+            if row is None and phone:
+                row = conn.execute(_CONTACT_BY_PHONE, (channel, phone)).fetchone()
+            if row is None:
+                key = new_key
+                conn.execute(_CONTACT_INSERT, (key, channel, user_id, phone, _ts(at)))
+            else:
+                key = _text(row[0])
+                conn.execute(_CONTACT_UPDATE, (user_id, phone, _ts(at), key))
+            found = conn.execute(_CONTACT_BY_KEY, (key,)).fetchone()
+        if found is None:  # pragma: no cover - строку только что вставили или нашли в той же транзакции
+            raise BookingError(f'контакт {key} пропал из базы')
+        return _contact(tuple(found))
+
+    def contact(self, key: str) -> ChannelContact | None:
+        """Контакт канала по ключу чата или None."""
+        rows = self._rows(_CONTACT_BY_KEY, (key,))
+        return _contact(rows[0]) if rows else None
+
+    def set_consent(self, key: str, *, subscribed: bool, now: dt.datetime) -> None:
+        """Отмечает согласие на напоминания или отписку («STOP»).
+
+        Args:
+            key: Ключ чата.
+            subscribed: True — согласие, False — отписка.
+            now: Текущий момент.
+        """
+        with self._write() as conn:
+            conn.execute(_OPT_IN if subscribed else _OPT_OUT, (_ts(now), key))

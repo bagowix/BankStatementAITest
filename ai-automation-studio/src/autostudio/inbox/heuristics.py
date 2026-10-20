@@ -1,8 +1,9 @@
 """Эвристики `FakeLLM` для пакета inbox: демо и тесты работают без ключа и без сети.
 
 Это «модель» на ключевых словах (en + ru): она читает ровно то, что получила бы
-настоящая модель — системный промпт с категориями и письмо в рамке `<email>`, — и
-отвечает по той же схеме `Triage`. Поэтому её ответ проходит ту же проверку кодом.
+настоящая модель — системный промпт с категориями и письмо в рамке `<email>` или текст
+PDF в рамке `<document>`, — и отвечает по тем же схемам `Triage` и `InvoiceFields`.
+Поэтому её ответ проходит ту же проверку кодом.
 """
 
 import re
@@ -10,6 +11,7 @@ from collections.abc import Sequence
 from typing import Final
 
 from autostudio.inbox.config import FALLBACK_CATEGORY, Urgency
+from autostudio.inbox.invoices import InvoiceFields, InvoiceLine
 from autostudio.inbox.triage import Triage, guess_language
 from autostudio.llm import FakeLLM
 
@@ -292,6 +294,68 @@ def draft_heuristic(system: str, prompt: str) -> str:
     return '\n'.join(lines)
 
 
+_INVOICE_NUMBER: Final = re.compile(r'invoice\s*(?:no\.?|number|#)\s*:?\s*([A-Za-z0-9][\w\-/]*)', re.I)
+_INVOICE_DATE: Final = re.compile(r'(?:invoice\s+date|date\s+of\s+issue|issued)\s*:?\s*(\d{4}-\d{2}-\d{2})', re.I)
+_DUE_DATE: Final = re.compile(r'due(?:\s+date)?\s*:?\s*(\d{4}-\d{2}-\d{2})', re.I)
+_TOTAL: Final = re.compile(r'^\s*(?:grand\s+)?total(?:\s+due)?\s*:?\s*(.+)$', re.I | re.M)
+_TAX: Final = re.compile(r'^\s*(?:vat|tax)\b[^:\n]*:\s*(.+)$', re.I | re.M)
+_ITEM: Final = re.compile(
+    r'^(?P<desc>.+?)\s+(?P<qty>\d+(?:[.,]\d+)?)\s*x\s*(?P<unit>[\d.,]+)\s*=\s*(?P<amount>[\d.,]+)\s*$', re.M
+)
+_NUMBER_TEXT: Final = re.compile(r'\d[\d.,\s]*\d|\d')
+_CURRENCY: Final = re.compile(r'\b(GEL|USD|EUR|GBP)\b')
+
+
+def _first(pattern: re.Pattern[str], text: str) -> str | None:
+    match = pattern.search(text)
+    return match.group(1).strip() if match else None
+
+
+def _amount_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    match = _NUMBER_TEXT.search(value)
+    return match.group(0).strip() if match else None
+
+
+def invoice_heuristic(system: str, prompt: str) -> InvoiceFields:
+    """Читает счёт регулярными выражениями — замена модели для демо и тестов.
+
+    Как и модель, только копирует напечатанное: ничего не считает и не исправляет, поэтому
+    счёт, строки которого не сходятся с итогом, она возвращает как есть — ловит это код.
+
+    Args:
+        system: Системный промпт извлечения счёта.
+        prompt: Текст PDF в рамке `<document>`.
+
+    Returns:
+        Ответ по схеме `InvoiceFields`.
+    """
+    inner = prompt.split('<document>', 1)[-1].split('</document>', 1)[0].strip('\n')
+    _, _, text = inner.partition('\n\n')
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    items = [
+        InvoiceLine(
+            description=match.group('desc').strip(),
+            quantity=match.group('qty'),
+            unit_price=match.group('unit'),
+            amount=match.group('amount'),
+        )
+        for match in _ITEM.finditer(text)
+    ]
+    currency = _CURRENCY.search(text)
+    return InvoiceFields(
+        vendor=lines[0] if lines else None,
+        invoice_number=_first(_INVOICE_NUMBER, text),
+        invoice_date=_first(_INVOICE_DATE, text),
+        due_date=_first(_DUE_DATE, text),
+        currency=currency.group(1) if currency else None,
+        total=_amount_text(_first(_TOTAL, text)),
+        tax=_amount_text(_first(_TAX, text)),
+        lines=items,
+    )
+
+
 def make_fake_llm() -> FakeLLM:
-    """`FakeLLM` с эвристиками пакета inbox: схема `Triage` и черновики."""
-    return FakeLLM(extractors={Triage: triage_heuristic}, writer=draft_heuristic)
+    """`FakeLLM` с эвристиками пакета inbox: схемы `Triage`, `InvoiceFields` и черновики."""
+    return FakeLLM(extractors={Triage: triage_heuristic, InvoiceFields: invoice_heuristic}, writer=draft_heuristic)

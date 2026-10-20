@@ -3,6 +3,9 @@
 Сэкономленное время считается только за проверки: открыть страницу конкурента, найти
 цену и перенести её в таблицу — около двух минут у человека. Изменения и «дешевле вас»
 — это ценность, а не минуты, поэтому они в отчёте идут счётчиками без минут.
+
+Сайты на паузе (претензия владельца) клиент видит в отчёте прямо: «не проверялись», а не
+тихая дыра в таблице.
 """
 
 from collections import Counter
@@ -37,6 +40,10 @@ METRICS: Final[list[MetricSpec]] = [
         kind='prices.failed',
         label={'en': 'Pages that could not be checked', 'ru': 'Страницы, которые не удалось проверить'},
     ),
+    MetricSpec(
+        kind='prices.paused',
+        label={'en': 'Checks with a competitor site on pause', 'ru': 'Проверки, когда сайт конкурента был на паузе'},
+    ),
 ]
 
 _TEXT: Final[dict[str, dict[str, str]]] = {
@@ -45,12 +52,14 @@ _TEXT: Final[dict[str, dict[str, str]]] = {
         'aggressive': 'Most active competitor: {name} — price cuts: {cuts}, cheaper than you: {under} times',
         'expensive': 'Where you were the most expensive: {items}',
         'expensive_item': '{product} (the cheapest competitor is {pct}% below you)',
+        'paused': 'Not checked: monitoring of {sites} is paused',
     },
     'ru': {
         'changes': 'Замечено изменений цен: {n}',
         'aggressive': 'Самый активный конкурент: {name} — снижений цены: {cuts}, дешевле вас: {under} раз(а)',
         'expensive': 'Где вы были дороже всех: {items}',
         'expensive_item': '{product} (самый дешёвый конкурент на {pct}% ниже вас)',
+        'paused': 'Не проверялись: мониторинг {sites} на паузе',
     },
 }
 _TOP: Final = 3
@@ -76,7 +85,8 @@ def highlights(events: Sequence[Event], language: str) -> list[str]:
 
     Returns:
         Строки для отчёта: сколько изменений поймано, самый активный конкурент, товары,
-        где клиент дороже всех (по последней проверке месяца).
+        где клиент дороже всех (по последней проверке месяца), сайты на паузе (по последнему
+        проходу месяца, где они были).
     """
     t = _TEXT[texts.lang(language)]
     out: list[str] = []
@@ -119,4 +129,7 @@ def highlights(events: Sequence[Event], language: str) -> list[str]:
             for diff, product in expensive[:_TOP]
         )
         out.append(t['expensive'].format(items=items))
+    paused = [event for event in events if event.kind == 'prices.paused' and event.payload.get('sites')]
+    if paused:
+        out.append(t['paused'].format(sites=paused[-1].payload['sites']))
     return out

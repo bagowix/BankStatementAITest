@@ -9,22 +9,30 @@
 недоступен, запись всё равно создаётся, строка повторяется со следующей, а вкладка
 `Schedule` догонит состояние при ежечасном обновлении (и при сбое — сигнал оператору
 через `supervised_run`).
+
+Google Calendar (если настроен) участвует дважды: его занятость берётся перед ответом
+покупателю (`refresh_busy`) и передаётся в чистый расчёт слотов как данные, а событие
+записи пишется в фоне (`calsync.CalendarSync`) по отметке, поставленной в той же
+транзакции, что и запись.
 """
 
 import datetime as dt
 from collections.abc import Mapping
 from typing import Final
 
+from autostudio.booking.calsync import CalendarAvailability, CalendarSync
 from autostudio.booking.config import WEEKDAYS, BookingConfig
 from autostudio.booking.domain import (
     Booking,
     BookingNotFoundError,
+    BusyMap,
     Customer,
     Slot,
     SlotTakenError,
     Source,
     TimeWindow,
     bookable_days,
+    clean_source,
     find_slot,
     format_phone,
     free_slots,
@@ -33,14 +41,16 @@ from autostudio.booking.domain import (
     nearest_slots,
     next_free_slots,
 )
+from autostudio.booking.messages import channel_of
 from autostudio.booking.mirror import SheetMirror
 from autostudio.booking.store import BookingStore
 from autostudio.booking.texts import BOOKINGS_HEADER, Texts
 from autostudio.events import EventLog
-from autostudio.sinks import TableSink
+from autostudio.sinks import Cell, TableSink
 
 PACKAGE: Final = 'booking'
 WALK_IN_EVENT: Final = 'booking.walk_in'
+LINK_EVENT: Final = 'booking.link_opened'
 BOOKINGS_TAB: Final = 'Bookings'
 SCHEDULE_TAB: Final = 'Schedule'
 
@@ -55,6 +65,8 @@ class BookingService:
         sink: Таблица владельца.
         texts: Тексты (язык владельца для таблицы и журнала).
         mirror: Фоновая запись строк в таблицу; по умолчанию — поверх `sink`.
+        availability: Занятость из Google Calendar или None.
+        calendar_sync: Запись событий в Google Calendar или None.
     """
 
     def __init__(
@@ -66,12 +78,17 @@ class BookingService:
         sink: TableSink,
         texts: Texts,
         mirror: SheetMirror | None = None,
+        availability: CalendarAvailability | None = None,
+        calendar_sync: CalendarSync | None = None,
     ) -> None:
         self._config = config
         self._store = store
         self._events = events
         self._mirror = mirror or SheetMirror(sink)
         self._texts = texts
+        self._availability = availability
+        self._calendar_sync = calendar_sync
+        self._busy: BusyMap = {}
 
     @property
     def config(self) -> BookingConfig:
@@ -81,9 +98,52 @@ class BookingService:
     def store(self) -> BookingStore:
         return self._store
 
+    @property
+    def busy(self) -> BusyMap:
+        """Занятость из календаря, полученная последним `refresh_busy`."""
+        return self._busy
+
     async def drain(self) -> None:
-        """Дожидается фоновой записи строк в таблицу (остановка процесса, демо, тесты)."""
+        """Дожидается фоновой записи строк в таблицу и событий в календарь (остановка, демо, тесты)."""
         await self._mirror.drain()
+        if self._calendar_sync is not None:
+            await self._calendar_sync.drain()
+
+    async def refresh_busy(self, now: dt.datetime) -> None:
+        """Берёт занятость из Google Calendar перед ответом покупателю (кеш — в `CalendarAvailability`).
+
+        Расчёт слотов остаётся синхронным и чистым: он получает этот снимок как данные.
+        """
+        if self._availability is not None:
+            self._busy = await self._availability.busy(self.bookings(now), now)
+
+    def note_source(self, user: str, raw: str | None, now: dt.datetime) -> str | None:
+        """Запоминает, откуда пришёл покупатель (deep link, реклама), и пишет событие для отчёта.
+
+        Args:
+            user: Ключ чата.
+            raw: Метка от адаптера канала (как есть).
+            now: Текущий момент.
+
+        Returns:
+            Принятая метка или None (мусор отброшен).
+        """
+        source = clean_source(raw)
+        if source is None:
+            return None
+        self._store.save_customer(Customer(key=user, source=source), now)
+        self.record(LINK_EVENT, now, {'source': source, 'channel': channel_of(user)})
+        return source
+
+    def _calendar_for(self, staff_id: str) -> str | None:
+        section = self._config.booking.calendar
+        if section is None or not section.write_events:
+            return None
+        return section.calendar_for(staff_id)
+
+    def _sync_calendar(self) -> None:
+        if self._calendar_sync is not None:
+            self._calendar_sync.kick()
 
     def bookings(self, now: dt.datetime) -> list[Booking]:
         """Активные записи на весь горизонт (с запасом в сутки по краям)."""
@@ -96,7 +156,14 @@ class BookingService:
     ) -> list[Slot]:
         """Свободные слоты дня (см. `domain.free_slots`)."""
         return free_slots(
-            self._config, service_id, day, self.bookings(now), now, staff_id=staff_id, ignore_booking=ignore
+            self._config,
+            service_id,
+            day,
+            self.bookings(now),
+            now,
+            staff_id=staff_id,
+            ignore_booking=ignore,
+            busy=self._busy,
         )
 
     def bookable_days(
@@ -119,6 +186,7 @@ class BookingService:
             start_day=start_day,
             limit=limit,
             ignore_booking=ignore,
+            busy=self._busy,
         )
 
     def next_slots(
@@ -141,6 +209,7 @@ class BookingService:
             staff_id=staff_id,
             start_day=start_day,
             window=window,
+            busy=self._busy,
         )
 
     def nearest(
@@ -163,13 +232,16 @@ class BookingService:
             limit=limit,
             staff_id=staff_id,
             ignore_booking=ignore,
+            busy=self._busy,
         )
 
     def find(
         self, service_id: str, staff_id: str | None, start: dt.datetime, now: dt.datetime, *, ignore: str | None = None
     ) -> Slot | None:
         """Свободен ли ещё этот слот (см. `domain.find_slot`)."""
-        return find_slot(self._config, service_id, staff_id, start, self.bookings(now), now, ignore_booking=ignore)
+        return find_slot(
+            self._config, service_id, staff_id, start, self.bookings(now), now, ignore_booking=ignore, busy=self._busy
+        )
 
     async def book(
         self,
@@ -213,6 +285,8 @@ class BookingService:
                 **self._service_payload(booking),
                 'staff': booking.staff_id,
                 'source': source,
+                'channel': channel_of(booking.customer),
+                'came_from': (customer.source or '') if source != 'admin' else '',
                 'weekday': WEEKDAYS[booking.start.astimezone(self._config.client.zone).weekday()],
                 'hour': f'{booking.start.astimezone(self._config.client.zone).hour:02d}',
                 'after_hours': 'no' if is_open_at(self._config, now) else 'yes',
@@ -220,6 +294,7 @@ class BookingService:
             },
         )
         self._log_row('action_created', booking, now)
+        self._sync_calendar()
         return booking
 
     def _create(
@@ -249,6 +324,7 @@ class BookingService:
                     now=now,
                     buffer=buffer,
                     max_active=max_active,
+                    calendar_id=self._calendar_for(slot.staff_id),
                 )
             except SlotTakenError:
                 if staff_id is not None or attempt:
@@ -281,6 +357,7 @@ class BookingService:
             {**self._service_payload(booking), 'by': 'admin' if by_admin else 'customer'},
         )
         self._log_row('action_cancelled', booking, now)
+        self._sync_calendar()
         return booking
 
     async def reschedule(
@@ -331,6 +408,7 @@ class BookingService:
             {**self._service_payload(new), 'by': 'admin' if by_admin else 'customer'},
         )
         self._log_row('action_rescheduled', new, now)
+        self._sync_calendar()
         return old, new
 
     @property
@@ -346,12 +424,15 @@ class BookingService:
         language = self._config.owner_language
         return {'service': booking.service_id, 'service_name': self._texts.service_name(booking.service_id, language)}
 
-    def sheet_row(self, action_key: str, booking: Booking, now: dt.datetime) -> list[str]:
-        """Строка вкладки `Bookings` на языке владельца."""
+    def sheet_row(self, action_key: str, booking: Booking, now: dt.datetime) -> list[Cell]:
+        """Строка вкладки `Bookings` на языке владельца.
+
+        Цена — числом (`Decimal`), валюта — отдельной колонкой: владелец суммирует выручку в
+        таблице без VALUE() и разбора «40 GEL».
+        """
         language = self._config.owner_language
         texts = self._texts
         service = self._config.booking.service(booking.service_id)
-        price = '' if service is None else texts.money(service.price, service.currency)
         local = texts.local(booking.start)
         return [
             f'{texts.local(now):%Y-%m-%d %H:%M}',
@@ -363,8 +444,10 @@ class BookingService:
             texts.staff_name(booking.staff_id),
             booking.name,
             format_phone(booking.phone),
-            price,
+            '' if service is None else service.price,
+            '' if service is None else service.currency,
             texts.get(language, f'source_{booking.source}'),
+            texts.get(language, f'channel_{channel_of(booking.customer)}'),
         ]
 
     def _log_row(self, action_key: str, booking: Booking, now: dt.datetime) -> None:

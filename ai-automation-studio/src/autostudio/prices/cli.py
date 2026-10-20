@@ -1,6 +1,7 @@
 """Команды монитора цен: `autostudio prices check | run | probe | demo`."""
 
 import asyncio
+import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
@@ -10,12 +11,13 @@ import cyclopts
 import httpx
 from dishka import Provider, make_async_container
 
-from autostudio.clientconf import load_client_config
+from autostudio.clientconf import load_client_config, load_sibling_env
 from autostudio.clock import Clock
 from autostudio.errors import AutoStudioError, ConfigError
 from autostudio.llm import LLMClient, make_llm
 from autostudio.prices import texts
-from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product
+from autostudio.prices.capacity import Capacity, capacity, duration_text
+from autostudio.prices.config import PARALLEL_SITES, Offer, PricesConfig, PricesSection, Product
 from autostudio.prices.demo import run_demo
 from autostudio.prices.extract import (
     ExtractionFailure,
@@ -31,8 +33,10 @@ from autostudio.prices.monitor import PricesDeps, RunResult, run_once
 from autostudio.prices.providers import PricesProvider
 from autostudio.prices.urls import redact
 from autostudio.providers import CoreProvider, OperatorAlerts
-from autostudio.runlog import Heartbeat, supervised_run
+from autostudio.runlog import Heartbeat, RunSkipped, supervised_run
 from autostudio.settings import LLMProvider, Settings
+
+logger = logging.getLogger(__name__)
 
 app = cyclopts.App(name='prices', help='Монитор цен конкурентов → Google Sheets + уведомления.')
 
@@ -43,6 +47,8 @@ _RESERVED_DOMAINS: Final = frozenset({'example.com', 'example.org', 'example.net
 _HOUR_S: Final = 3600.0
 _MIN_EVERY_HOURS: Final = 1.0
 _MAX_EVERY_HOURS: Final = 24.0 * 7
+_SHOWN_SITES: Final = 10
+SKIPPED: Final = 'prices: пропущено — предыдущий проход по этому клиенту ещё идёт'
 
 type Sleeper = Callable[[float], Awaitable[None]]
 
@@ -56,6 +62,8 @@ def offer_table(config: PricesConfig) -> str:
             rung = (
                 f'selector {offer.selector}' + (f' @{offer.attr}' if offer.attr else '') if offer.selector else 'auto'
             )
+            if config.prices.paused_site(offer.url) is not None:
+                rung = f'PAUSED ({rung})'
             host = httpx.URL(offer.url).host
             rows.append((product.id, own, offer.competitor, host, rung, offer.currency or 'from page'))
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
@@ -101,6 +109,58 @@ def environment_report(config: PricesConfig, environ: Mapping[str, str]) -> tupl
     if not config.prices.respect_robots:
         notes.append('respect_robots = false: только с письменного разрешения владельцев сайтов')
     return problems, notes
+
+
+def _check_every_hours(every_hours: float | None) -> None:
+    if every_hours is not None and not _MIN_EVERY_HOURS <= every_hours <= _MAX_EVERY_HOURS:
+        raise ConfigError(f'--every-hours={every_hours}: допустимо от 1 до 168 (чаще раза в час сайты не мучаем)')
+
+
+def capacity_report(load: Capacity, section: PricesSection) -> list[str]:
+    """Нагрузка на сайты для `check`: самые загруженные сайты и длина прохода.
+
+    Args:
+        load: Результат `capacity`.
+        section: Секция `[prices]` (пауза между запросами и robots.txt — для подписи).
+
+    Returns:
+        Строки отчёта (предупреждения — отдельно, в `load.warnings`).
+    """
+    robots = ', плюс robots.txt' if section.respect_robots else ''
+    out = [f'Нагрузка на сайты (пауза {section.min_delay_s:g} с между запросами{robots}; без Crawl-delay):']
+    for site in load.sites[:_SHOWN_SITES]:
+        out.append(
+            f'  {httpx.URL(site.site).host:<32} ссылок {site.offers}, запросов за проход {site.requests}, '
+            f'≈ {duration_text(site.pass_s)}, до {site.per_hour} запросов/ч'
+        )
+    if len(load.sites) > _SHOWN_SITES:
+        out.append(f'  … и ещё сайтов: {len(load.sites) - _SHOWN_SITES}')
+    schedule = (
+        f'расписание — раз в {load.interval_s / _HOUR_S:g} ч'
+        if load.interval_s is not None
+        else 'расписание не задано (check --every-hours N сверит его)'
+    )
+    out.append(
+        f'Весь проход ≈ {duration_text(load.total_s)} (сайтов одновременно до {PARALLEL_SITES}); '
+        f'без наложений — не чаще раза в {load.min_every_hours} ч; {schedule}'
+    )
+    return out
+
+
+def paused_notes(config: PricesConfig) -> list[str]:
+    """Сайты на паузе: что не проверяется и почему (замечания `check`, не ошибки)."""
+    section = config.prices
+    counts: dict[str, int] = {}
+    for product in section.products:
+        for offer in product.offers:
+            site = section.paused_site(offer.url)
+            if site is not None:
+                counts[site] = counts.get(site, 0) + 1
+    return [
+        f'сайт {site} на паузе ({section.sites[site].paused_reason or "причина не указана"}): '
+        f'ссылок не проверяется: {count}'
+        for site, count in sorted(counts.items())
+    ]
 
 
 def _reserved(host: str) -> bool:
@@ -150,19 +210,29 @@ def readiness_report(config: PricesConfig) -> list[str]:
 
 
 @app.command
-def check(config: Path, *, strict: bool = False) -> None:
-    """Проверяет конфиг и окружение без сети и без записи; печатает таблицу ссылок.
+def check(config: Path, *, strict: bool = False, every_hours: float | None = None) -> None:
+    """Проверяет конфиг и окружение без сети и без записи; печатает таблицу ссылок и нагрузку на сайты.
 
     Args:
-        config: TOML-конфиг клиента.
+        config: TOML-конфиг клиента (`.env` клиента рядом с ним подхватывается).
         strict: Считать проблемой и то, что не даст клиенту пользы (csv, адреса из образца,
-            товары без ссылок и без своей цены) — перед первым боевым запуском.
+            товары без ссылок и без своей цены, проход не укладывается в пределы) — перед
+            первым боевым запуском.
+        every_hours: Плановый интервал проходов (таймер или `run --every-hours`): с ним
+            сверяется длительность прохода.
     """
+    _check_every_hours(every_hours)
+    # До Settings.from_env: вне Docker окружение клиента лежит в clients/<id>/.env.
+    load_sibling_env(config)
     loaded = load_client_config(config, PricesConfig)
     print(offer_table(loaded))
     print(f'\n{len(loaded.prices.products)} товаров, {loaded.prices.offer_count} ссылок, клиент {loaded.client.id}')
+    load = capacity(loaded.prices, every_hours=every_hours)
+    print('\n'.join(['', *capacity_report(load, loaded.prices), '']))
     problems, notes = environment_report(loaded, os.environ)
-    readiness = readiness_report(loaded)
+    notes += paused_notes(loaded)
+    # Перегруз сайта — как недозаполненный образец: запуск пройдёт, но клиенту (и сайту) хуже.
+    readiness = readiness_report(loaded) + list(load.warnings)
     if strict:
         problems += readiness
     else:
@@ -181,13 +251,12 @@ def check(config: Path, *, strict: bool = False) -> None:
 
 def summary(result: RunResult) -> str:
     """Одна строка итога запуска для лога cron/systemd."""
-    if result.skipped:
-        return 'prices: пропущено — предыдущий проход по этому клиенту ещё идёт'
     failures = ', '.join(f'{reason} {count}' for reason, count in sorted(result.failures.items()))
     tokens = result.llm_input_tokens + result.llm_output_tokens
     return (
         f'prices: прочитано {result.checked}, не прочитано {result.failed}'
         + (f' ({failures})' if failures else '')
+        + (f', на паузе {result.paused}' if result.paused else '')
         + f', событий {len(result.changes)}, страниц модели {result.llm_pages}'
         # Себестоимость клиента для оператора: токены модели за проход.
         + (f', токенов модели {result.llm_input_tokens} вх. / {result.llm_output_tokens} вых.' if tokens else '')
@@ -212,10 +281,14 @@ async def serve(
         max_cycles: Ограничение числа проходов (для тестов).
 
     Returns:
-        True, если последний проход завершился без ошибки пакета.
+        True, если последний проход завершился без ошибки пакета (или был сознательно
+        пропущен: другой проход ещё держит замок клиента).
     """
     settings = Settings.from_env(os.environ)
     config = load_client_config(config_path, PricesConfig)
+    for warning in capacity(config.prices, every_hours=every_hours).warnings:
+        # Не стоп: оператор узнаёт из лога, что сайт перегружен или проход не успеет.
+        logger.warning('prices %s: ёмкость: %s', config.client.id, warning)
     container = make_async_container(CoreProvider(), provider(), context={Settings: settings, PricesConfig: config})
     try:
         deps = await container.get(PricesDeps)
@@ -224,9 +297,20 @@ async def serve(
         clock = await container.get(Clock)
         cycles = 0
         while True:
+            skipped = False
+
+            async def job() -> RunResult:
+                nonlocal skipped
+                try:
+                    return await run_once(config, deps, clock())
+                except RunSkipped:
+                    # supervised_run вернёт None и на пропуск, и на сбой — а это разные исходы.
+                    skipped = True
+                    raise
+
             result = await supervised_run(
                 package='prices',
-                job=lambda: run_once(config, deps, clock()),
+                job=job,
                 events=deps.events,
                 heartbeat=heartbeat,
                 operator=operator.notifier,
@@ -235,9 +319,11 @@ async def serve(
             )
             if result is not None:
                 print(summary(result), flush=True)
+            elif skipped:
+                print(SKIPPED, flush=True)
             cycles += 1
             if every_hours is None or (max_cycles is not None and cycles >= max_cycles):
-                return result is not None
+                return result is not None or skipped
             await sleep(every_hours * _HOUR_S)
     finally:
         await container.close()
@@ -248,11 +334,11 @@ def run(config: Path, *, every_hours: float | None = None) -> None:
     """Боевой запуск: один проход (для cron или systemd timer) или цикл каждые N часов.
 
     Args:
-        config: TOML-конфиг клиента.
+        config: TOML-конфиг клиента (`.env` клиента рядом с ним подхватывается).
         every_hours: Повторять каждые N часов (1–168); без флага — один проход.
     """
-    if every_hours is not None and not _MIN_EVERY_HOURS <= every_hours <= _MAX_EVERY_HOURS:
-        raise ConfigError(f'--every-hours={every_hours}: допустимо от 1 до 168 (чаще раза в час сайты не мучаем)')
+    _check_every_hours(every_hours)
+    load_sibling_env(config)
     if not asyncio.run(serve(config, every_hours=every_hours)):
         raise AutoStudioError('проход монитора завершился ошибкой — подробности в журнале, оператор уведомлён')
 
@@ -364,12 +450,14 @@ def probe(
         selector: Проверить CSS-селектор цены.
         attr: Читать атрибут элемента вместо текста.
         currency: Валюта магазина (если на странице её нет или это «$»).
-        config: Конфиг клиента — взять из него User-Agent, паузы и robots.
+        config: Конфиг клиента — взять из него User-Agent, паузы, robots и сайты на паузе
+            (и `.env` клиента рядом с ним).
         contact_email: Адрес для User-Agent, если конфига нет (или AUTOSTUDIO_PRICES_CONTACT_EMAIL).
         llm: Спросить и модель (платная ступень; с провайдером fake — эвристика).
     """
     offer = Offer(competitor='probe', url=url, selector=selector, attr=attr, currency=currency)
     if config is not None:
+        load_sibling_env(config)
         section = load_client_config(config, PricesConfig).prices
     else:
         email = contact_email or os.environ.get(_CONTACT_ENV, '')

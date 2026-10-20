@@ -1,0 +1,34 @@
+# Письмо со счётом, который сходится: строки 300 + 900 = 1 200, НДС 18% = 216, итог 1 416.
+# PDF собирается из строк `pdf` при запуске демо и тестов (autostudio.inbox.samples) —
+# бинарных файлов в репозитории нет.
+message_id = "<inv-kt-2026-117@kazbegi-transfers.example>"
+date = "Tue, 20 Oct 2026 08:20:00 +0400"
+from = "Kazbegi Transfers <billing@kazbegi-transfers.example>"
+to = "info@demotours.example"
+subject = "Invoice KT-2026-117 for October transfers"
+body = """Hello Demo Tours team,
+
+Please find attached our invoice KT-2026-117 for the October transfers.
+Payment due by 30 October 2026.
+
+Thank you,
+Levan
+Kazbegi Transfers
+"""
+filename = "KT-2026-117.pdf"
+pdf = [
+    "KAZBEGI TRANSFERS LLC",
+    "Rustaveli Ave 12, Tbilisi, Georgia",
+    "TAX INVOICE",
+    "Invoice No: KT-2026-117",
+    "Invoice date: 2026-10-15",
+    "Due date: 2026-10-30",
+    "Bill to: Demo Tours",
+    "",
+    "Airport transfer TBS - Tbilisi   4 x 75.00 = 300.00",
+    "Kazbegi day trip, minivan with driver   2 x 450.00 = 900.00",
+    "",
+    "Subtotal: 1,200.00 GEL",
+    "VAT 18%: 216.00 GEL",
+    "Total due: 1,416.00 GEL",
+]

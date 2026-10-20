@@ -1,7 +1,8 @@
 """Один запуск разбора почты: новые письма → разбор → действия → таблица → журнал.
 
 Порядок для каждого письма: скачать (PEEK) → разобрать → правила → модель →
-проверка кодом → черновик / копия в папку / уведомление владельцу / сигнал оператору.
+проверка кодом → черновик / копия в папку / уведомление владельцу / счёт из PDF / сигнал
+оператору.
 Каждое выполненное действие отмечается сразу, поэтому повтор после сбоя доделывает
 только недостающее. Строки таблицы пишутся одной пачкой в конце запуска (лимиты
 Google Sheets) и хранятся в SQLite, пока запись не удалась.
@@ -12,8 +13,9 @@ Google Sheets) и хранятся в SQLite, пока запись не уда�
 засчитывается, после `MAX_ATTEMPTS` письмо закрывается — с разбором и пометкой, какой шаг
 не прошёл, или строкой «нужна ручная проверка», если разобрать его не удалось вовсе.
 Если зависимость не работала ни разу, письмо не виновато и ждёт, а запуск сообщает об
-ошибке (оператору — через `supervised_run`). Недоступность модели (сеть, ключ, лимит,
-перегрузка) письму не засчитывается никогда. Разобранное письмо ждёт сломанный канал не
+ошибке (оператору — через `supervised_run`). Недоступность модели (сеть, лимит, перегрузка —
+`LLMError.kind == 'outage'`) и поломка настройки (ключ, права, имя модели — `'config'`)
+письму не засчитываются никогда. Разобранное письмо ждёт сломанный канал не
 дольше `OUTAGE_GRACE`, потом закрывается с пометкой. Отказ модели на конкретном письме
 (HTTP 400, отказ, ответ не по схеме) — вина письма, только если в этом же запуске модель
 ответила: на другое письмо или на проверочный запрос с безобидным письмом. Иначе это
@@ -38,12 +40,14 @@ from autostudio.inbox import texts
 from autostudio.inbox.config import URGENCY_RANK, Category, InboxConfig
 from autostudio.inbox.errors import MailboxError
 from autostudio.inbox.imap import FolderState, MailBox
+from autostudio.inbox.invoices import InvoiceRecord, extract_invoices
 from autostudio.inbox.mail import GENERATED_ID_DOMAIN, ParsedEmail, compose_reply, parse_email
-from autostudio.inbox.sheet import build_row, failure_row
+from autostudio.inbox.sheet import build_row, failure_row, invoice_row, sender_cell
 from autostudio.inbox.store import Envelope, InboxStore, StoredMessage
 from autostudio.inbox.triage import Draft, TriageResult, probe_model, triage_email, write_draft
 from autostudio.llm import LLMClient
 from autostudio.notify import Notifier
+from autostudio.runlog import RunSkipped
 from autostudio.sinks import TableSink
 
 logger = logging.getLogger(__name__)
@@ -63,10 +67,6 @@ OUTAGE_GRACE: Final = dt.timedelta(hours=24)
 FIRST_RUN_QUIET: Final = dt.timedelta(hours=24)
 LOW_CONFIDENCE: Final = 0.5
 _UNREADABLE_PREFIX: Final = 65_536
-# HTTP-коды, при которых модель недоступна вообще (ключ, лимит, перегрузка), а не отказала
-# на этом письме. Без кода ядро пишет «недоступен» только для обрыва связи.
-_OUTAGE_CODES: Final = frozenset({401, 403, 404, 408, 409, 429})
-_OUTAGE_TEXT: Final = 'недоступен'
 _BREAKER_CAUSES: Final = frozenset({'model', 'mailbox'})
 # После стольких отказов канала подряд (без единого успеха) остальные письма запуска его
 # уже не ждут. Один отказ ничего не значит: бывает, что канал отверг одно сообщение.
@@ -115,6 +115,7 @@ class EmailOutcome(msgspec.Struct, frozen=True, kw_only=True):
     injection: bool = False
     quiet: bool = False
     corrected: list[str] = msgspec.field(default_factory=list)
+    invoices: list[str] = msgspec.field(default_factory=list)
     error: str | None = None
 
 
@@ -122,14 +123,15 @@ class RunResult(msgspec.Struct, frozen=True, kw_only=True):
     """Итог запуска.
 
     Attributes:
-        locked: Запуск не начался: идёт другой.
+        invoices_verified: Счетов, которые сошлись (итог в PDF, строки с итогом).
+        invoices_unverified: Счетов не сверено: не сошлись или не разбирались (скан, шифр).
+        invoice_rows: Строк записано во вкладку счетов.
         aborted: Причина остановки по серии сбоев или None.
         errors: Общие ошибки (таблица или канал недоступны) — данные не потеряны, повторятся.
     """
 
     folder: str
     uidvalidity: int | None = None
-    locked: bool = False
     fetched: int = 0
     processed: int = 0
     skipped: int = 0
@@ -141,6 +143,9 @@ class RunResult(msgspec.Struct, frozen=True, kw_only=True):
     injections: int = 0
     llm_calls: int = 0
     sheet_rows: int = 0
+    invoices_verified: int = 0
+    invoices_unverified: int = 0
+    invoice_rows: int = 0
     by_category: dict[str, int] = msgspec.field(default_factory=dict)
     outcomes: list[EmailOutcome] = msgspec.field(default_factory=list)
     aborted: str | None = None
@@ -159,6 +164,7 @@ class _Failure(msgspec.Struct, frozen=True):
             если письмо даже не скачалось.
         cause: Что сломалось: `email` (само письмо), `model`, `model_content`, `mailbox`,
             `drafts`, `notifier`, `copy:<папка>`.
+        stage: Шаг, на котором сломалось (`triage`, `draft`, `invoice`, …) — для пометки в таблице.
     """
 
     uid: int
@@ -166,14 +172,15 @@ class _Failure(msgspec.Struct, frozen=True):
     key: str | None
     error: str
     cause: str
+    stage: str = ''
 
 
 def model_outage(exc: LLMError) -> bool:
-    """Модель недоступна вообще (сеть, ключ, лимит, перегрузка), а не отказала на этом письме."""
-    code = exc.status_code
-    if code is None:
-        return _OUTAGE_TEXT in str(exc)
-    return code in _OUTAGE_CODES or code >= 500
+    """Модель не работает вообще (сеть, лимит, перегрузка, ключ, имя модели), а не отказала на этом письме.
+
+    Вид ошибки размечает ядро (`LLMError.kind`) по HTTP-коду провайдера, а не по тексту.
+    """
+    return exc.kind != 'content'
 
 
 def unreadable_key(raw: bytes) -> str:
@@ -227,7 +234,11 @@ def hot_lead_message(language: str, email: ParsedEmail, triage: TriageResult, ca
         triage.summary,
     ]
     if triage.phone:
-        lines.append(texts.text(language, 'hot_phone', phone=triage.phone))
+        phone = triage.phone
+        # E.164 рядом с записью из письма: Telegram делает «+79161234567» ссылкой для звонка в один тап.
+        if triage.phone_e164 and triage.phone_e164 != phone.replace(' ', ''):
+            phone = f'{phone} ({triage.phone_e164})'
+        lines.append(texts.text(language, 'hot_phone', phone=phone))
     if triage.budget:
         lines.append(texts.text(language, 'hot_budget', budget=triage.budget))
     lines.append(texts.text(language, 'hot_draft' if drafted else 'hot_no_draft'))
@@ -258,6 +269,8 @@ class _Run:
         self.fetched = 0
         self.given_up = 0
         self.sheet_rows = 0
+        self.invoice_rows = 0
+        self.invoice_counts: dict[str, int] = {}
         self.uidvalidity: int | None = None
         self.calls_before = deps.llm.usage.calls
         self.stage = ''
@@ -268,6 +281,7 @@ class _Run:
         self.misses: dict[str, int] = {}
         self.quiet_before: dt.datetime | None = None
         self.probe_error: LLMError | None = None
+        self.config_error: LLMError | None = None
 
     # --- запуск -------------------------------------------------------------------------
 
@@ -298,6 +312,7 @@ class _Run:
             await self._settle_failures(state)
             self._advance_cursor(state, cursor, uids)
         await self._flush_sheet()
+        await self._flush_invoices()
         self.store.purge(self.now - RETENTION)
         return self._result()
 
@@ -317,7 +332,7 @@ class _Run:
                     continue
                 self.stage = 'parse'
                 email = parse_email(raw, now=self.now, max_body_chars=self.section.max_body_chars)
-                await self._handle(box, state, uid, email)
+                await self._handle(box, state, uid, email, raw)
                 consecutive = 0
             except Exception as exc:
                 # Граница изоляции: письмо от постороннего может уронить что угодно, но не
@@ -326,13 +341,15 @@ class _Run:
                     continue
                 logger.exception('inbox: письмо UID %s не разобрано (шаг %s)', uid, self.stage)
                 cause = _cause(self.stage, exc)
+                if isinstance(exc, LLMError) and exc.kind == 'config':
+                    self.config_error = exc
                 if cause != 'email' and cause not in self.healthy:
                     self.misses[cause] = self.misses.get(cause, 0) + 1
                     if self.misses[cause] >= FAIL_FAST:
                         self.down.add(cause)
                 key = email.message_id if email is not None else (unreadable_key(raw) if raw is not None else None)
                 error = f'{type(exc).__name__}: {exc}'[:300]
-                self.failures.append(_Failure(uid, email, key, error, cause))
+                self.failures.append(_Failure(uid, email, key, error, cause, self.stage))
                 self.outcomes.append(
                     EmailOutcome(
                         uid=uid,
@@ -406,7 +423,7 @@ class _Run:
             )
         store.mark_uid(folder, state.uidvalidity, uid, key, self.now)
 
-    async def _handle(self, box: MailBox, state: FolderState, uid: int, email: ParsedEmail) -> None:
+    async def _handle(self, box: MailBox, state: FolderState, uid: int, email: ParsedEmail, raw: bytes) -> None:
         store = self.store
         stored = store.get(email.message_id)
         if stored is not None and stored.status in ('done', 'failed'):
@@ -423,7 +440,7 @@ class _Run:
             stored = store.get(email.message_id)
         if stored is None or stored.triage is None:  # pragma: no cover - только что записано
             raise RuntimeError('разбор письма не сохранился')
-        outcome, notes = await self._act(box, uid, email, stored.triage, stored)
+        outcome, notes = await self._act(box, uid, email, stored.triage, stored, raw)
         self.stage = 'finish'
         final = store.get(email.message_id)
         self._finish(state, uid, email, stored.triage, final.actions if final else frozenset(), notes)
@@ -448,7 +465,7 @@ class _Run:
             language=self.language,
             mask=self.section.mask_pii_in_sheet,
             draft=texts.text(self.language, draft_cell),
-            notes=[*self._notes(triage, 'quiet' in actions), *notes],
+            notes=[*self._notes(triage, 'quiet' in actions), *self._invoice_notes(actions), *notes],
         )
         self.store.finish(
             email.message_id,
@@ -476,13 +493,22 @@ class _Run:
             notes.append(texts.text(self.language, 'flag_quiet'))
         return notes
 
+    def _invoice_notes(self, actions: frozenset[str]) -> list[str]:
+        # Пометка в строке письма выводится из отметок действий, а не из памяти запуска:
+        # повтор после сбоя (или письмо, ушедшее из папки) даёт ту же строку.
+        if 'invoice_check' in actions:
+            return [texts.text(self.language, 'flag_invoice_check')]
+        if 'invoice_ok' in actions:
+            return [texts.text(self.language, 'flag_invoice_ok')]
+        return []
+
     def _is_quiet(self, email: ParsedEmail, done: frozenset[str]) -> bool:
         if 'quiet' in done:
             return True
         return self.quiet_before is not None and not email.date_fallback and email.date < self.quiet_before
 
     async def _act(
-        self, box: MailBox, uid: int, email: ParsedEmail, triage: TriageResult, stored: StoredMessage
+        self, box: MailBox, uid: int, email: ParsedEmail, triage: TriageResult, stored: StoredMessage, raw: bytes
     ) -> tuple[EmailOutcome, list[str]]:
         store = self.store
         mid = email.message_id
@@ -503,6 +529,9 @@ class _Run:
             and not (injection or quiet)
             and URGENCY_RANK[triage.urgency] >= URGENCY_RANK[self.section.notify_on_urgency]
         )
+        # Счёт из PDF — данные, а не действие «по письму», поэтому и для старых писем при
+        # подключении; но не для письма с подозрением на инъекцию.
+        wants_invoices = category.id in self.section.invoice_category_ids and not injection
         notes: list[str] = []
 
         drafted = 'draft' in done
@@ -548,6 +577,10 @@ class _Run:
             store.add_action(mid, 'notify', self.now)
             notified = True
 
+        invoices: list[str] = []
+        if wants_invoices and 'invoice' not in done:
+            invoices = await self._invoices(email, raw)
+
         if injection and self.section.alert_operator_on_injection and 'operator' not in done:
             notes += await self._alert_operator(email, triage)
 
@@ -565,8 +598,41 @@ class _Run:
             injection=injection,
             quiet=quiet,
             corrected=list(triage.corrected),
+            invoices=invoices,
         )
         return outcome, notes
+
+    async def _invoices(self, email: ParsedEmail, raw: bytes) -> list[str]:
+        self.stage = 'invoice'
+        records = await extract_invoices(
+            raw,
+            email,
+            section=self.section.invoices,
+            company=self.section.company.name,
+            llm=self.deps.llm,
+            sender=sender_cell(email, self.section.mask_pii_in_sheet),
+        )
+        store, mid = self.store, email.message_id
+        if any(record.status != 'manual' for record in records):
+            self._ok('model')
+        store.save_invoices(mid, records, self.now)
+        if records and all(record.status == 'verified' for record in records):
+            store.add_action(mid, 'invoice_ok', self.now)
+        elif records:
+            store.add_action(mid, 'invoice_check', self.now)
+        store.add_action(mid, 'invoice', self.now)
+        for record in records:
+            self._record_invoice(record)
+        return [record.status for record in records]
+
+    def _record_invoice(self, record: InvoiceRecord) -> None:
+        self.invoice_counts[record.status] = self.invoice_counts.get(record.status, 0) + 1
+        if record.status == 'verified':
+            payload = {'currency': record.currency or '', 'lines': str(record.line_count)}
+            self.deps.events.record(PACKAGE, 'inbox.invoice_extracted', self.now, payload)
+            return
+        reason = record.reasons[0] if record.reasons else record.status
+        self.deps.events.record(PACKAGE, 'inbox.invoice_unverified', self.now, {'reason': reason})
 
     async def _draft(self, email: ParsedEmail, triage: TriageResult, saved: Draft | None) -> Draft:
         if saved is not None:
@@ -659,6 +725,8 @@ class _Run:
         since = 'модель ещё ни разу не ответила'
         if last_ok is not None:
             since = f'последний успешный ответ модели: {last_ok.astimezone(dt.UTC):%Y-%m-%d %H:%M} UTC'
+        if exc.kind == 'config':
+            return f'провайдер отклоняет ключ или модель — проверьте ключ и AUTOSTUDIO_LLM_MODEL ({since}): {exc}'
         if model_outage(exc):
             return f'модель недоступна и на проверочном запросе ({since}): {exc}'
         return (
@@ -696,6 +764,8 @@ class _Run:
             )
             if self.probe_error is not None:
                 self.errors.append(self._probe_report(self.probe_error))
+            elif self.config_error is not None:
+                self.errors.append(self._probe_report(self.config_error))
 
     async def _grace_over(self, state: FolderState, failure: _Failure) -> bool:
         if failure.key is None or failure.email is None:
@@ -712,6 +782,8 @@ class _Run:
             return texts.text(self.language, 'flag_failed_notify')
         if cause == 'drafts':
             return texts.text(self.language, 'flag_failed_draft')
+        if cause in ('model', 'model_content') and failure.stage == 'invoice':
+            return texts.text(self.language, 'flag_failed_invoice')
         if cause in ('model', 'model_content'):
             return texts.text(self.language, 'flag_failed_model')
         if cause.startswith('copy:'):
@@ -782,6 +854,19 @@ class _Run:
         self.store.rows_written([message_id for message_id, _ in pending])
         self.sheet_rows = len(pending)
 
+    async def _flush_invoices(self) -> None:
+        pending = self.store.pending_invoices()
+        if not pending:
+            return
+        rows = [invoice_row(record, zone=self.zone, language=self.language) for _, _, record in pending]
+        try:
+            await self.deps.sink.append(self.section.invoices.sheet_tab, texts.invoice_header(self.language), rows)
+        except AutoStudioError as exc:
+            self.errors.append(f'вкладка счетов не записана, строки повторятся в следующий запуск: {exc}')
+            return
+        self.store.invoices_written([(message_id, position) for message_id, position, _ in pending])
+        self.invoice_rows = len(pending)
+
     def _result(self) -> RunResult:
         done = [outcome for outcome in self.outcomes if outcome.source in ('prefilter', 'model')]
         by_category: dict[str, int] = {}
@@ -801,6 +886,9 @@ class _Run:
             injections=sum(outcome.injection for outcome in done),
             llm_calls=self.deps.llm.usage.calls - self.calls_before,
             sheet_rows=self.sheet_rows,
+            invoices_verified=self.invoice_counts.get('verified', 0),
+            invoices_unverified=sum(n for status, n in self.invoice_counts.items() if status != 'verified'),
+            invoice_rows=self.invoice_rows,
             by_category=by_category,
             outcomes=self.outcomes,
             aborted=self.aborted,
@@ -821,6 +909,8 @@ async def run_once(config: InboxConfig, deps: InboxDeps, now: dt.datetime) -> Ru
 
     Raises:
         MailboxError: Ящик недоступен (сигнал оператору поднимет `supervised_run`).
+        RunSkipped: Предыдущий запуск ещё держит блокировку — этот сознательно пропущен
+            (`supervised_run` пишет пропуск, а не успех и не сбой).
     """
     if now.tzinfo is None:
         raise ValueError('now должен быть с часовым поясом')
@@ -829,8 +919,7 @@ async def run_once(config: InboxConfig, deps: InboxDeps, now: dt.datetime) -> Ru
     ttl = dt.timedelta(minutes=max(LOCK_MINUTES_MIN, 2 * config.inbox.max_per_run))
     token = deps.store.acquire_lock(now, ttl)
     if token is None:
-        logger.warning('inbox: предыдущий запуск ещё идёт — этот пропущен')
-        return RunResult(folder=config.inbox.folder, locked=True)
+        raise RunSkipped('предыдущий запуск ещё идёт')
     try:
         return await _Run(config, deps, now).execute()
     finally:
@@ -867,6 +956,8 @@ def _dry_row(config: InboxConfig, email: ParsedEmail, triage: TriageResult) -> D
             would.append('notify')
         if category.move_to:
             would.append(f'copy→{category.move_to}')
+        if category.id in section.invoice_category_ids:
+            would.append('invoice-check')
     notes = ['injection'] if triage.injection_suspected else []
     notes += [f'dropped:{field}' for field in triage.corrected]
     if triage.source == 'model' and triage.confidence < LOW_CONFIDENCE:

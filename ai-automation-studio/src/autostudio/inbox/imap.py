@@ -6,9 +6,22 @@
 - черновик кладётся APPEND-ом в папку черновиков с флагом \\Draft — он никуда не уходит;
 - «переложить в папку» — это COPY: из исходной папки ничего не удаляется (v1 не
   делает ни STORE \\Deleted, ни EXPUNGE);
-- логин и пароль не попадают ни в текст ошибки, ни в журнал.
+- логин, пароль и OAuth-токен не попадают ни в текст ошибки, ни в журнал.
+
+Вход — паролем приложения (LOGIN) или OAuth2 (AUTHENTICATE XOAUTH2, Google Workspace и
+Microsoft 365); токен даёт `oauth.TokenProvider`.
 
 imaplib синхронный, поэтому каждый вызов уходит в поток (`asyncio.to_thread`).
+
+Почему stdlib imaplib, а не imap-tools (проверено на одном IMAP-сервере, сравнение в
+var/review_inbox/compare_imap.py): по проводу обе дают одно и то же для PEEK, APPEND с
+\\Draft, COPY и имён папок в modified UTF-7, но imap-tools не умеет частичную выборку
+`BODY.PEEK[]<0.N>` (письмо на 25 МБ качается целиком), отдаёт письмо пересобранным, а не
+байтами сервера (ломается хеш письма без Message-ID), берёт UIDVALIDITY отдельной командой
+STATUS вместо ответа EXAMINE, при отказе XOAUTH2 повторяет строку с токеном вместо пустого
+ответа по RFC 7628 (сервер отвечает BAD, причина теряется), а при импорте меняет глобальный
+`imaplib._MAXLINE` для всего процесса. Проще наш адаптер от неё не станет: всё равно
+понадобились бы `client.response()` и обход ошибок на уровне imaplib.
 """
 
 import asyncio
@@ -25,12 +38,15 @@ from typing import Final, Protocol, Self
 import msgspec
 
 from autostudio.inbox.errors import MailboxError
+from autostudio.inbox.oauth import TokenProvider, XOAuth2Responder, describe_token_error
 
 logger = logging.getLogger(__name__)
 
-# Письмо читается не целиком, а первыми байтами: текст идёт в начале MIME, а
-# вложение на 20 МБ разбору не нужно. Частичный FETCH — тоже PEEK, флаги не меняются.
-MAX_FETCH_BYTES: Final = 2_000_000
+# Письмо читается не целиком, а первыми байтами: текст идёт в начале MIME, а вложение на
+# 20 МБ разбору не нужно. Граница вмещает PDF-счёт до `max_pdf_kb` (3,5 МБ, в base64 ≈ 4,7 МБ);
+# письмо длиннее обрезается, и PDF в нём честно помечается «не читается». Частичный FETCH —
+# тоже PEEK, флаги не меняются.
+MAX_FETCH_BYTES: Final = 5_000_000
 _MONTHS: Final = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
 _UID: Final = re.compile(rb'UID (\d+)')
 _LIST_LINE: Final = re.compile(rb'^\((?P<flags>[^)]*)\)\s+(?P<delim>"(?:[^"\\]|\\.)*"|NIL)\s+(?P<name>.+)$')
@@ -49,6 +65,10 @@ class ImapConnection(Protocol):
     """Часть `imaplib.IMAP4`, которой пользуется адаптер (в тестах — поддельный сервер)."""
 
     def login(self, user: str, password: str) -> ImapReply: ...
+    # typeshed объявляет ответ AUTHENTICATE как (str, str), на деле это те же строки байтов.
+    def authenticate(
+        self, mechanism: str, authobject: Callable[[bytes], bytes | None]
+    ) -> tuple[str, str | ImapData]: ...
     def select(self, mailbox: str = ..., readonly: bool = ...) -> ImapReply: ...
     def response(self, code: str) -> ImapReply: ...
     def uid(self, command: str, *args: str) -> ImapReply: ...
@@ -227,10 +247,14 @@ class ImapMailBox:
     Args:
         host: IMAP-сервер.
         port: Порт SSL.
-        user: Логин ящика.
-        password: Пароль приложения.
+        user: Логин ящика (при OAuth — адрес ящика).
+        password: Пароль приложения или None при OAuth.
+        tokens: Источник OAuth-токена (XOAUTH2) или None при входе паролем.
         timeout: Таймаут сокета на каждую операцию, секунды.
         connector: Фабрика соединения (в тестах — поддельный сервер).
+
+    Raises:
+        ValueError: Не задан способ входа или заданы оба.
     """
 
     def __init__(
@@ -239,14 +263,19 @@ class ImapMailBox:
         host: str,
         port: int,
         user: str,
-        password: str,
+        password: str | None = None,
+        tokens: TokenProvider | None = None,
         timeout: float = 30.0,
         connector: Connector | None = None,
     ) -> None:
+        if (password is None) == (tokens is None):
+            raise ValueError('ImapMailBox: нужен ровно один способ входа — пароль или OAuth')
         self._host = host
         self._port = port
         self._user = user
         self._password = password
+        self._tokens = tokens
+        self._secrets: list[str] = [password] if password else []
         self._timeout = timeout
         self._connector = connector or _default_connector
         self._conn: ImapConnection | None = None
@@ -256,8 +285,8 @@ class ImapMailBox:
         return self._user
 
     def _scrub(self, text: str) -> str:
-        # Сервер иногда повторяет логин в тексте отказа; пароль — тем более не должен утечь.
-        for secret in (self._password, self._user):
+        # Сервер иногда повторяет логин в тексте отказа; пароль и токен — тем более не должны утечь.
+        for secret in (*self._secrets, self._user):
             if secret:
                 text = text.replace(secret, '***')
         # imaplib кладёт ответ сервера в исключение как repr байтов: b'[ALERT] …'.
@@ -290,10 +319,16 @@ class ImapMailBox:
         return data
 
     async def __aenter__(self) -> Self:
+        token = await self._access_token()
+        responder = XOAuth2Responder(self._user, token) if token is not None else None
+
         def connect() -> ImapConnection:
             conn = self._connector(self._host, self._port, self._timeout)
             try:
-                conn.login(self._user, self._password)
+                if responder is not None:
+                    conn.authenticate('XOAUTH2', responder)
+                else:
+                    conn.login(self._user, self._password or '')
             except BaseException:
                 _quiet_logout(conn)
                 raise
@@ -303,13 +338,30 @@ class ImapMailBox:
             self._conn = await asyncio.to_thread(connect)
         except imaplib.IMAP4.error as exc:
             # Причина сервера нужна оператору: «слишком много подключений» или «IMAP выключен»
-            # лечатся не сменой пароля. Логин и пароль из текста вычищаются.
+            # лечатся не сменой пароля. Логин, пароль и токен из текста вычищаются.
             reason = self._scrub(str(exc))
-            hint = ' — проверьте логин и пароль приложения (не основной пароль)' if _AUTH_FAILED.search(reason) else ''
-            raise MailboxError(f'IMAP {self._host}: вход не выполнен: {reason}{hint}') from None
+            raise MailboxError(
+                f'IMAP {self._host}: вход не выполнен: {reason}{self._login_hint(reason, responder)}'
+            ) from None
         except OSError as exc:
             raise self._error('подключение', exc) from None
         return self
+
+    async def _access_token(self) -> str | None:
+        if self._tokens is None:
+            return None
+        token = await self._tokens.access_token()
+        self._secrets.append(token)
+        return token
+
+    def _login_hint(self, reason: str, responder: XOAuth2Responder | None) -> str:
+        if responder is None or self._tokens is None:
+            return ' — проверьте логин и пароль приложения (не основной пароль)' if _AUTH_FAILED.search(reason) else ''
+        # Токен не принят: следующий вход возьмёт свежий, а не тот же из памяти.
+        self._tokens.invalidate()
+        detail = describe_token_error(responder.error)
+        server = f' ({detail})' if detail else ''
+        return f'{server} — {self._tokens.label} OAuth: {self._tokens.hint}'
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None

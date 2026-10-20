@@ -2,7 +2,8 @@
 
 Порядок работы выбран так, чтобы ничего не терялось и не дублировалось:
 
-1. проход берёт замок клиента: второй одновременный проход (cron + ручной `run`) пропускается;
+1. проход берёт замок клиента: второй одновременный проход (cron + ручной `run`) пропускается
+   (`RunSkipped`: не успех и не сбой — в надёжность отчёта не входит);
 2. все ссылки проверяются бесплатными ступенями (сайты — параллельно, страницы одного сайта
    — по очереди), затем страницы без разметки — моделью, бюджет делится в порядке конфига;
    у прохода есть общий срок (`max_run_minutes`);
@@ -22,6 +23,10 @@
 
 Сбой одной ссылки — даже неожиданное исключение на странной странице — не останавливает
 остальные: он становится строкой «не проверено» и сигналом оператору.
+
+Сайт на паузе (`[prices.sites."…"] paused = true`) не запрашивается вовсе: его ссылки — «на
+паузе» в таблице (с последней известной ценой), не сбой, не счётчик сбоев и не строка
+«не удалось проверить» в уведомлении; в журнал — одно событие `prices.paused` за проход.
 """
 
 import asyncio
@@ -40,9 +45,10 @@ from autostudio.events import EventLog
 from autostudio.llm import LLMClient
 from autostudio.notify import Notifier
 from autostudio.prices import texts
-from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product
+from autostudio.prices.config import PARALLEL_SITES, PAUSED, Offer, PricesConfig, PricesSection, Product
 from autostudio.prices.extract import (
     AMBIGUOUS_DECIMAL,
+    LLM_CONFIG,
     MULTIPLE_PRODUCTS,
     Availability,
     ExtractionFailure,
@@ -56,22 +62,29 @@ from autostudio.prices.extract import (
 )
 from autostudio.prices.fetch import FetchFailure, FetchResult
 from autostudio.prices.money import Qualifier
-from autostudio.prices.store import Channel, OfferKey, OfferState, OutboxEntry, PriceStore, StoredReading
+from autostudio.prices.store import (
+    Channel,
+    OfferKey,
+    OfferState,
+    OutboxEntry,
+    PriceStore,
+    SheetRow,
+    StoredReading,
+)
 from autostudio.prices.urls import origin, redact
-from autostudio.sinks import Row, TableSink
+from autostudio.runlog import RunSkipped
+from autostudio.sinks import Cell, TableSink
 
 logger = logging.getLogger(__name__)
 
 PACKAGE: Final = 'prices'
-# Сколько сайтов проверяется одновременно. Страницы одного сайта всё равно идут по очереди
-# с паузой — параллельность ускоряет запуск, не увеличивая нагрузку ни на один сайт.
-_PARALLEL_SITES: Final = 4
 _PARALLEL_MODEL: Final = 4
 _SHEETS_URL: Final = 'https://docs.google.com/spreadsheets/d/{id}'
 # Скачок цены больше этого — сначала подтверждение повторным чтением, потом уведомление
 # владельцу: «2 499 → 2.50» чаще ошибка вёрстки или разметки, чем распродажа.
 MAX_PLAUSIBLE_JUMP_PCT: Final = Decimal(50)
 _BUDGET_FLAG: Final = 'llm_budget_exhausted'
+_MODEL_CONFIG_FLAG: Final = 'llm_config_broken'
 REDIRECTED: Final = 'redirected'
 # Предупреждения удачного чтения — оператору, один раз, когда предупреждение появилось.
 _WARNINGS: Final[dict[str, str]] = {
@@ -226,7 +239,12 @@ class Assessment(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class RunResult(msgspec.Struct, frozen=True, kw_only=True):
-    """Итог прохода для CLI, демо и тестов."""
+    """Итог прохода для CLI, демо и тестов.
+
+    Attributes:
+        failed: Не прочитано по сбою (ссылки сайтов на паузе — не сбой и сюда не входят).
+        paused: Ссылок не проверялось: их сайт на паузе.
+    """
 
     checked: int
     failed: int
@@ -236,9 +254,14 @@ class RunResult(msgspec.Struct, frozen=True, kw_only=True):
     llm_pages: int
     methods: dict[str, int] = msgspec.field(default_factory=dict)
     failures: dict[str, int] = msgspec.field(default_factory=dict)
-    skipped: bool = False
     llm_input_tokens: int = 0
     llm_output_tokens: int = 0
+    paused: int = 0
+
+
+def is_paused(outcome: PriceReading | CheckFailure) -> bool:
+    """Ссылка не проверялась, потому что её сайт на паузе (это не сбой)."""
+    return isinstance(outcome, CheckFailure) and outcome.reason == PAUSED
 
 
 def pct_change(old: Decimal, new: Decimal) -> Decimal:
@@ -322,6 +345,9 @@ def _failed(
     section: PricesSection,
 ) -> Assessment:
     key = OfferKey(product.id, offer.competitor, offer.url)
+    if outcome.reason == PAUSED:
+        # Пауза — решение оператора, а не поломка: счётчик сбоев и предупреждения не трогаем.
+        return Assessment(key=key, product=product, offer=offer, outcome=outcome, previous=previous, state=state)
     failures = state.failures + 1
     lines: tuple[str, ...] = ()
     if failures == section.failure_alert_after:
@@ -566,7 +592,8 @@ async def check_all(
     Сначала все страницы читаются бесплатными ступенями, затем страницы без цены — моделью:
     бюджет делится в порядке конфига, поэтому одни и те же ссылки получают модель от запуска
     к запуску (а не те, чей сайт ответил быстрее). Что не уложилось в срок прохода, — сбой
-    `run_timeout` для этой ссылки, а не зависший проход.
+    `run_timeout` для этой ссылки, а не зависший проход. Ссылки сайтов на паузе не
+    загружаются: их итог — `paused`.
 
     Args:
         section: Товары и настройки.
@@ -582,12 +609,17 @@ async def check_all(
     first: dict[int, PriceReading | CheckFailure | _NeedsModel] = {}
     by_site: dict[str, list[int]] = {}
     for index, (_, offer) in enumerate(pairs):
-        by_site.setdefault(origin(offer.url), []).append(index)
+        paused = section.paused_site(offer.url)
+        if paused is not None:
+            # Претензия владельца сайта — стоп сразу: ни страницы, ни robots.txt, ни DNS.
+            first[index] = CheckFailure(reason=PAUSED, detail=paused)
+        else:
+            by_site.setdefault(origin(offer.url), []).append(index)
     loop = asyncio.get_running_loop()
     limit_s = deadline_s if deadline_s is not None else section.max_run_minutes * 60
     deadline = loop.time() + limit_s
     late = CheckFailure(reason='run_timeout', detail=f'проход не уложился в {limit_s:g} с')
-    gate = asyncio.Semaphore(_PARALLEL_SITES)
+    gate = asyncio.Semaphore(PARALLEL_SITES)
 
     async def worker(indexes: list[int]) -> None:
         async with gate:
@@ -656,6 +688,8 @@ async def _ask_all(
 
 
 # --- таблица -------------------------------------------------------------------------------
+# Суммы и проценты уходят в таблицу числами (`Decimal`), подписи — текстом: клиент сортирует
+# по «Разница с вашей, %» и строит графики по «History» без VALUE() и «Формат → Число».
 
 
 def _status(item: Assessment, language: str) -> str:
@@ -671,18 +705,25 @@ def _status(item: Assessment, language: str) -> str:
     return t[outcome.qualifier.value] if outcome.qualifier is not Qualifier.EXACT else t['ok']
 
 
-def _diff_cell(product: Product, currency: str | None, diff: Decimal | None, language: str) -> str:
+def _diff_cell(product: Product, currency: str | None, diff: Decimal | None, language: str) -> Cell:
     if product.own_price is None:
         return ''
     if currency != product.currency:
         return texts.STATUS[language]['na_currency'].format(theirs=currency or '?', yours=product.currency)
-    return texts.cell_pct(diff) if diff is not None else ''
+    return texts.num_pct(diff) if diff is not None else ''
 
 
-def now_row(item: Assessment, *, at: dt.datetime, zone: dt.tzinfo, language: str) -> Row:
+def _amount_cell(value: Decimal | None) -> Cell:
+    return texts.num_amount(value) if value is not None else ''
+
+
+def _pct_cell(value: Decimal | None) -> Cell:
+    return texts.num_pct(value) if value is not None else ''
+
+
+def now_row(item: Assessment, *, at: dt.datetime, zone: dt.tzinfo, language: str) -> SheetRow:
     """Строка вкладки «Prices now»: текущая цена или последняя известная с пометкой."""
     product, offer = item.product, item.offer
-    own = texts.cell_amount(product.own_price) if product.own_price is not None else ''
     shown: PriceReading | StoredReading | None
     checked: dt.datetime | None
     if isinstance(item.outcome, PriceReading):
@@ -695,22 +736,22 @@ def now_row(item: Assessment, *, at: dt.datetime, zone: dt.tzinfo, language: str
             if shown is not None and product.own_price and _comparable(shown.currency, product.own_price, product)
             else None
         )
-    if shown is None:
-        price = currency = diff_text = availability = method = ''
-    else:
-        price, currency = texts.cell_amount(shown.amount), shown.currency or ''
+    price: Cell = ''
+    diff_cell: Cell = ''
+    currency = availability = method = ''
+    if shown is not None:
+        price, currency = texts.num_amount(shown.amount), shown.currency or ''
         availability = texts.AVAILABILITY[language][shown.availability.value]
         method = texts.METHODS[language][shown.method.value]
-        diff_text = _diff_cell(product, shown.currency, diff, language)
-    change = texts.cell_pct(item.change_vs_last) if item.change_vs_last is not None else ''
+        diff_cell = _diff_cell(product, shown.currency, diff, language)
     return [
         product.name,
-        own,
+        _amount_cell(product.own_price),
         offer.competitor,
         price,
         currency,
-        diff_text,
-        change,
+        diff_cell,
+        _pct_cell(item.change_vs_last),
         availability,
         method,
         texts.show_time(checked, zone) if checked else '',
@@ -719,13 +760,15 @@ def now_row(item: Assessment, *, at: dt.datetime, zone: dt.tzinfo, language: str
     ]
 
 
-def history_row(item: Assessment, reading: PriceReading, *, at: dt.datetime, zone: dt.tzinfo, language: str) -> Row:
+def history_row(
+    item: Assessment, reading: PriceReading, *, at: dt.datetime, zone: dt.tzinfo, language: str
+) -> SheetRow:
     """Строка вкладки «History» — с происхождением цены (источник и текст со страницы)."""
     return [
         texts.show_time(at, zone),
         item.product.name,
         item.offer.competitor,
-        texts.cell_amount(reading.amount),
+        texts.num_amount(reading.amount),
         reading.currency or '',
         texts.AVAILABILITY[language][reading.availability.value],
         texts.METHODS[language][reading.method.value],
@@ -734,18 +777,20 @@ def history_row(item: Assessment, reading: PriceReading, *, at: dt.datetime, zon
     ]
 
 
-def change_row(change: Change, *, at: dt.datetime, zone: dt.tzinfo, language: str) -> Row:
-    """Строка вкладки «Changes»."""
+def change_row(change: Change, *, at: dt.datetime, zone: dt.tzinfo, language: str) -> SheetRow:
+    """Строка вкладки «Changes»: «Было»/«Стало» — числа у цены, текст у наличия и смены валюты."""
     kind = texts.CHANGE_KINDS[language][change.kind]
+    was: Cell
+    now: Cell
     if change.kind == 'stock':
         was = texts.AVAILABILITY[language][change.old_availability.value]
         now = texts.AVAILABILITY[language][change.availability.value]
     elif change.kind == 'currency':
+        # Суммы в разных валютах в одной числовой колонке сравнивались бы как одна валюта.
         was = f'{texts.cell_amount(change.old_amount or Decimal(0))} {change.old_currency or "?"}'
         now = f'{texts.cell_amount(change.new_amount or Decimal(0))} {change.currency or "?"}'
     else:
-        was = texts.cell_amount(change.old_amount) if change.old_amount is not None else ''
-        now = texts.cell_amount(change.new_amount) if change.new_amount is not None else ''
+        was, now = _amount_cell(change.old_amount), _amount_cell(change.new_amount)
     return [
         texts.show_time(at, zone),
         change.product,
@@ -753,8 +798,8 @@ def change_row(change: Change, *, at: dt.datetime, zone: dt.tzinfo, language: st
         kind,
         was,
         now,
-        texts.cell_pct(change.pct) if change.pct is not None else '',
-        texts.cell_amount(change.own_price) if change.own_price is not None else '',
+        _pct_cell(change.pct),
+        _amount_cell(change.own_price),
         change.url,
     ]
 
@@ -882,9 +927,11 @@ async def run_once(config: PricesConfig, deps: PricesDeps, now: dt.datetime) -> 
         now: Момент запуска, с часовым поясом.
 
     Returns:
-        Итог прохода (`skipped=True`, если другой проход по этому клиенту ещё идёт).
+        Итог прохода.
 
     Raises:
+        RunSkipped: Другой проход по этому клиенту ещё идёт (cron + ручной `run`): этот не
+            делал ничего. Не успех и не сбой — `supervised_run` так его и запишет.
         SinkError: Таблица клиента не записалась. Если не заменилась «Prices now» — база не
             изменилась; если не дописались строки — они ждут в очереди следующего прохода.
         NotifyError: Уведомление владельцу не доставлено (оно ждёт в очереди следующего прохода).
@@ -895,9 +942,7 @@ async def run_once(config: PricesConfig, deps: PricesDeps, now: dt.datetime) -> 
     with deps.store.exclusive() as locked:
         if not locked:
             logger.warning('prices %s: предыдущий проход ещё идёт — этот пропущен', config.client.id)
-            return RunResult(
-                checked=0, failed=0, changes=(), digest=None, operator_alert=None, llm_pages=0, skipped=True
-            )
+            raise RunSkipped('предыдущий проход по этому клиенту ещё идёт')
         return await _run_locked(config, deps, now)
 
 
@@ -926,12 +971,16 @@ async def _run_locked(config: PricesConfig, deps: PricesDeps, now: dt.datetime) 
     readings = [(item, item.outcome) for item in assessments if isinstance(item.outcome, PriceReading)]
     recorded = [(item, reading) for item, reading in readings if item.recorded]
     changes = tuple(change for item in assessments for change in item.changes)
+    paused = [item for item in assessments if is_paused(item.outcome)]
+    failures = [
+        item.outcome for item in assessments if isinstance(item.outcome, CheckFailure) and not is_paused(item.outcome)
+    ]
 
     tabs, headers = texts.TABS[language], texts.HEADERS[language]
     await deps.sink.replace(
         tabs['now'], headers['now'], [now_row(item, at=now, zone=zone, language=language) for item in assessments]
     )
-    failed = len(assessments) - len(readings)
+    failed = len(failures)
     sheet_url = (
         _SHEETS_URL.format(id=config.sink.spreadsheet_id)
         if config.sink.backend == 'google' and config.sink.spreadsheet_id
@@ -943,7 +992,7 @@ async def _run_locked(config: PricesConfig, deps: PricesDeps, now: dt.datetime) 
         language=language,
         when=texts.show_time(now, zone),
         failed=failed,
-        total=len(assessments),
+        total=len(assessments) - len(paused),
         sheet_url=sheet_url,
     )
     outbox: list[OutboxEntry] = []
@@ -970,19 +1019,31 @@ async def _run_locked(config: PricesConfig, deps: PricesDeps, now: dt.datetime) 
     for change in changes:
         deps.events.record(PACKAGE, _CHANGE_EVENTS[change.kind], now, _change_payload(change))
     for item in assessments:
-        if isinstance(item.outcome, CheckFailure):
+        if isinstance(item.outcome, CheckFailure) and not is_paused(item.outcome):
             deps.events.record(
                 PACKAGE,
                 'prices.failed',
                 now,
                 {'product': item.product.name, 'competitor': item.offer.competitor, 'reason': item.outcome.reason},
             )
+    if paused:
+        # Одно событие за проход: в отчёте видно, что сайт не проверялся, а журнал не растёт
+        # на каждую ссылку каждого прохода.
+        sites = sorted({item.outcome.detail for item in paused if isinstance(item.outcome, CheckFailure)})
+        deps.events.record(PACKAGE, 'prices.paused', now, {'sites': ', '.join(sites), 'offers': str(len(paused))})
 
     operator_lines = [line for item in assessments for line in item.operator_lines]
     operator_lines += _budget_lines(deps.store, budget, now)
+    operator_lines += _model_config_lines(deps.store, failures, asked=budget.used > 0, now=now)
     operator_alert = f'🛠 {config.client.name} / prices:\n' + '\n'.join(operator_lines) if operator_lines else None
     await _tell_operator(deps.operator, operator_alert)
-    logger.info('prices: %s проверено, %s не проверено, событий %s', len(readings), failed, len(changes))
+    logger.info(
+        'prices: %s проверено, %s не проверено, на паузе %s, событий %s',
+        len(readings),
+        failed,
+        len(paused),
+        len(changes),
+    )
     result = RunResult(
         checked=len(readings),
         failed=failed,
@@ -991,9 +1052,10 @@ async def _run_locked(config: PricesConfig, deps: PricesDeps, now: dt.datetime) 
         operator_alert=operator_alert,
         llm_pages=budget.used,
         methods=dict(Counter(reading.method.value for _, reading in readings)),
-        failures=dict(Counter(item.outcome.reason for item in assessments if isinstance(item.outcome, CheckFailure))),
+        failures=dict(Counter(failure.reason for failure in failures)),
         llm_input_tokens=(llm.usage.input_tokens - tokens_before[0]) if llm is not None else 0,
         llm_output_tokens=(llm.usage.output_tokens - tokens_before[1]) if llm is not None else 0,
+        paused=len(paused),
     )
     await deliver(deps)
     return result
@@ -1012,6 +1074,26 @@ def _budget_lines(store: PriceStore, budget: LLMBudget, now: dt.datetime) -> lis
     if not budget.denied and exhausted:
         store.set_flag(_BUDGET_FLAG, None)
         return ['• бюджета модели снова хватает на все страницы'] if budget.limit else []
+    return []
+
+
+def _model_config_lines(
+    store: PriceStore, failures: Sequence[CheckFailure], *, asked: bool, now: dt.datetime
+) -> list[str]:
+    # Ключ, права или имя модели (`LLMError.kind == 'config'`) не чинятся повтором: оператору —
+    # сразу и один раз, а не через `failure_alert_after` проходов по строке на каждую ссылку.
+    broken = [failure for failure in failures if failure.reason == LLM_CONFIG]
+    flagged = store.flag(_MODEL_CONFIG_FLAG) is not None
+    if broken and not flagged:
+        store.set_flag(_MODEL_CONFIG_FLAG, now.isoformat())
+        return [
+            f'• модель не отвечает из-за настроек (ключ, права или имя модели): {broken[0].detail}. '
+            f'Страниц без цены в этом проходе: {len(broken)}, клиенту — «в этот раз не проверено». '
+            'Проверьте AUTOSTUDIO_LLM_PROVIDER, AUTOSTUDIO_LLM_MODEL и ключ провайдера'
+        ]
+    if flagged and asked and not broken:
+        store.set_flag(_MODEL_CONFIG_FLAG, None)
+        return ['• модель снова отвечает']
     return []
 
 

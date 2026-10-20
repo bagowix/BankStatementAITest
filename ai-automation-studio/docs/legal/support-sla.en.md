@@ -9,7 +9,8 @@ These Support Terms are part of Agreement No. [number] dated [date] between {{NA
 **Business Day**, **Client Accounts** and **Order Form**, have the meaning given in the Agreement.
 
 They apply while the Client has an active support plan. While the Developer hosts the Client's
-system, a support plan is required.
+system, a support plan is required. The plan starts at Launch (Agreement, 7.2). Free fixes after
+Launch (Agreement, 5) come on top of it.
 
 ---
 
@@ -21,7 +22,7 @@ system, a support plan is required.
 | Hosting, monitoring, daily backups, monthly security updates, monthly report | ✓ | ✓ | ✓ |
 | First response within | 2 Business Days | 1 Business Day | 4 business hours |
 | Hours for small changes per month | 1 hour | 4 hours | 10 hours |
-| Repairs after outside changes | counted within the 1 hour; above it, extra hours | included, no hours used | included, no hours used |
+| Repairs after outside changes | count toward the plan's 1 hour; above it, extra hours | included, no hours used | included, no hours used |
 | Fixes of the Developer's own bugs | always free | always free | always free |
 | AI operations per month | 2,000 | 10,000 | 30,000 |
 | One new small automation per quarter, up to 6 hours | — | — | ✓ |
@@ -42,11 +43,13 @@ Day. Monitoring shows that the system runs and that its runs succeed. It cannot 
 For example, it cannot tell whether a competitor's page shows the right product. That is why every
 price comes with the page text it was read from.
 
-2.3. **Backups.** Every day, the system's data is copied to separate storage: bookings, price
-history, email processing records and the event log. Backups are encrypted and kept for up to 30
-days. Restoring from a backup is incident work (section 4). Data in Client Accounts, such as the
-Google Sheet, the mailbox or the calendar, is protected by those services' own tools, such as the
-version history of Google Sheets. The Developer does not back it up.
+2.3. **Backups.** [VERIFY: backups. Keep this clause only if the automated daily backup job from
+`README.md`, section 6, runs for this client. Otherwise delete it and "daily backups" in section 1.]
+Every day, the system's data is copied to separate storage: bookings, price history, email
+processing records and the event log. Backups are encrypted and kept for up to 30 days. Restoring
+from a backup is incident work (section 4). Data in Client Accounts, such as the Google Sheet, the
+mailbox or the calendar, is protected by those services' own tools, such as the version history of
+Google Sheets. The Developer does not back it up.
 
 2.4. **Security updates.** Once a month, the Developer updates the software components, runs the
 automated tests, redeploys the system and checks that each client's setup works.
@@ -55,19 +58,19 @@ automated tests, redeploys the system and checks that each client's setup works.
 previous month. It shows:
 - what the system did: for example, bookings taken, emails sorted, prices checked, alerts sent;
 - how reliably the scheduled runs worked;
-- an estimate of the hours saved, with the method shown;
-- the support hours used.
+- an estimate of the hours saved, with the method shown.
 
-The report is built only from the system's event log and the Developer's time log. Anything
-estimated is marked as an estimate.
+The report is built only from the system's event log. Anything estimated is marked as an estimate.
+The support hours used are sent with the report as a separate time log (5.1).
 
 ## 3. How to ask for support
 
-3.1. **Channels.** Email {{EMAIL}} or Telegram {{TELEGRAM}}. Clients who hired the Developer through
-a marketplace use the marketplace's messages.
+3.1. **Channels.** [Direct clients: email {{EMAIL}} or Telegram @{{TELEGRAM}}.] Clients who hired
+the Developer through a marketplace use only the marketplace's messages.
 
 3.2. **What helps.** What happened, when, and one example: a screenshot, a booking code, or an
-email's subject line. Never send a password in a chat. The Developer suggests a safe way to pass it.
+email's subject line. Never send a password in a chat. The Developer suggests a safe way to pass it,
+such as a one-time secret link or a call.
 
 3.3. **Response time** is the time to the Developer's first personal reply, not an auto-reply. The
 reply confirms the request and says what happens next. It is counted in business hours from the
@@ -97,7 +100,7 @@ more than 3 Business Days, and how incidents will be handled during it. Monitori
 | Type | Examples | How it is paid |
 |---|---|---|
 | **The Developer's bug:** the system does not work as described in the Order Form | A reminder goes out at the wrong time. A row is missing from the sheet. The bot stops after an update. | Always free. No plan hours are used. |
-| **Repair after an outside change:** something outside the system changed | A competitor redesigns a product page. The Client changes the mailbox password. A provider changes its interface. Sheet access was removed. | Care: counted within the 1 hour; above it, extra hours (5.3). Pro and Business: included, no hours used. |
+| **Repair after an outside change:** something outside the system changed | A competitor redesigns a product page. The Client changes the mailbox password. A provider changes its interface. Sheet access was removed. | Care: counts toward the plan's 1 hour; above it, extra hours (5.3). Pro and Business: included, no hours used. |
 | **Small change** | Prices, services, staff, opening hours, holidays, FAQ, email categories, company facts, competitor links within the tier, bot texts, alert threshold. | Plan hours. |
 | **New small automation** (Business only) | A weekly summary in Telegram. A new report tab. A new email category with its own action. | One per quarter, up to 6 hours. An unused one does not carry over. |
 | **Custom work** | New features, integrations or channels (WhatsApp, Instagram, a CRM). New data sources. Anything above the tier's limits. | Quoted separately. |
@@ -117,7 +120,7 @@ before starting. The Developer's own bugs never cost the Client anything.
 ## 5. Hours
 
 5.1. Plan hours are counted in 30-minute steps. The Developer keeps a time log (date, task, time) and
-includes it in the monthly report.
+sends it with the monthly report, as a separate document.
 
 5.2. Unused hours do not carry over to the next month.
 
@@ -137,14 +140,22 @@ plan. The Client decides.
 Buttons, newsletters filtered out by rules, and prices read from page markup are not counted. The
 Basic booking bot uses no AI at all.
 
-6.2. When the Client reaches 80% of the monthly limit, the Developer tells the Client.
+6.2. The monthly limit is enforced as a spending cap on an AI provider key used only for the
+Client's system. The cap is set in money, for the plan's number of operations at the price of the
+recommended model, so the exact number of operations it allows depends on their length. The
+Developer does not charge for AI use above the limit.
 
-6.3. Above the limit, the Order Form sets one of two options:
-- **Keep working** (default). Extra operations cost $2 per 1,000, or the amount set in the Order
-  Form, on the next invoice.
-- **Hard cap.** Until the 1st of the next month, the system uses simple built-in rules. Buttons,
-  reminders and prices from page markup work as usual. Typed messages and emails are understood
-  less well, and only in English and Russian. Nothing is lost.
+6.3. **When the cap is reached,** the Developer tells the Client, and the AI pauses until the 1st
+of the next month, or until the Client moves to a higher plan (11.1):
+- the booking bot keeps taking bookings with buttons and sending reminders, and reads typed
+  messages with simple rules, in English and Russian;
+- new emails wait, unsorted, with no reply drafts or hot-lead alerts. They are sorted when the AI is
+  available again;
+- competitor pages without price markup are marked "not checked this time". Prices from page
+  markup are checked as usual.
+
+If the Client reaches the cap two months in a row, the Developer suggests the next plan. The Client
+decides.
 
 6.4. The limits apply to the AI model the Developer recommends for the package. A more powerful model
 at the Client's request is priced separately in the Order Form.
@@ -167,7 +178,7 @@ provider directly.
 - Work on the Client's other systems, websites, computers or accounts.
 - Third-party fees: WhatsApp messages (Meta bills the Client), a Meta partner's monthly fee, the
   Client's own subscriptions.
-- AI operations above the limit (section 6).
+- AI use above the plan's limit. At the limit, the AI pauses (section 6).
 - Hosting on the Client's own server or on a dedicated server, unless the Order Form includes it.
 - Recovering data deleted inside Client Accounts. Use the account's own history or backups.
 - Outages of Third-Party Services. The Developer watches them, tells the Client, and repairs its side

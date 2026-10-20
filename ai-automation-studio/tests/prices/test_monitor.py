@@ -10,15 +10,16 @@ import msgspec
 import pytest
 
 from autostudio.clientconf import ClientInfo, SinkConfig
-from autostudio.errors import NotifyError, SinkError
+from autostudio.errors import LLMError, LLMErrorKind, NotifyError, SinkError
 from autostudio.events import EventLog
 from autostudio.llm import FakeLLM
-from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product
+from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product, SiteRule
 from autostudio.prices.extract import MAX_EVIDENCE_CHARS, LLMBudget, PriceGuess
 from autostudio.prices.fetch import FetchFailure, FetchResult
 from autostudio.prices.heuristics import make_fake_llm
 from autostudio.prices.monitor import PricesDeps, RunResult, check_all, pct_change, render_digest, run_once
 from autostudio.prices.store import OfferKey, PriceStore
+from autostudio.runlog import RunSkipped
 from autostudio.sinks import CsvSink
 
 T0 = dt.datetime(2026, 10, 20, 6, 0, tzinfo=dt.UTC)
@@ -745,13 +746,15 @@ async def test__run_once__own_price_raised_above_competitor__undercut_alerted(tm
 # --- ловушки ревью: одновременные проходы и сбои доставки --------------------------------------
 
 
-async def test__run_once__overlapping_runs__second_skipped_one_digest(tmp_path):
+async def test__run_once__overlapping_runs__second_raises_run_skipped_one_digest(tmp_path):
     world = World(tmp_path, {URL_A: ld_page('95.00')})
     config = make_config(product(offer()))
     first, second = await asyncio.gather(
-        run_once(config, world.deps, world.now), run_once(config, world.deps, world.now)
+        run_once(config, world.deps, world.now), run_once(config, world.deps, world.now), return_exceptions=True
     )
-    assert (first.skipped, second.skipped) == (False, True)
+    assert isinstance(first, RunResult)
+    assert isinstance(second, RunSkipped)  # не успех и не сбой: supervised_run так и запишет
+    assert second.__context__ is None  # BlockingIOError замка не тянется в лог «причиной»
     assert len(world.notifier.sent) == 1
     assert len(world.tab('History')) == 2
     assert world.kinds().count('prices.undercut') == 1
@@ -953,3 +956,168 @@ async def test__run_once__history_append_fails__later_sheet_rows_wait_in_order(t
     sink.fail_tab = None
     await world.run(config)
     assert (len(world.tab('History')), len(world.tab('Changes'))) == (2, 2)
+
+
+# --- пауза сайта по претензии -------------------------------------------------------------------
+
+URL_C = 'https://shop-c.example/p/1'
+
+
+def paused_b(*products: Product, **section) -> PricesConfig:
+    rule = SiteRule(paused=True, paused_reason='письмо владельца 2026-10-21')
+    return make_config(*products, sites={'shop-b.example': rule}, **section)
+
+
+async def test__run_once__paused_site__not_fetched_last_price_shown_one_event_not_a_failure(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('120.00'), URL_B: ld_page('95.00')})
+    item = product(offer(), offer(URL_B, 'Shop B'))
+    await world.run(make_config(item))
+    world.fetcher.fetched.clear()
+    first = await world.run(paused_b(item, failure_alert_after=1))
+    second = await world.run(paused_b(item, failure_alert_after=1))
+    assert world.fetcher.fetched == [URL_A, URL_A]  # к сайту на паузе — ни одного запроса
+    assert (first.checked, first.failed, first.paused, first.failures) == (1, 0, 1, {})
+    assert first.operator_alert is None and second.operator_alert is None  # пауза — не сбой
+    assert world.store.state(OfferKey('p1', 'Shop B', URL_B)).failures == 0
+    row = world.tab('Prices now')[2]
+    assert row[3] == '95.00'
+    assert row[10] == 'paused: this site is not being checked for now; showing the last known price'
+    kinds = world.kinds()
+    assert 'prices.failed' not in kinds
+    assert kinds.count('prices.paused') == 2  # по событию за проход, а не за ссылку
+    paused = [e for e in world.events.between(T0, T0 + dt.timedelta(days=9)) if e.kind == 'prices.paused']
+    assert paused[0].payload == {'sites': 'shop-b.example', 'offers': '1'}
+
+
+async def test__run_once__paused_site__digest_counts_only_checked_pages(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('120.00'), URL_B: ld_page('95.00'), URL_C: ld_page('99.00')})
+    item = product(offer(), offer(URL_B, 'Shop B'), offer(URL_C, 'Shop C'), own='150.00')
+    await world.run(make_config(item))
+    world.fetcher.pages[URL_A] = ld_page('100.00')
+    world.fetcher.pages[URL_C] = FetchFailure(reason='timeout', detail='дольше 20 с')
+    result = await world.run(paused_b(item))
+    assert result.digest is not None
+    assert '1 of 2 pages could not be checked this time' in result.digest
+    assert result.failures == {'timeout': 1}
+
+
+async def test__run_once__redirect_into_paused_site__counted_as_paused(tmp_path):
+    world = World(tmp_path, {URL_A: FetchFailure(reason='paused', detail='shop-b.example')})
+    result = await world.run(make_config(product(offer())))
+    assert (result.failed, result.paused) == (0, 1)
+    paused = [e for e in world.events.between(T0, T0 + dt.timedelta(days=2)) if e.kind == 'prices.paused']
+    assert paused[0].payload == {'sites': 'shop-b.example', 'offers': '1'}
+
+
+# --- числа в таблице ----------------------------------------------------------------------------
+
+
+class RecordingSink:
+    """Таблица, которая запоминает ячейки как есть — с типами."""
+
+    def __init__(self) -> None:
+        self.tabs: dict[str, list[list[object]]] = {}
+
+    async def replace(self, tab, header, rows):
+        self.tabs[tab] = [list(row) for row in rows]
+
+    async def append(self, tab, header, rows):
+        self.tabs.setdefault(tab, []).extend(list(row) for row in rows)
+
+
+async def test__run_once__sheet_cells__amounts_and_percents_numbers_labels_text(tmp_path):
+    sink = RecordingSink()
+    world = World(tmp_path, {URL_A: ld_page('120.00')}, sink=sink)
+    config = make_config(product(offer(), own='110.00'))
+    await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('100.00')
+    await world.run(config)
+    now = sink.tabs['Prices now'][0]
+    assert now[:9] == [
+        'Phone',
+        Decimal('110.00'),
+        'Shop A',
+        Decimal('100.00'),
+        'GEL',
+        Decimal('-9.1'),
+        Decimal('-16.7'),
+        'in stock',
+        'schema.org data',
+    ]
+    assert [type(cell).__name__ for cell in now] == [
+        'str', 'Decimal', 'str', 'Decimal', 'str', 'Decimal', 'Decimal', 'str', 'str', 'str', 'str', 'str'
+    ]  # fmt: skip
+    assert sink.tabs['History'][-1][3] == Decimal('100.00')
+    price, undercut = sink.tabs['Changes']
+    assert price[4:8] == [Decimal('120.00'), Decimal('100.00'), Decimal('-16.7'), Decimal('110.00')]
+    assert undercut[4:8] == ['', Decimal('100.00'), Decimal('-9.1'), Decimal('110.00')]
+
+
+async def test__run_once__csv_cells__numbers_in_canonical_text(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('120.00')})
+    config = make_config(product(offer(), own='110.00'))
+    await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('100.00')
+    await world.run(config)
+    assert world.tab('Prices now')[1][:7] == ['Phone', '110.00', 'Shop A', '100.00', 'GEL', '-9.1', '-16.7']
+    assert world.tab('Changes')[1][4:8] == ['120.00', '100.00', '-16.7', '110.00']
+
+
+class FirstAppendFails(RecordingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def append(self, tab, header, rows):
+        if not self.failed:
+            self.failed = True
+            raise SinkError('quota exceeded')
+        await super().append(tab, header, rows)
+
+
+async def test__run_once__changes_queued_after_sheet_failure__numbers_survive_the_queue(tmp_path):
+    flaky = FirstAppendFails()
+    world = World(tmp_path, {URL_A: ld_page('120.00')}, sink=flaky)
+    config = make_config(product(offer(), own='110.00'))
+    with pytest.raises(SinkError):
+        await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('100.00')
+    await world.run(config)
+    history = flaky.tabs['History']
+    assert [row[3] for row in history] == [Decimal('120.00'), Decimal('100.00')]
+
+
+# --- вид ошибки модели --------------------------------------------------------------------------
+
+
+def failing_llm(kind: LLMErrorKind) -> FakeLLM:
+    def handler(system: str, prompt: str) -> PriceGuess:
+        raise LLMError('Error code: 401 — invalid x-api-key', status_code=401, kind=kind)
+
+    return FakeLLM({PriceGuess: handler})
+
+
+async def test__run_once__model_key_broken__operator_once_client_later_then_recovery(tmp_path):
+    plain = '<html><body><p>Price 90 ₾</p></body></html>'
+    world = World(tmp_path, {URL_A: plain, URL_B: plain}, llm=failing_llm('config'))
+    config = make_config(product(offer(), offer(URL_B, 'Shop B')), llm_fallback=True)
+    first = await world.run(config)
+    assert first.failures == {'llm_config': 2}
+    assert first.operator_alert is not None
+    assert 'модель не отвечает из-за настроек (ключ, права или имя модели)' in first.operator_alert
+    assert 'Страниц без цены в этом проходе: 2' in first.operator_alert
+    assert world.tab('Prices now')[1][10] == 'not checked this time — will be checked on the next run'
+    second = await world.run(config)
+    assert second.operator_alert is None  # не каждый проход
+    world.deps = msgspec.structs.replace(world.deps, llm=make_fake_llm())
+    third = await world.run(config)
+    assert third.operator_alert is not None and 'модель снова отвечает' in third.operator_alert
+
+
+async def test__run_once__model_outage__client_later_no_config_alert(tmp_path):
+    plain = '<html><body><p>Price 90 ₾</p></body></html>'
+    world = World(tmp_path, {URL_A: plain}, llm=failing_llm('outage'))
+    result = await world.run(make_config(product(offer()), llm_fallback=True))
+    assert result.failures == {'llm_outage': 1}
+    assert result.operator_alert is None  # провайдер лёг — ждём; оператору — по порогу сбоев ссылки
+    assert world.tab('Prices now')[1][10] == 'not checked this time — will be checked on the next run'

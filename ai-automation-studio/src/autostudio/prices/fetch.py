@@ -5,17 +5,20 @@
 
 - к одному сайту — не чаще раза в `min_delay_s`, и не больше одного запроса одновременно;
 - robots.txt читается один раз за запуск на сайт и разбирается по RFC 9309 (protego:
-  `*`, `$`, самое длинное совпадение — одинаково на всех версиях Python; у
-  `urllib.robotparser` в 3.12 правила с `*` молча не работали). Нет файла (4xx) или сайт
-  недоступен — можно; 5xx — сайт болеет, в этот запуск его не трогаем;
+  `*`, `$`, самое длинное совпадение — одинаково на всех версиях Python). `urllib.robotparser`
+  зависит от версии: на 3.12.3 он верен в 8 из 21 случая тестов пакета и в основном
+  разрешает то, что сайт закрыл; на 3.13.16 — во всех (`var/review_prices/p11_…`). Нет
+  файла (4xx) или сайт недоступен — можно; 5xx — сайт болеет, в этот запуск его не трогаем;
 - 429/5xx/таймаут — повтор с экспоненциальной паузой; `Retry-After` соблюдается, а если
   сайт просит подождать дольше предела, страница откладывается до следующего запуска;
 - страница больше `max_page_bytes` обрывается на потоке, не дочитываясь в память, а у каждой
   попытки есть общий срок (`timeout_s` у httpx — это предел на каждый шаг чтения, и сайт,
   отдающий по байту, иначе держал бы проход часами);
-- редиректы проходятся вручную, и каждый адрес заново проверяется на SSRF (включая
-  адреса, в которые резолвится имя — то самое punycode-имя, к которому подключится httpx)
-  и на robots.txt.
+- редиректы проходятся вручную (`follow_redirects=False` у каждого запроса), и каждый адрес
+  заново проверяется на SSRF (включая адреса, в которые резолвится имя — то самое
+  punycode-имя, к которому подключится httpx), на паузу сайта и на robots.txt;
+- сайт на паузе (`[prices.sites."…"] paused = true`, претензия владельца) не получает от нас
+  ни одного запроса — ни страницы, ни robots.txt, ни DNS-запроса за его адресом.
 
 Ограничение: между нашей проверкой DNS и соединением httpx имя резолвится ещё раз
 (DNS rebinding). Для полной защиты сервер оператора закрывает исходящие соединения во
@@ -41,8 +44,8 @@ from protego import Protego
 
 from autostudio import __version__
 from autostudio.clock import Clock, system_now
-from autostudio.prices.config import ROBOTS_AGENT, PricesSection
-from autostudio.prices.urls import ip_is_public, origin, redact, url_problem
+from autostudio.prices.config import PAUSED, ROBOTS_AGENT, PricesSection
+from autostudio.prices.urls import covering_site, ip_is_public, origin, redact, url_problem
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +85,9 @@ class FetchFailure(msgspec.Struct, frozen=True, kw_only=True):
 
     Attributes:
         reason: `robots_disallowed`, `blocked_url`, `http_error`, `rate_limited`, `server_error`,
-            `timeout`, `network`, `dns`, `too_large`, `not_html`, `too_many_redirects`.
-        detail: Пояснение для оператора (без query-строк и без текста исключений httpx).
+            `timeout`, `network`, `dns`, `too_large`, `not_html`, `too_many_redirects`, `paused`.
+        detail: Пояснение для оператора (без query-строк и без текста исключений httpx); для
+            `paused` — домен на паузе.
         status: HTTP-статус, если ответ был.
     """
 
@@ -93,7 +97,11 @@ class FetchFailure(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class FetchSettings(msgspec.Struct, frozen=True, kw_only=True):
-    """Правила вежливости и пределы одного загрузчика."""
+    """Правила вежливости и пределы одного загрузчика.
+
+    Attributes:
+        paused_sites: Домены на паузе: к ним (и к их поддоменам) запросов нет совсем.
+    """
 
     user_agent: str
     robots_agent: str = ROBOTS_AGENT
@@ -106,6 +114,7 @@ class FetchSettings(msgspec.Struct, frozen=True, kw_only=True):
     max_retry_after_s: float = 60.0
     backoff_base_s: float = 2.0
     attempt_timeout_s: float | None = None
+    paused_sites: frozenset[str] = frozenset()
 
     @property
     def attempt_deadline_s(self) -> float:
@@ -122,6 +131,7 @@ class FetchSettings(msgspec.Struct, frozen=True, kw_only=True):
             max_retries=section.max_retries,
             max_page_bytes=section.max_page_bytes,
             respect_robots=section.respect_robots,
+            paused_sites=section.paused_sites,
         )
 
 
@@ -249,6 +259,10 @@ class PoliteFetcher:
         """
         current = url
         for _ in range(self._s.max_redirects + 1):
+            paused = self._paused(current)
+            if paused is not None:
+                logger.info('сайт %s на паузе — %s не запрашивается', paused, redact(current))
+                return FetchFailure(reason=PAUSED, detail=paused)
             blocked = await self._check_address(current)
             if blocked is not None:
                 return blocked
@@ -268,6 +282,15 @@ class PoliteFetcher:
                 html=decode_html(outcome.body, outcome.charset), final_url=current, status=outcome.status
             )
         return FetchFailure(reason='too_many_redirects', detail=f'больше {self._s.max_redirects} редиректов')
+
+    def _paused(self, url: str) -> str | None:
+        if not self._s.paused_sites:
+            return None
+        try:
+            host = httpx.URL(url).host
+        except (httpx.InvalidURL, ValueError):
+            return None  # битый адрес отклонит `_check_address`
+        return covering_site(host, self._s.paused_sites)
 
     async def _check_address(self, url: str) -> FetchFailure | None:
         problem = url_problem(url)
@@ -377,6 +400,9 @@ class PoliteFetcher:
         async with self._lock_for(site):
             await self._wait_turn(site)
             try:
+                # follow_redirects=False — у каждого запроса, а не у клиента: общий httpx-клиент
+                # из CoreProvider ходит по редиректам сам (так нужно Telegram и вебхукам), а здесь
+                # каждый следующий адрес обязан заново пройти SSRF, паузу сайта и robots.txt.
                 async with (
                     asyncio.timeout(self._s.attempt_deadline_s),
                     self._http.stream(

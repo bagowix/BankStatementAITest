@@ -15,7 +15,7 @@ import datetime as dt
 import itertools
 import re
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from enum import StrEnum
 from typing import Final, Literal
 from zoneinfo import ZoneInfo
@@ -28,6 +28,10 @@ from autostudio.errors import AutoStudioError
 
 # `admin` — запись «с улицы» или по телефону, которую внёс администратор через бота.
 type Source = Literal['buttons', 'ai', 'admin']
+type Span = tuple[dt.datetime, dt.datetime]
+"""Полуинтервал времени [начало, конец), UTC."""
+type BusyMap = Mapping[str, Sequence[Span]]
+"""Занятость мастеров вне базы записей (Google Calendar): id мастера → промежутки, UTC."""
 
 
 class BookingStatus(StrEnum):
@@ -129,12 +133,15 @@ class Customer(msgspec.Struct, frozen=True, kw_only=True):
         name: Имя или None.
         phone: Телефон или None.
         language: Язык или None.
+        source: Откуда пришёл впервые (метка deep link `t.me/<bot>?start=instagram`,
+            реклама Click-to-WhatsApp) или None.
     """
 
     key: str
     name: str | None = None
     phone: str | None = None
     language: str | None = None
+    source: str | None = None
 
     @property
     def complete(self) -> bool:
@@ -274,6 +281,7 @@ def free_slots(
     *,
     staff_id: str | None = None,
     ignore_booking: str | None = None,
+    busy: BusyMap | None = None,
 ) -> list[Slot]:
     """Свободные начала услуги в местный день.
 
@@ -289,6 +297,8 @@ def free_slots(
         now: Текущий момент.
         staff_id: Только этот мастер; None — любой подходящий.
         ignore_booking: Не считать занятой эту запись (перенос самой себя).
+        busy: Занятость мастеров из внешнего календаря — закрывает время так же, как
+            запись (с паузой `buffer_min`), но не входит в «нагрузку» при выборе мастера.
 
     Returns:
         Слоты по возрастанию времени, по одному на начало.
@@ -317,7 +327,11 @@ def free_slots(
             intervals.setdefault(booking.staff_id, []).append((booking.start, booking.end))
         if day_start <= booking.start < day_end:
             load[booking.staff_id] += 1
-    busy = {member.id: _Busy(intervals.get(member.id, ())) for member in candidates}
+    for member in candidates:
+        for start, end in (busy or {}).get(member.id, ()):
+            if end + buffer > day_start and start < day_end + buffer:
+                intervals.setdefault(member.id, []).append((start, end))
+    taken = {member.id: _Busy(intervals.get(member.id, ())) for member in candidates}
     order = {member.id: index for index, member in enumerate(section.staff)}
     step = section.slot_step_min
     offers: dict[dt.datetime, Staff] = {}
@@ -328,7 +342,7 @@ def free_slots(
                 start = wall_to_utc(day, minute, zone)
                 if start is None or start < earliest:
                     continue
-                if start + duration > limit or busy[member.id].clashes(start, start + duration, buffer):
+                if start + duration > limit or taken[member.id].clashes(start, start + duration, buffer):
                     continue
                 current = offers.get(start)
                 if current is None or (load[member.id], order[member.id]) < (load[current.id], order[current.id]):
@@ -366,6 +380,7 @@ def find_slot(
     now: dt.datetime,
     *,
     ignore_booking: str | None = None,
+    busy: BusyMap | None = None,
 ) -> Slot | None:
     """Проверка в момент подтверждения: свободен ли ещё именно этот слот.
 
@@ -377,12 +392,15 @@ def find_slot(
         bookings: Актуальные записи.
         now: Текущий момент.
         ignore_booking: Запись, которую переносят.
+        busy: Занятость из внешнего календаря.
 
     Returns:
         Слот (с назначенным мастером) или None, если время занято, в прошлом или вне расписания.
     """
     day = start.astimezone(config.client.zone).date()
-    slots = free_slots(config, service_id, day, bookings, now, staff_id=staff_id, ignore_booking=ignore_booking)
+    slots = free_slots(
+        config, service_id, day, bookings, now, staff_id=staff_id, ignore_booking=ignore_booking, busy=busy
+    )
     return next((slot for slot in slots if slot.start == start), None)
 
 
@@ -396,6 +414,7 @@ def bookable_days(
     start_day: dt.date | None = None,
     limit: int | None = None,
     ignore_booking: str | None = None,
+    busy: BusyMap | None = None,
 ) -> list[dt.date]:
     """Дни горизонта, в которые есть хоть один свободный слот.
 
@@ -408,6 +427,7 @@ def bookable_days(
         start_day: Не раньше этого дня.
         limit: Не больше стольких дней.
         ignore_booking: Запись, которую переносят.
+        busy: Занятость из внешнего календаря.
 
     Returns:
         Даты по возрастанию.
@@ -418,7 +438,9 @@ def bookable_days(
         if start_day is not None and day < start_day:
             continue
         around = by_day.get(day, [])
-        if free_slots(config, service_id, day, around, now, staff_id=staff_id, ignore_booking=ignore_booking):
+        if free_slots(
+            config, service_id, day, around, now, staff_id=staff_id, ignore_booking=ignore_booking, busy=busy
+        ):
             out.append(day)
             if limit is not None and len(out) >= limit:
                 break
@@ -436,6 +458,7 @@ def next_free_slots(
     start_day: dt.date | None = None,
     window: TimeWindow | None = None,
     ignore_booking: str | None = None,
+    busy: BusyMap | None = None,
 ) -> list[Slot]:
     """Ближайшие свободные слоты по всем дням горизонта.
 
@@ -449,6 +472,7 @@ def next_free_slots(
         start_day: Не раньше этого дня.
         window: Окно времени начала (местное) или None.
         ignore_booking: Запись, которую переносят.
+        busy: Занятость из внешнего календаря.
 
     Returns:
         До `limit` слотов по возрастанию времени.
@@ -460,7 +484,10 @@ def next_free_slots(
         if start_day is not None and day < start_day:
             continue
         around = by_day.get(day, [])
-        for slot in free_slots(config, service_id, day, around, now, staff_id=staff_id, ignore_booking=ignore_booking):
+        found = free_slots(
+            config, service_id, day, around, now, staff_id=staff_id, ignore_booking=ignore_booking, busy=busy
+        )
+        for slot in found:
             if window is None or window.contains(minute_of_day(slot.start, zone)):
                 out.append(slot)
                 if len(out) >= limit:
@@ -478,6 +505,7 @@ def nearest_slots(
     limit: int,
     staff_id: str | None = None,
     ignore_booking: str | None = None,
+    busy: BusyMap | None = None,
 ) -> list[Slot]:
     """Альтернативы занятому времени: ближайшие к нему в тот же день, затем следующие дни.
 
@@ -490,12 +518,15 @@ def nearest_slots(
         limit: Сколько вариантов.
         staff_id: Мастер или None.
         ignore_booking: Запись, которую переносят.
+        busy: Занятость из внешнего календаря.
 
     Returns:
         До `limit` слотов по возрастанию времени.
     """
     day = target.astimezone(config.client.zone).date()
-    same_day = free_slots(config, service_id, day, bookings, now, staff_id=staff_id, ignore_booking=ignore_booking)
+    same_day = free_slots(
+        config, service_id, day, bookings, now, staff_id=staff_id, ignore_booking=ignore_booking, busy=busy
+    )
     picked = sorted(same_day, key=lambda slot: (abs(slot.start - target), slot.start))[:limit]
     if len(picked) < limit:
         picked += next_free_slots(
@@ -507,8 +538,42 @@ def nearest_slots(
             staff_id=staff_id,
             start_day=day + dt.timedelta(days=1),
             ignore_booking=ignore_booking,
+            busy=busy,
         )
     return sorted(picked, key=lambda slot: slot.start)
+
+
+def subtract_spans(spans: Iterable[Span], holes: Iterable[Span]) -> list[Span]:
+    """Части промежутков `spans`, не покрытые ни одним из `holes`.
+
+    Google freeBusy возвращает занятость календаря целиком, вместе с событиями наших же
+    записей. Когда календарь общий у нескольких мастеров (календарь бизнеса), событие
+    записи к Гиорги закрыло бы это время и Нике; вычитание своих записей возвращает
+    календарю только «чужую» занятость. Цена решения: чужое событие, которое совпадает
+    по времени с нашей записью в общем календаре, на время этой записи не учитывается.
+
+    Args:
+        spans: Занятые промежутки.
+        holes: Что вычесть.
+
+    Returns:
+        Оставшиеся промежутки по возрастанию начала.
+    """
+    cuts = sorted(hole for hole in holes if hole[0] < hole[1])
+    out: list[Span] = []
+    for start, end in sorted(spans):
+        cursor = start
+        for cut_start, cut_end in cuts:
+            if cut_end <= cursor or cut_start >= end:
+                continue
+            if cut_start > cursor:
+                out.append((cursor, cut_start))
+            cursor = max(cursor, cut_end)
+            if cursor >= end:
+                break
+        if cursor < end:
+            out.append((cursor, end))
+    return out
 
 
 def will_remind(config: BookingConfig, booking: Booking, now: dt.datetime) -> bool:
@@ -601,6 +666,28 @@ def clean_phone(text: str, *, region: str, shared: bool = False) -> str | None:
         if ok:
             return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
     return None
+
+
+_SOURCE: Final = re.compile(r'^[a-z0-9_-]{1,64}$')
+
+
+def clean_source(raw: str | None) -> str | None:
+    """Метка источника из deep link: `site`, `instagram`, `maps_2026`.
+
+    Правила — как у параметра `start` в Telegram (A-Z, a-z, 0-9, `_`, `-`, до 64 знаков);
+    регистр не важен — «Instagram» и «instagram» в отчёте одно и то же. Всё остальное —
+    мусор или попытка подсунуть текст в отчёт владельцу, и он отбрасывается.
+
+    Args:
+        raw: Что прислал канал.
+
+    Returns:
+        Метка в нижнем регистре или None.
+    """
+    if raw is None:
+        return None
+    label = raw.strip().lower()
+    return label if _SOURCE.match(label) else None
 
 
 def example_phone(region: str) -> str:

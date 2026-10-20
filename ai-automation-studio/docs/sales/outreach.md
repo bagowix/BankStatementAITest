@@ -10,7 +10,9 @@
 >
 > Обозначения:
 > - `{{NAME}}`, `{{TELEGRAM}}`, `{{WHATSAPP}}`, `{{EMAIL}}`, `{{DOMAIN}}`, `{{CALENDAR_LINK}}`,
->   `{{YEARS}}`, `{{GITHUB}}`, `{{PHOTO}}` — твои данные, заполни сам, ничего не выдумывай;
+>   `{{YEARS}}`, `{{GITHUB}}`, `{{PHOTO}}` — твои данные, заполни сам, ничего не выдумывай. Формат
+>   один на все файлы (`docs/sales/offers.md`, 0.1): `{{TELEGRAM}}` — username без @, в тексте
+>   стоит `@{{TELEGRAM}}`; `{{WHATSAPP}}` — только цифры, в тексте `+{{WHATSAPP}}`;
 > - `[в квадратных скобках]` — подставь под конкретного клиента;
 > - **П / И / НП** — статусы фактов из `docs/research/DECISION_BRIEF.md`. **НП** — не подтверждено,
 >   проверь до того, как на это опираться. В тексты для клиентов НП-цифры не попадают.
@@ -93,7 +95,7 @@
    Голосовые и звонки без договорённости не используем.
 8. **Без обмана.** Не представляемся клиентом. Не записываемся на фиктивный визит, чтобы «проверить
    скорость ответа». Не делаем демо-бота с названием и логотипом реального бизнеса без его согласия.
-   Не говорим «мы» и «наша команда»: ты один (см. `offers.md`, раздел 1, пункт 8).
+   Не говорим «мы» и «наша команда»: ты один (см. `offers.md`, раздел 1, пункт 10).
 9. **Честно про ИИ.** Если в пакете есть модель, на созвоне прямо говорим, что это OpenAI или
    Anthropic и что текст сообщения или письма уходит провайдеру. Базовый бот записи работает без
    модели.
@@ -384,7 +386,7 @@ Hello! I'm {{NAME}}, a software developer living in Tbilisi.
 
 [hook]
 
-I build Telegram booking bots for salons and independent masters. Customers pick the service and time themselves, the bot reminds them a day and 2 hours before, and you get a message for every booking. You can try booking yourself as a customer: I have a demo bot where bookings aren't real. Shall I send the link?
+I build Telegram booking bots for salons and independent stylists. Customers pick the service and time themselves, the bot reminds them a day and 2 hours before, and you get a message for every booking. You can try booking yourself as a customer: I have a demo bot where bookings aren't real. Shall I send the link?
 
 If you're not interested, just reply "no" and I won't write again.
 ```
@@ -403,13 +405,13 @@ If you're not interested, just reply "no" and I won't write again.
 Первым трём бизнесам в Грузии — настройка за полцены в обмен на кейс.
 
 Попробовать как клиент: [ссылка на демо-бота]
-Написать: {{TELEGRAM}}
+Написать: @{{TELEGRAM}}
 ```
 
 **Ответ на прямой запрос в чате** («ищу, кто сделает бота записи»):
 
 ```text
-Здравствуйте! Делаю именно это: бот записи в Telegram с напоминаниями и уведомлениями владельцу. Демо-бот, можно записаться как клиент: [ссылка на демо-бота]. Если подходит — напишите в личку {{TELEGRAM}}, расскажу про цену и сроки.
+Здравствуйте! Делаю именно это: бот записи в Telegram с напоминаниями и уведомлениями владельцу. Демо-бот, можно записаться как клиент: [ссылка на демо-бота]. Если подходит — напишите в личку @{{TELEGRAM}}, расскажу про цену и сроки.
 ```
 
 ### 4.4 Почта
@@ -440,7 +442,7 @@ If you're not interested, just reply "no" and I won't write again.
 Если тема неактуальна, ответьте «нет», и я больше не буду писать.
 
 {{NAME}}
-{{DOMAIN}} · Telegram {{TELEGRAM}}
+{{DOMAIN}} · Telegram @{{TELEGRAM}}
 ```
 
 «лет опыта» согласуй с числом: «2 года», «21 год».
@@ -464,7 +466,7 @@ If this is useful, I can show you a 10-minute demo on sample emails from a ficti
 If it's not relevant, reply "no" and I won't write again.
 
 {{NAME}}
-{{DOMAIN}} · Telegram {{TELEGRAM}}
+{{DOMAIN}} · Telegram @{{TELEGRAM}}
 ```
 
 **RU — prices.** Тема: «Цены [категория] у конкурентов — в одной таблице».
@@ -483,7 +485,7 @@ If it's not relevant, reply "no" and I won't write again.
 Если тема неактуальна, ответьте «нет», и я больше не буду писать.
 
 {{NAME}}
-{{DOMAIN}} · Telegram {{TELEGRAM}}
+{{DOMAIN}} · Telegram @{{TELEGRAM}}
 ```
 
 **EN — prices.** Subject: "Competitor prices for [category], in one spreadsheet".
@@ -502,7 +504,7 @@ Send me links to 3 competitor pages, and I'll tell you for free whether the pric
 If it's not relevant, reply "no" and I won't write again.
 
 {{NAME}}
-{{DOMAIN}} · Telegram {{TELEGRAM}}
+{{DOMAIN}} · Telegram @{{TELEGRAM}}
 ```
 
 **KA — ПЕРЕВЕСТИ НОСИТЕЛЕМ.** Для грузинских компаний переводятся письма inbox и prices: исходник —
@@ -557,7 +559,7 @@ I build small automations for local businesses: a booking bot with reminders, in
 
 Right now I'm asking salon owners in Tbilisi how customers book and how often they don't show up. 10 minutes, at a time that suits you. I'm not selling anything in this conversation.
 
-Telegram {{TELEGRAM}} · WhatsApp {{WHATSAPP}} · {{EMAIL}}
+Telegram @{{TELEGRAM}} · WhatsApp +{{WHATSAPP}} · {{EMAIL}}
 ```
 
 ## 5. Фоллоу-апы: день 3 и день 7
@@ -589,13 +591,13 @@ Hello, [name]! Did you get a chance to look at the [video / demo bot]? If it's e
 **День 7 — RU**
 
 ```text
-[Имя], пишу в последний раз, чтобы не надоедать. Если тема станет актуальной, я на связи: {{TELEGRAM}}. Хорошей недели!
+[Имя], пишу в последний раз, чтобы не надоедать. Если тема станет актуальной, я на связи: @{{TELEGRAM}}. Хорошей недели!
 ```
 
 **День 7 — EN**
 
 ```text
-[Name], this is my last message, so I don't bother you. If this becomes relevant, I'm here: {{TELEGRAM}}. Have a good week!
+[Name], I don't want to keep bothering you, so this is my last message. If this becomes relevant, I'm here: @{{TELEGRAM}}. Have a good week!
 ```
 
 **KA — ПЕРЕВЕСТИ НОСИТЕЛЕМ.** Исходник — EN-тексты дня 3 и дня 7 выше, без изменений.
@@ -898,9 +900,9 @@ uv run autostudio booking run clients/demo-bot/booking.toml
 - В описании бота (`/setdescription` в @BotFather) напиши: «Демо: записи ненастоящие. Не вводите
   реальный номер, вымышленное имя подойдёт». Демо-бот всё равно сохраняет то, что ввели, а кнопка
   «Поделиться контактом» отдаёт настоящий номер. Раз в неделю останавливай бота и удаляй его данные:
-  каталог `<AUTOSTUDIO_DATA_DIR>/demo-bot` (локально — `var/demo-bot`) и папку `csv_dir` из секции
-  `[sink]` конфига. `new-client` оставляет там путь образца `var/out/demo-booking`: поменяй его на
-  `var/out/demo-bot`, чтобы не путать с офлайн-демо.
+  каталог `<AUTOSTUDIO_DATA_DIR>/demo-bot` (локально — `var/demo-bot`). CSV лежит внутри него, в
+  `<AUTOSTUDIO_DATA_DIR>/demo-bot/out`: в образце конфига `csv_dir = "out"` — путь от каталога
+  данных клиента. Удаляй CSV вместе с каталогом данных, путь в конфиге не меняй.
 - Демо-бот без ключа модели понимает простые фразы по-русски и по-английски. С ключом —
   свободный текст лучше. Грузинского нет.
 
@@ -951,11 +953,12 @@ uv run autostudio prices probe "<ссылка на товар конкурент
 - принимает PDF выписки, в том числе скан, и отдаёт реквизиты, итоги и все операции;
 - каждый период сверяет с напечатанным в выписке «начало + приход − расход = конец». Не сошлось до
   цента — период помечается «не проверено», с размером расхождения и вероятной причиной;
-- у каждой цифры есть происхождение: страница и место на странице. Исправленная цифра показывает
-  исходное чтение;
+- у каждой цифры есть происхождение: страница, а у прочитанных из текстового слоя и OCR — и точное
+  место на странице (у перечитанных ИИ-ступенью — только полоса страницы). Исправленная цифра
+  показывает исходное чтение;
 - замер на реальных выписках четырёх разных банков: три сведены без платных моделей. Четвёртая —
   подшивка из десяти плохо отсканированных выписок на 99 страницах — сведена целиком двумя моделями
-  меньше чем за $1.
+  меньше чем за $1. Это малая выборка, а не статистика: ИИ-ступень измерена на одном документе.
 
 Не говори, что он работает с TBC или Bank of Georgia (не проверялось), с мультивалютными выписками
 и кредитными картами (не поддерживаются) и что он встроен в inbox.
@@ -1073,7 +1076,7 @@ Payment: 50% before I start, 50% after you accept the work, by bank transfer to 
 **Сообщение для пересылки — RU**
 
 ```text
-Наш [бот записи в Telegram / разбор почты / мониторинг цен] — работа {{NAME}}. [Одна фраза клиента о том, что изменилось.] Если интересно — {{TELEGRAM}} или {{CALENDAR_LINK}}.
+Наш [бот записи в Telegram / разбор почты / мониторинг цен] — работа {{NAME}}. [Одна фраза клиента о том, что изменилось.] Если интересно — @{{TELEGRAM}} или {{CALENDAR_LINK}}.
 ```
 
 **EN**
@@ -1085,7 +1088,7 @@ Payment: 50% before I start, 50% after you accept the work, by bank transfer to 
 **Message to forward — EN**
 
 ```text
-{{NAME}} set up [a Telegram booking bot / inbox sorting / competitor price monitoring] for us. [One sentence from the client about what changed.] If you're interested: {{TELEGRAM}} or {{CALENDAR_LINK}}.
+{{NAME}} set up [a Telegram booking bot / inbox sorting / competitor price monitoring] for us. [One sentence from the client about what changed.] If you're interested: @{{TELEGRAM}} or {{CALENDAR_LINK}}.
 ```
 
 **KA — ПЕРЕВЕСТИ НОСИТЕЛЕМ.** Исходник — оба EN-текста выше, без изменений.

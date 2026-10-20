@@ -1,9 +1,10 @@
 """Состояние разбора почты в SQLite: что уже разобрано, где остановились, что повторить.
 
-Тела писем здесь не хранятся никогда. Разбор письма (категория, поля), конверт (дата,
-отправитель, тема) и текст черновика лежат только до тех пор, пока не выполнены действия
-и не записана строка таблицы, затем стираются, а остаются Message-ID, категория и
-срочность — для дедупликации и отчёта. Всё, что старше `RETENTION` пайплайна, удаляется.
+Тела писем и PDF здесь не хранятся никогда. Разбор письма (категория, поля), конверт (дата,
+отправитель, тема), текст черновика и сверенные счета лежат только до тех пор, пока не
+выполнены действия и не записаны строки таблицы, затем стираются, а остаются Message-ID,
+категория и срочность — для дедупликации и отчёта. Всё, что старше `RETENTION` пайплайна,
+удаляется.
 
 Идемпотентность держится на трёх вещах: курсор UID на пару (папка, UIDVALIDITY),
 список выполненных действий на письмо и Message-ID как ключ, который переживает
@@ -20,6 +21,7 @@ from typing import Final, Literal, Self
 
 import msgspec
 
+from autostudio.inbox.invoices import InvoiceRecord
 from autostudio.inbox.mail import ParsedEmail
 from autostudio.inbox.triage import Draft, TriageResult
 
@@ -72,6 +74,13 @@ CREATE TABLE IF NOT EXISTS locks (
 CREATE TABLE IF NOT EXISTS health (
     name TEXT PRIMARY KEY,
     ok_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invoices (
+    message_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (message_id, position)
 );
 """
 
@@ -420,6 +429,38 @@ class InboxStore:
                 'draft = NULL, updated_at = excluded.updated_at',
                 (message_id, status, category, urgency, row, _ts(now), _ts(now)),
             )
+
+    # --- счета -------------------------------------------------------------------------
+
+    def save_invoices(self, message_id: str, records: list[InvoiceRecord], now: dt.datetime) -> None:
+        """Запоминает сверенные счета письма до записи во вкладку «Invoices».
+
+        Args:
+            message_id: Message-ID письма.
+            records: Счета по порядку вложений.
+            now: Текущий момент.
+        """
+        with self._connect() as conn:
+            conn.executemany(
+                'INSERT OR REPLACE INTO invoices (message_id, position, record, created_at) VALUES (?, ?, ?, ?)',
+                [
+                    (message_id, position, msgspec.json.encode(record).decode(), _ts(now))
+                    for position, record in enumerate(records)
+                ],
+            )
+
+    def pending_invoices(self) -> list[tuple[str, int, InvoiceRecord]]:
+        """Счета, ещё не записанные в таблицу (в порядке разбора)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                'SELECT message_id, position, record FROM invoices ORDER BY created_at, rowid'
+            ).fetchall()
+        return [(mid, int(position), msgspec.json.decode(raw, type=InvoiceRecord)) for mid, position, raw in rows]
+
+    def invoices_written(self, keys: list[tuple[str, int]]) -> None:
+        """Стирает счета, записанные в таблицу: суммы и поставщики теперь живут у клиента."""
+        with self._connect() as conn:
+            conn.executemany('DELETE FROM invoices WHERE message_id = ? AND position = ?', keys)
 
     # --- строки таблицы -----------------------------------------------------------------
 

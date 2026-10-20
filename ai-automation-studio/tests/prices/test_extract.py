@@ -412,14 +412,29 @@ async def test__read_with_llm__hallucinating_model__rejected():
     assert result.reason == 'llm_unverified'
 
 
-async def test__read_with_llm__provider_error__llm_error():
-    class Broken(FakeLLM):
-        async def extract(self, *, system, prompt, schema):
-            raise LLMError('quota exceeded')
+class BrokenLLM(FakeLLM):
+    def __init__(self, error: LLMError) -> None:
+        super().__init__()
+        self.error = error
 
-    result = await read_with_llm(page(body='<p>729 ₾</p>'), OFFER, product_name='x', llm=Broken())
+    async def extract(self, *, system, prompt, schema):
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ('error', 'reason'),
+    [
+        # Причина — по виду ошибки ядра, а не по тексту: текст «quota» бывает и у 429, и у 403.
+        (LLMError('quota exceeded', status_code=429, kind='outage'), 'llm_outage'),
+        (LLMError('quota exceeded', status_code=403, kind='config'), 'llm_config'),
+        (LLMError('model refused', kind='content'), 'llm_error'),
+        (LLMError('schema mismatch'), 'llm_error'),
+    ],
+)
+async def test__read_with_llm__provider_error__reason_by_error_kind_not_text(error, reason):
+    result = await read_with_llm(page(body='<p>729 ₾</p>'), OFFER, product_name='x', llm=BrokenLLM(error))
     assert isinstance(result, ExtractionFailure)
-    assert (result.reason, result.detail) == ('llm_error', 'quota exceeded')
+    assert (result.reason, result.detail) == (reason, str(error))
 
 
 async def test__read_with_llm__empty_page__no_call():

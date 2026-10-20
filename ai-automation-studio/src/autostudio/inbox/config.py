@@ -1,6 +1,6 @@
-"""Конфиг клиента пакета inbox: ящик, категории, профиль компании для черновиков.
+"""Конфиг клиента пакета inbox: ящик, вход, категории, счета, профиль компании для черновиков.
 
-Секретов здесь нет: логин и пароль приложения IMAP лежат в `.env`, конфиг называет
+Секретов здесь нет: пароль приложения или OAuth-ключи лежат в `.env`, конфиг называет
 только имена переменных. Категории и факты о компании — данные клиента, код по ним
 не ветвится: всё, что отличает одного клиента от другого, живёт в этом файле.
 """
@@ -9,17 +9,26 @@ import re
 from typing import Final, Literal
 
 import msgspec
+import phonenumbers
 
 from autostudio.clientconf import ClientInfo, NotifyConfig, SinkConfig
 from autostudio.errors import ConfigError
 
 type Urgency = Literal['low', 'normal', 'high']
+# Как входить в ящик: пароль приложения (личный Gmail, Яндекс, Zoho), OAuth Google Workspace
+# (Internal-клиент в GCP-проекте организации клиента) или OAuth Microsoft 365 (приложение в
+# тенанте клиента, вход без пользователя). Подробности — docs/packages/inbox.md.
+type ImapAuth = Literal['password', 'google_oauth', 'microsoft_oauth']
 
 URGENCY_RANK: Final[dict[str, int]] = {'low': 0, 'normal': 1, 'high': 2}
 
 _CATEGORY_ID: Final = re.compile(r'^[a-z][a-z0-9_]{1,39}$')
 _LANGUAGE: Final = re.compile(r'^[a-z]{2}$')
 _ADDRESS: Final = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
+_ENV_NAME: Final = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,99}$')
+# Счёт в письме — обычно 50–500 КБ. Верхняя граница держит PDF целиком внутри частичной
+# выборки письма (`imap.MAX_FETCH_BYTES`, base64 раздувает вложение на треть).
+_PDF_KB_MAX: Final = 3500
 # Категория `other` обязательна: туда код отправляет всё, что модель назвала
 # несуществующей категорией, и автоответы — без неё некуда деть «непонятное».
 FALLBACK_CATEGORY: Final = 'other'
@@ -169,14 +178,53 @@ class CompanyProfile(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
         return [*self.facts, *(fact for facts in self.facts_by_language.values() for fact in facts)]
 
 
+class InvoiceSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """Секция `[inbox.invoices]`: извлечение счетов из PDF-вложений.
+
+    Модель читает текстовый слой PDF и предлагает поля счёта, код их сверяет: итог должен быть
+    в тексте PDF, строки — сходиться с итогом. Сканы без текстового слоя (OCR в v1 нет) и всё,
+    что не сошлось, попадают в таблицу с пометкой «не проверено», а не как проверенные числа.
+
+    Attributes:
+        enabled: Извлекать счета.
+        categories: Категории писем со счетами; None — категория `invoice`, если она есть.
+        max_pdf_kb: PDF больше этого размера не разбирается (пометка «разобрать вручную»).
+        max_pages: PDF длиннее не разбирается: счёт на 30 страниц — это уже не счёт, а отчёт.
+        max_text_chars: Сколько символов текста PDF видит модель.
+        sheet_tab: Вкладка таблицы со счетами.
+    """
+
+    enabled: bool = True
+    categories: list[str] | None = None
+    max_pdf_kb: int = 2048
+    max_pages: int = 10
+    max_text_chars: int = 20_000
+    sheet_tab: str = 'Invoices'
+
+    def __post_init__(self) -> None:
+        if not 50 <= self.max_pdf_kb <= _PDF_KB_MAX:
+            raise ConfigError(f'inbox.invoices.max_pdf_kb: от 50 до {_PDF_KB_MAX} КБ')
+        if not 1 <= self.max_pages <= 50:
+            raise ConfigError('inbox.invoices.max_pages: от 1 до 50 страниц')
+        if not 2000 <= self.max_text_chars <= 100_000:
+            raise ConfigError('inbox.invoices.max_text_chars: от 2000 до 100000 символов')
+        if not self.sheet_tab.strip():
+            raise ConfigError('inbox.invoices.sheet_tab: нужно имя вкладки')
+
+
 class InboxSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
     """Секция `[inbox]`: ящик, лимиты, категории и правила действий.
 
     Attributes:
-        imap_host: IMAP-сервер (`imap.gmail.com`, `imap.yandex.ru`, `imap.zoho.eu`).
+        imap_host: IMAP-сервер (`imap.gmail.com`, `outlook.office365.com`, `imap.yandex.ru`).
         imap_port: Порт IMAP по SSL.
-        username_env: Переменная окружения с логином ящика.
-        password_env: Переменная с паролем приложения (не основным паролем!).
+        auth: Способ входа: `password`, `google_oauth` или `microsoft_oauth`.
+        username_env: Переменная окружения с логином ящика (при OAuth — адрес ящика).
+        password_env: Переменная с паролем приложения (не основным паролем!) для `password`.
+        oauth_client_id_env: Переменная с client ID OAuth-клиента (Google или Microsoft).
+        oauth_client_secret_env: Переменная с client secret.
+        oauth_refresh_token_env: Переменная с refresh token Google (`autostudio inbox oauth-google`).
+        oauth_tenant_id_env: Переменная с ID тенанта Microsoft 365 (GUID или домен).
         folder: Папка, которую разбираем.
         drafts_folder: Папка черновиков. В Gmail — `[Gmail]/Drafts`, в локализованном
             интерфейсе имя может быть другим; `autostudio inbox check --connect` подскажет.
@@ -193,12 +241,20 @@ class InboxSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fie
         mask_pii_in_sheet: Маскировать адрес, имя и телефон отправителя в таблице.
         alert_operator_on_injection: Сообщать оператору о письмах с подозрением на prompt-инъекцию.
         sheet_tab: Вкладка таблицы.
+        phone_region: Регион для номеров без кода страны (`599 12 34 56` → +995…): ISO 3166-1.
+        phone_fallback_regions: Регионы для номеров, которые в `phone_region` не существуют.
+        invoices: Извлечение счетов из PDF.
     """
 
     imap_host: str
     imap_port: int = 993
+    auth: ImapAuth = 'password'
     username_env: str = 'INBOX_IMAP_USER'
     password_env: str = 'INBOX_IMAP_PASSWORD'  # noqa: S105 - имя переменной, а не секрет
+    oauth_client_id_env: str = 'INBOX_OAUTH_CLIENT_ID'
+    oauth_client_secret_env: str = 'INBOX_OAUTH_CLIENT_SECRET'  # noqa: S105 - имя переменной
+    oauth_refresh_token_env: str = 'INBOX_OAUTH_REFRESH_TOKEN'  # noqa: S105 - имя переменной
+    oauth_tenant_id_env: str = 'INBOX_OAUTH_TENANT_ID'
     folder: str = 'INBOX'
     drafts_folder: str = 'Drafts'
     from_address: str | None = None
@@ -214,12 +270,24 @@ class InboxSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fie
     mask_pii_in_sheet: bool = False
     alert_operator_on_injection: bool = True
     sheet_tab: str = 'Inbox'
+    phone_region: str = 'GE'
+    # Русскоязычные гости пишут грузинскому бизнесу номер по-домашнему: «8 (916) 123-45-67».
+    # В регионе GE такого номера нет, и без запасного региона телефон честного лида терялся бы.
+    # Запасной регион берётся только для номеров, которых нет в `phone_region`.
+    phone_fallback_regions: list[str] = msgspec.field(default_factory=lambda: ['RU'])
+    invoices: InvoiceSection = InvoiceSection()
 
     def __post_init__(self) -> None:
         if not self.imap_host.strip():
             raise ConfigError('inbox.imap_host: нужен адрес IMAP-сервера')
         if not 0 < self.imap_port < 65536:
             raise ConfigError(f'inbox.imap_port={self.imap_port}: порт 1–65535')
+        for name, value in self._env_names():
+            if not _ENV_NAME.match(value):
+                raise ConfigError(f'inbox.{name}={value!r}: нужно имя переменной окружения')
+        for region in (self.phone_region, *self.phone_fallback_regions):
+            if region not in phonenumbers.SUPPORTED_REGIONS:
+                raise ConfigError(f'inbox.phone_region: {region!r} — нужен код страны ISO 3166-1 (GE, RU, DE)')
         _check_folder(self.folder, 'inbox.folder')
         _check_folder(self.drafts_folder, 'inbox.drafts_folder')
         if self.from_address is not None and not _ADDRESS.match(self.from_address):
@@ -248,6 +316,56 @@ class InboxSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fie
         for category in self.categories:
             if category.move_to is not None and category.move_to in (self.folder, self.drafts_folder):
                 raise ConfigError(f'categories[{category.id}].move_to: нельзя копировать в разбираемую папку')
+        for category_id in self.invoices.categories or ():
+            if category_id not in ids:
+                raise ConfigError(f'inbox.invoices.categories: категории {category_id!r} нет в inbox.categories')
+        if self.invoices.enabled and self.invoices.sheet_tab == self.sheet_tab:
+            raise ConfigError('inbox.invoices.sheet_tab совпадает с inbox.sheet_tab: у счетов свои колонки')
+
+    def _env_names(self) -> list[tuple[str, str]]:
+        return [
+            ('username_env', self.username_env),
+            ('password_env', self.password_env),
+            ('oauth_client_id_env', self.oauth_client_id_env),
+            ('oauth_client_secret_env', self.oauth_client_secret_env),
+            ('oauth_refresh_token_env', self.oauth_refresh_token_env),
+            ('oauth_tenant_id_env', self.oauth_tenant_id_env),
+        ]
+
+    @property
+    def auth_env(self) -> list[str]:
+        """Переменные окружения, без которых вход в ящик выбранным способом невозможен."""
+        match self.auth:
+            case 'password':
+                return [self.username_env, self.password_env]
+            case 'google_oauth':
+                return [
+                    self.username_env,
+                    self.oauth_client_id_env,
+                    self.oauth_client_secret_env,
+                    self.oauth_refresh_token_env,
+                ]
+            case 'microsoft_oauth':
+                return [
+                    self.username_env,
+                    self.oauth_tenant_id_env,
+                    self.oauth_client_id_env,
+                    self.oauth_client_secret_env,
+                ]
+
+    @property
+    def invoice_category_ids(self) -> list[str]:
+        """Категории, письма которых проверяются на PDF-счета (пусто — извлечение выключено)."""
+        if not self.invoices.enabled:
+            return []
+        if self.invoices.categories is not None:
+            return list(self.invoices.categories)
+        return [category_id for category_id in ('invoice',) if category_id in self.category_ids]
+
+    @property
+    def phone_regions(self) -> list[str]:
+        """Регионы разбора телефонов: основной, затем запасные (без повторов)."""
+        return list(dict.fromkeys([self.phone_region, *self.phone_fallback_regions]))
 
     def category(self, category_id: str) -> Category:
         """Категория по id; неизвестный id — категория `other`.
