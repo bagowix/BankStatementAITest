@@ -14,6 +14,8 @@ dependencies = [
     "phonenumbers>=9.0",
     "imap-tools>=1.16",
     "price-parser>=0.5.1",
+    "pypdf>=6.21",
+    "aiohttp>=3.14",
 ]
 
 [project.optional-dependencies]
@@ -28,12 +30,15 @@ llm = [
     "openai>=3.35",
     "anthropic>=1.15",
 ]
+oauth = [
+    "google-auth-oauthlib>=1.5",
+]
 
 [dependency-groups]
 # Проверка типов и тесты покрывают и Sheets, и оба SDK, поэтому обычный `uv sync`
 # обязан давать полное окружение разработки.
 dev = [
-    "autostudio[sheets,llm]",
+    "autostudio[sheets,llm,oauth]",
     "pytest~=9.1",
     "pytest-asyncio~=1.4",
     "pytest-cov~=7.1",
