@@ -22,6 +22,7 @@ async def test__openai_extract__strict_schema_sent__parsed():
     assert call['text']['format']['strict'] is True
     assert call['text']['format']['schema']['additionalProperties'] is False
     assert call['reasoning'] == {'effort': 'low'}
+    assert call['store'] is False
     assert client.usage.input_tokens == 10
     assert client.model == 'gpt-5.4-mini'
 

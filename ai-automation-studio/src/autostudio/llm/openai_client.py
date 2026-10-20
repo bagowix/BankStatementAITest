@@ -63,6 +63,9 @@ class OpenAIClient:
                 input=prompt,
                 text=text_config if text_config is not None else openai.omit,
                 reasoning=reasoning,
+                # По умолчанию Responses API хранит ответ не меньше 30 дней (Application State).
+                # Нам он не нужен после вызова, а в нём — письма и реплики чужих людей.
+                store=False,
             )
         except openai.APIStatusError as exc:
             raise LLMError(f'OpenAI {exc.status_code}: {exc.message}') from None
