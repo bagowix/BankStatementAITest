@@ -1,0 +1,129 @@
+[project]
+name = "autostudio"
+version = "0.1.0"
+description = "Productized AI-automation packages for small businesses, each with a support retainer"
+requires-python = ">=3.12"
+dependencies = [
+    "msgspec>=0.22",
+    "cyclopts>=5.2",
+    "dishka>=1.10",
+    "httpx~=0.28",
+    "selectolax~=1.0",
+    "aiogram~=3.31",
+]
+
+[project.optional-dependencies]
+# Таблицы Google нужны только клиенту, который их выбрал; демо и тесты пишут в CSV.
+sheets = [
+    "gspread~=6.2",
+    "google-auth~=2.62",
+]
+# Провайдер модели выбирается переменной окружения; без ключа работает
+# детерминированный FakeLLM, и SDK не нужны вовсе.
+llm = [
+    "openai>=3.35",
+    "anthropic>=1.15",
+]
+
+[dependency-groups]
+# Проверка типов и тесты покрывают и Sheets, и оба SDK, поэтому обычный `uv sync`
+# обязан давать полное окружение разработки.
+dev = [
+    "autostudio[sheets,llm]",
+    "pytest~=9.1",
+    "pytest-asyncio~=1.4",
+    "pytest-cov~=7.1",
+    "respx~=0.23",
+    "ruff~=0.17",
+    "mypy~=2.4",
+    "poethepoet~=0.49",
+    "pre-commit~=4.7",
+    "bandit~=1.9",
+]
+
+[project.scripts]
+autostudio = "autostudio.cli:main"
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
+# Ключи провайдеров и токены ботов читаются из .env (файл в .gitignore).
+[tool.poe]
+envfile = ".env"
+
+[tool.poe.tasks]
+# Тесты не должны видеть настоящие ключи, даже если они лежат в .env.
+tests = { cmd = "pytest --cov=autostudio --cov-report=term-missing", env = { AUTOSTUDIO_LLM_PROVIDER = "fake", OPENAI_API_KEY = "", ANTHROPIC_API_KEY = "" } }
+lint = "ruff check ."
+fmt = "ruff format ."
+format-check = "ruff format --check ."
+mypy = "mypy src"
+security = "bandit -q -c pyproject.toml -r src"
+check = ["format-check", "lint", "mypy", "security"]
+hooks = "pre-commit install"
+demo = "autostudio demo"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "G", "N", "C4", "PTH", "TID", "S", "ASYNC", "DTZ"]
+# RUF001-003 помечают кириллицу как «неоднозначный юникод»; русский в комментариях
+# и в текстах для клиентов здесь норма.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# В тестах assert — это и есть проверка, а фиктивные токены не секреты.
+"tests/*" = ["E501", "S101", "S105", "S106", "S108"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["google.oauth2.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# google-auth не аннотирует фабрики Credentials; послабление — только для модуля,
+# который с ним работает.
+module = ["autostudio.sinks.gsheets"]
+disallow_untyped_calls = false
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "network: ходит в настоящую сеть; в CI и на голом клоне пропускается",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["autostudio"]
+
+[tool.coverage.report]
+fail_under = 90
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.$",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autostudio"]

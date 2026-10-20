@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+!**/.env.example
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
+# Данные клиентов и выгрузки: персональные данные не уезжают в git.
+var/
+clients/*
+!clients/README.md
+# Ключи сервисных аккаунтов Google.
+*service-account*.json
+*-credentials.json
+.idea/
+.DS_Store
