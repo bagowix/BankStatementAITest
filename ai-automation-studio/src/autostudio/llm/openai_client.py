@@ -68,7 +68,7 @@ class OpenAIClient:
                 store=False,
             )
         except openai.APIStatusError as exc:
-            raise LLMError(f'OpenAI {exc.status_code}: {exc.message}') from None
+            raise LLMError(f'OpenAI {exc.status_code}: {exc.message}', status_code=exc.status_code) from None
         except openai.APIConnectionError as exc:
             raise LLMError(f'OpenAI недоступен: {type(exc).__name__}') from None
         if response.usage is not None:

@@ -10,7 +10,16 @@ class ConfigError(AutoStudioError):
 
 
 class LLMError(AutoStudioError):
-    """Модель не ответила или ответила не по схеме."""
+    """Модель не ответила или ответила не по схеме.
+
+    Args:
+        message: Текст для оператора (без ключей и URL с токенами).
+        status_code: HTTP-код провайдера, если ошибка пришла от API.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class SinkError(AutoStudioError):

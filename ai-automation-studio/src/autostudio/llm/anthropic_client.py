@@ -76,7 +76,7 @@ class AnthropicClient:
             else:
                 reply = await self._plain_call(system, prompt, output_config)
         except anthropic.APIStatusError as exc:
-            raise LLMError(f'Anthropic {exc.status_code}: {exc.message}') from None
+            raise LLMError(f'Anthropic {exc.status_code}: {exc.message}', status_code=exc.status_code) from None
         except anthropic.APIConnectionError as exc:
             raise LLMError(f'Anthropic недоступен: {type(exc).__name__}') from None
         self._usage.add(reply.input_tokens, reply.output_tokens)
