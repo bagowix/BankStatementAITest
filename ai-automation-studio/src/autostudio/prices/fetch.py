@@ -4,11 +4,17 @@
 обошли его robots.txt, банит IP оператора, и клиент остаётся без цен. Поэтому:
 
 - к одному сайту — не чаще раза в `min_delay_s`, и не больше одного запроса одновременно;
-- robots.txt читается один раз за запуск на сайт и разбирается по RFC 9309 (protego:
+  «сайт» — домен без `www.` (`site_key`): `www.shop.ge` и `shop.ge`, http и https делят одну
+  очередь, как того требует бриф 5.8 (запросы в час к домену);
+- robots.txt читается один раз за запуск на origin и разбирается по RFC 9309 (protego:
   `*`, `$`, самое длинное совпадение — одинаково на всех версиях Python). `urllib.robotparser`
   зависит от версии: на 3.12.3 он верен в 8 из 21 случая тестов пакета и в основном
-  разрешает то, что сайт закрыл; на 3.13.16 — во всех (`var/review_prices/p11_…`). Нет
-  файла (4xx) или сайт недоступен — можно; 5xx — сайт болеет, в этот запуск его не трогаем;
+  разрешает то, что сайт закрыл; на 3.13.16 — во всех (`var/review_prices/p11_…`). BOM в
+  начале файла отбрасывается (иначе первая группа правил молча пропала бы). Нет файла (4xx,
+  кроме 429) — можно; 5xx и 429 — сервер перегружен (RFC 9309 §2.3.1.3), и адрес robots.txt
+  не прошёл проверку — в этот запуск сайт не трогаем (`robots_unavailable`, а не «сайт
+  запретил»). Таймаут и сетевой сбой на robots.txt — можно: это сознательное отступление от
+  RFC 9309 §2.3.1.4 (решение владельца, записано в docs/packages/prices.md, «Право и этика»);
 - 429/5xx/таймаут — повтор с экспоненциальной паузой; `Retry-After` соблюдается, а если
   сайт просит подождать дольше предела, страница откладывается до следующего запуска;
 - страница больше `max_page_bytes` обрывается на потоке, не дочитываясь в память, а у каждой
@@ -18,7 +24,9 @@
   заново проверяется на SSRF (включая адреса, в которые резолвится имя — то самое
   punycode-имя, к которому подключится httpx), на паузу сайта и на robots.txt;
 - сайт на паузе (`[prices.sites."…"] paused = true`, претензия владельца) не получает от нас
-  ни одного запроса — ни страницы, ни robots.txt, ни DNS-запроса за его адресом.
+  ни одного запроса — ни страницы, ни robots.txt, ни DNS-запроса за его адресом, в том числе
+  после редиректа страницы или robots.txt с другого сайта. Сайт, чей robots.txt уводит на сайт
+  на паузе (алиас домена того, кто просил остановиться), в этот запуск тоже не трогаем (`paused`).
 
 Ограничение: между нашей проверкой DNS и соединением httpx имя резолвится ещё раз
 (DNS rebinding). Для полной защиты сервер оператора закрывает исходящие соединения во
@@ -45,7 +53,7 @@ from protego import Protego
 from autostudio import __version__
 from autostudio.clock import Clock, system_now
 from autostudio.prices.config import PAUSED, ROBOTS_AGENT, PricesSection
-from autostudio.prices.urls import covering_site, ip_is_public, origin, redact, url_problem
+from autostudio.prices.urls import covering_site, ip_is_public, origin, redact, site_key, url_problem
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +72,11 @@ _MAX_CRAWL_DELAY_S: Final = 60.0
 # Общий срок одной попытки — во столько раз больше `timeout_s` (предела на шаг чтения).
 _ATTEMPT_FACTOR: Final = 3.0
 _MAX_RETRY_DIGITS: Final = 9
+# robots.txt не прочитан по вине сайта (5xx, 429, адрес не проверен): сайт в этот запуск не
+# трогаем. Это не «сайт запретил» (`robots_disallowed`): клиенту — «сайт не ответил».
+ROBOTS_UNAVAILABLE: Final = 'robots_unavailable'
+# Статусы robots.txt, при которых сервер просит не нагружать его (RFC 9309 §2.3.1.3, Google).
+_ROBOTS_OVERLOADED: Final = frozenset({'server_error', 'rate_limited'})
 
 
 class FetchResult(msgspec.Struct, frozen=True, kw_only=True):
@@ -84,8 +97,9 @@ class FetchFailure(msgspec.Struct, frozen=True, kw_only=True):
     """Страницу загрузить нельзя или не удалось.
 
     Attributes:
-        reason: `robots_disallowed`, `blocked_url`, `http_error`, `rate_limited`, `server_error`,
-            `timeout`, `network`, `dns`, `too_large`, `not_html`, `too_many_redirects`, `paused`.
+        reason: `robots_disallowed`, `robots_unavailable`, `blocked_url`, `http_error`,
+            `rate_limited`, `server_error`, `timeout`, `network`, `dns`, `too_large`, `not_html`,
+            `too_many_redirects`, `paused`.
         detail: Пояснение для оператора (без query-строк и без текста исключений httpx); для
             `paused` — домен на паузе.
         status: HTTP-статус, если ответ был.
@@ -167,19 +181,21 @@ type _Outcome = _Body | _Redirect | _Transient | FetchFailure
 
 
 class _RobotsRules:
-    """Правила robots.txt одного сайта: «всё можно», «всё нельзя» или разобранный файл."""
+    """Правила robots.txt одного origin: «ограничений нет» (None) или разобранный файл."""
 
-    def __init__(self, rules: Protego | None, *, allow: bool) -> None:
+    def __init__(self, rules: Protego | None) -> None:
         self._rules = rules
-        self._allow = allow
 
     @classmethod
-    def from_text(cls, text: str) -> Self:
-        return cls(Protego.parse(text), allow=True)
+    def from_body(cls, body: bytes) -> Self:
+        # utf-8-sig отбрасывает BOM: protego его не снимает (str.strip() не считает U+FEFF
+        # пробелом), и «\ufeffUser-agent: *» стал бы неизвестной строкой — а с ней пропали бы
+        # Disallow и Crawl-delay первой группы. Google тоже игнорирует BOM в robots.txt.
+        return cls(Protego.parse(body.decode('utf-8-sig', errors='replace')))
 
     def allows(self, agent: str, url: str) -> bool:
         if self._rules is None:
-            return self._allow
+            return True
         return self._rules.can_fetch(url, agent)
 
     def crawl_delay(self, agent: str) -> float:
@@ -245,7 +261,8 @@ class PoliteFetcher:
         self._headers = {'User-Agent': settings.user_agent, 'Accept': _ACCEPT}
         self._last: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        self._robots: dict[str, _RobotsRules] = {}
+        # Правила robots.txt по origin — или отказ сайту на этот запуск (`robots_unavailable`, `paused`).
+        self._robots: dict[str, _RobotsRules | FetchFailure] = {}
         self._crawl_delay: dict[str, float] = {}
 
     async def fetch(self, url: str) -> FetchResult | FetchFailure:
@@ -266,11 +283,10 @@ class PoliteFetcher:
             blocked = await self._check_address(current)
             if blocked is not None:
                 return blocked
-            if self._s.respect_robots and not await self._robots_allow(current):
-                logger.info('robots.txt запрещает %s', redact(current))
-                # Адрес в пояснении нужен, только если запрет встретился после редиректа.
-                detail = 'robots.txt' if current == url else f'robots.txt, после редиректа на {redact(current)}'
-                return FetchFailure(reason='robots_disallowed', detail=detail)
+            if self._s.respect_robots:
+                refused = await self._robots_refusal(current, redirected=current != url)
+                if refused is not None:
+                    return refused
             outcome = await self._with_retries(current)
             if isinstance(outcome, _Redirect):
                 current = outcome.location
@@ -287,10 +303,11 @@ class PoliteFetcher:
         if not self._s.paused_sites:
             return None
         try:
-            host = httpx.URL(url).host
+            # covering_site сравнивает хосты в IDNA-записи — и кодирование тоже под защитой:
+            # адрес редиректа пишет чужой сайт.
+            return covering_site(httpx.URL(url).host, self._s.paused_sites)
         except (httpx.InvalidURL, ValueError):
             return None  # битый адрес отклонит `_check_address`
-        return covering_site(host, self._s.paused_sites)
 
     async def _check_address(self, url: str) -> FetchFailure | None:
         problem = url_problem(url)
@@ -324,43 +341,71 @@ class PoliteFetcher:
             return FetchFailure(reason='dns', detail=f'{host}: нет адресов')
         return None
 
-    async def _robots_allow(self, url: str) -> bool:
+    async def _robots_refusal(self, url: str, *, redirected: bool) -> FetchFailure | None:
+        """Отказ по robots.txt (запрет, сайт недоступен, robots.txt на сайте на паузе) или None."""
         key = origin(url)
         async with self._lock_for(f'robots:{key}'):
             rules = self._robots.get(key)
             if rules is None:
                 rules = await self._load_robots(key)
                 self._robots[key] = rules
-                delay = rules.crawl_delay(self._s.robots_agent)
-                if delay > _MAX_CRAWL_DELAY_S:
-                    logger.warning('%s просит Crawl-delay %s с — соблюдаем %s с', key, delay, _MAX_CRAWL_DELAY_S)
-                self._crawl_delay[key] = min(delay, _MAX_CRAWL_DELAY_S)
-        return rules.allows(self._s.robots_agent, url)
+                if isinstance(rules, _RobotsRules):
+                    self._note_crawl_delay(key, site_key(url), rules.crawl_delay(self._s.robots_agent))
+        if isinstance(rules, FetchFailure):
+            return rules
+        if rules.allows(self._s.robots_agent, url):
+            return None
+        logger.info('robots.txt запрещает %s', redact(url))
+        # Адрес в пояснении нужен, только если запрет встретился после редиректа.
+        detail = f'robots.txt, после редиректа на {redact(url)}' if redirected else 'robots.txt'
+        return FetchFailure(reason='robots_disallowed', detail=detail)
 
-    async def _load_robots(self, site: str) -> _RobotsRules:
+    def _note_crawl_delay(self, robots_origin: str, site: str, delay: float) -> None:
+        if delay > _MAX_CRAWL_DELAY_S:
+            logger.warning('%s просит Crawl-delay %s с — соблюдаем %s с', robots_origin, delay, _MAX_CRAWL_DELAY_S)
+        # Очередь одна на домен, а robots.txt у http и https свои: соблюдаем больший Crawl-delay.
+        self._crawl_delay[site] = max(self._crawl_delay.get(site, 0.0), min(delay, _MAX_CRAWL_DELAY_S))
+
+    async def _load_robots(self, site: str) -> _RobotsRules | FetchFailure:
         current = f'{site}/robots.txt'
         for hop in range(self._s.max_redirects + 1):
+            paused = self._paused(current)
+            if paused is not None:
+                # robots.txt уводит на сайт на паузе (обычно алиас домена того, кто просил
+                # остановиться): к нему — ни DNS, ни запроса, и правила этого сайта лежат у него —
+                # значит, и сам сайт в этот запуск не трогаем.
+                logger.info('robots.txt %s уводит на сайт на паузе %s — сайт не проверяется', site, paused)
+                return FetchFailure(reason=PAUSED, detail=paused)
             blocked = await self._check_address(current)
             if blocked is not None and hop == 0:
                 # robots.txt того же сайта, чья страница только что прошла проверку, — не «файла
                 # нет», а сбой (адрес не собрался, DNS моргнул): в этот запуск сайт не трогаем.
                 logger.warning('robots.txt %s не проверен (%s) — сайт пропущен в этом запуске', site, blocked.reason)
-                return _RobotsRules(None, allow=False)
+                return FetchFailure(reason=ROBOTS_UNAVAILABLE, detail=f'robots.txt: {blocked.reason} {blocked.detail}')
             if blocked is not None:
                 # Редирект robots.txt во внутреннюю сеть — как отсутствие файла (RFC 9309 §2.3.1.2).
-                return _RobotsRules(None, allow=True)
+                return _RobotsRules(None)
             outcome = await self._request(current, limit=_ROBOTS_LIMIT, html_only=False, truncate=True)
             if isinstance(outcome, _Redirect):
                 current = outcome.location
                 continue
             if isinstance(outcome, _Body):
-                return _RobotsRules.from_text(outcome.body.decode('utf-8', errors='replace'))
-            if isinstance(outcome, _Transient) and outcome.reason == 'server_error':
-                logger.warning('robots.txt %s отвечает %s — сайт пропущен в этом запуске', site, outcome.status)
-                return _RobotsRules(None, allow=False)
-            # 4xx (файла нет) и недоступность: ограничений нет.
-            return _RobotsRules(None, allow=True)
-        return _RobotsRules(None, allow=True)
+                return _RobotsRules.from_body(outcome.body)
+            if isinstance(outcome, _Transient) and outcome.reason in _ROBOTS_OVERLOADED:
+                # 5xx и 429 — сервер просит не нагружать его: страницы сайта в этот запуск не
+                # запрашиваем. Retry-After — в лог: следующий проход и так не раньше чем через час.
+                wait = f', Retry-After {outcome.retry_after:g} с' if outcome.retry_after is not None else ''
+                logger.warning(
+                    'robots.txt %s отвечает HTTP %s%s — сайт пропущен в этом запуске', site, outcome.status, wait
+                )
+                return FetchFailure(
+                    reason=ROBOTS_UNAVAILABLE, detail=f'robots.txt: HTTP {outcome.status}{wait}', status=outcome.status
+                )
+            # 4xx — файла нет: ограничений нет. Таймаут и сетевой сбой — тоже «можно»: сознательное
+            # отступление от RFC 9309 §2.3.1.4 (решение владельца, docs/packages/prices.md): страница
+            # всё равно идёт с паузой и повторами, а лёгший сайт так же не ответит и на неё.
+            return _RobotsRules(None)
+        return _RobotsRules(None)
 
     async def _with_retries(self, url: str) -> _Body | _Redirect | FetchFailure:
         attempt = 0
@@ -396,7 +441,7 @@ class PoliteFetcher:
                 await self._sleep(wait)
 
     async def _request(self, url: str, *, limit: int, html_only: bool, truncate: bool) -> _Outcome:
-        site = origin(url)
+        site = site_key(url)
         async with self._lock_for(site):
             await self._wait_turn(site)
             try:
@@ -421,6 +466,11 @@ class PoliteFetcher:
                 return _Transient(reason='network', detail=type(exc).__name__)
             except httpx.HTTPError as exc:  # pragma: no cover - прочие ошибки httpx при GET не возникают
                 return FetchFailure(reason='network', detail=type(exc).__name__)
+            except (httpx.InvalidURL, ValueError) as exc:
+                # httpx строит запрос редиректа и при follow_redirects=False, а хост из Location
+                # декодирует IDNA: «https://xn--/p» роняет его IDNAError (это ValueError, не
+                # httpx.HTTPError). Такой адрес мы бы и так не открыли — отказ, а не трассировка.
+                return FetchFailure(reason='blocked_url', detail=f'битый адрес редиректа: {type(exc).__name__}')
             finally:
                 self._last[site] = self._monotonic()
 

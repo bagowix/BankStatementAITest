@@ -28,7 +28,7 @@ csv_dir = "var/out/demo-prices"
 [prices]
 # Адрес оператора уходит в User-Agent: владелец сайта должен знать, кому написать.
 contact_email = "monitor@autostudio.example"
-alert_change_pct = "3"     # строкой — чтобы Decimal не проходил через float
+alert_change_pct = 3       # дробные числа TOML читаются как Decimal (2.5, 2699.00) — без float
 alert_undercut = true
 respect_robots = true
 min_delay_s = 5            # пауза между запросами к одному сайту
@@ -50,7 +50,7 @@ sheet_history = "changes"  # в «History» только новые значен
 [[prices.products]]
 id = "iphone-15-128"
 name = "iPhone 15 128GB"
-own_price = "2699.00"
+own_price = 2699.00
 currency = "GEL"
 
   [[prices.products.offers]]
@@ -70,7 +70,7 @@ currency = "GEL"
 [[prices.products]]
 id = "galaxy-s24-256"
 name = "Samsung Galaxy S24 256GB"
-own_price = "2499.00"
+own_price = 2499.00
 currency = "GEL"
 
   [[prices.products.offers]]
@@ -90,7 +90,7 @@ currency = "GEL"
 [[prices.products]]
 id = "airpods-pro-2"
 name = "AirPods Pro 2"
-own_price = "749.00"
+own_price = 749.00
 currency = "GEL"
 
   [[prices.products.offers]]

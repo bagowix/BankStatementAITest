@@ -212,10 +212,36 @@ def test__config__site_rule_not_paused__nothing_paused(write_toml):
     assert section.paused_site('https://shop-a.example/p/1') is None
 
 
-def test__config__paused_site_typo__rejected_not_silently_scraped(write_toml):
-    extra = '[prices.sites."shop-aa.example"]\npaused = true\n'
-    with pytest.raises(ConfigError, match=r'prices\.sites\."shop-aa\.example": ни одна ссылка'):
-        load_client_config(write(write_toml, extra=extra), PricesConfig)
+def test__config__paused_site_without_links__accepted_as_block_list(write_toml):
+    # Порядок претензии: пауза, затем ссылки удаляются. Конфиг остаётся рабочим, а пауза — запретом
+    # (и для редиректов): иначе ConfigError остановил бы мониторинг всех конкурентов клиента.
+    extra = '[prices.sites."shop-b.example"]\npaused = true\npaused_reason = "письмо владельца"\n'
+    section = load_client_config(write(write_toml, extra=extra), PricesConfig).prices
+    assert section.paused_sites == frozenset({'shop-b.example'})
+    assert section.paused_site('https://shop-a.example/p/1') is None
+    assert section.paused_site('https://www.shop-b.example/p/9') == 'shop-b.example'
+
+
+@pytest.mark.parametrize('key', ['xn--lodaaxko2f.ge', 'მაღაზია.ge'])
+@pytest.mark.parametrize(
+    'url', ['https://xn--lodaaxko2f.ge/p/1', 'https://მაღაზია.ge/p/1', 'https://www.მაღაზია.ge/p/1']
+)
+def test__config__idn_site_key__matches_links_in_any_form(write_toml, key, url):
+    # Домен из письма владельца часто в punycode; httpx отдаёт хост «xn--…» Unicode-строкой,
+    # а «www.xn--…» — нет. Сравнение в IDNA-записи ловит все сочетания.
+    extra = f'[prices.sites."{key}"]\npaused = true\n'
+    section = load_client_config(write(write_toml, extra=extra, url=url), PricesConfig).prices
+    assert section.paused_sites == frozenset({key})  # ключ — как его записал оператор
+    assert section.paused_site(url) == key
+    assert section.paused_site('https://www.xn--lodaaxko2f.ge/x') == key
+    assert section.paused_site('https://shop-a.example/p/1') is None
+
+
+def test__config__same_idn_site_in_punycode_and_unicode__rejected():
+    product = Product(id='p', name='P', offers=[Offer(competitor='A', url='https://shop-a.example/p')])
+    sites = {'xn--lodaaxko2f.ge': SiteRule(paused=True), 'მაღაზია.ge': SiteRule()}
+    with pytest.raises(ConfigError, match='тот же домен'):
+        PricesSection(products=[product], contact_email='ops@studio.example', sites=sites)
 
 
 @pytest.mark.parametrize(
@@ -225,6 +251,8 @@ def test__config__paused_site_typo__rejected_not_silently_scraped(write_toml):
         ('shop-a.example.', 'строчными'),
         ('localhost', 'локальное имя'),
         ('shop a.example', 'недопустимое имя хоста'),
+        ('xn--zz.example', 'не домен'),  # битый punycode
+        ('ⅷ.example', 'не домен'),  # буква по \\w, но не по IDNA
     ],
 )
 def test__config__bad_site_key__rejected(write_toml, site, message):

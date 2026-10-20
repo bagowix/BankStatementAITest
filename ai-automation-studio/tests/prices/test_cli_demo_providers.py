@@ -612,7 +612,8 @@ def test__check__whole_catalog_hourly__capacity_note_strict_problem(clean_env, t
     out = capsys.readouterr().out
     assert 'расписание — раз в 1 ч' in out
     assert '! big.example: проход по сайту ≈ 67 мин — не уложится в max_run_minutes = 30' in out
-    assert '! big.example: проход по сайту ≈ 67 мин — дольше интервала 1 ч' in out
+    # Проход обрывается на 30 минутах — следующий ежечасный запуск не пропускается.
+    assert 'интервала 1 ч' not in out
     with pytest.raises(ConfigError, match='не готово к боевому запуску'):
         invoke('check', str(path), '--every-hours', '1', '--strict')
     assert '✗ big.example: проход по сайту' in capsys.readouterr().out
@@ -701,3 +702,131 @@ def test__probe__paused_site_from_config__no_request(clean_env, tmp_path, capsys
     path = big_catalog_toml(tmp_path, 1, extra='[prices.sites."big.example"]\npaused = true')
     invoke('probe', 'https://big.example/p/0', '--config', str(path))
     assert '✗ загрузка: paused big.example' in capsys.readouterr().out
+
+
+# --- цикл --every-hours перечитывает конфиг; probe и .env клиента; пауза без ссылок ----------------
+
+
+TWO_SHOPS = """
+[client]
+id = "acme-shop"
+name = "Acme"
+
+[notify]
+console = true
+
+[sink]
+csv_dir = "{out}"
+
+[prices]
+contact_email = "ops@studio.example"
+respect_robots = false
+{extra}
+
+[[prices.products]]
+id = "p1"
+name = "Phone"
+
+  [[prices.products.offers]]
+  competitor = "Shop A"
+  url = "https://shop-a.example/p/1"
+
+  [[prices.products.offers]]
+  competitor = "Shop B"
+  url = "https://shop-b.example/p/1"
+"""
+
+
+async def public_dns(host: str, port: int) -> list[str]:
+    return [IP]
+
+
+@respx.mock
+async def test__serve__pause_added_between_cycles__next_cycle_never_touches_site(clean_env, tmp_path, capsys):
+    # День претензии при `run --every-hours`: пауза в конфиге действует со следующего прохода без перезапуска.
+    path = tmp_path / 'client.toml'
+    path.write_text(TWO_SHOPS.format(out=tmp_path / 'out', extra=''), encoding='utf-8')
+    page = httpx.Response(200, headers={'content-type': 'text/html'}, text=PAGE)
+    shop_a = respx.get('https://shop-a.example/p/1').mock(return_value=page)
+    shop_b = respx.get('https://shop-b.example/p/1').mock(return_value=page)
+
+    async def sleep(seconds: float) -> None:
+        extra = '[prices.sites."shop-b.example"]\npaused = true\npaused_reason = "письмо владельца"'
+        path.write_text(TWO_SHOPS.format(out=tmp_path / 'out', extra=extra), encoding='utf-8')
+
+    ok = await cli.serve(
+        path, every_hours=1, sleep=sleep, max_cycles=2, provider=lambda: PricesProvider(resolver=public_dns)
+    )
+    assert ok is True
+    assert shop_a.call_count == 2
+    assert shop_b.call_count == 1  # только первый проход, до паузы
+    assert 'на паузе 1' in capsys.readouterr().out
+
+
+@respx.mock
+async def test__serve__config_broken_between_cycles__pass_failed_no_request_then_recovers(clean_env, tmp_path):
+    path = tmp_path / 'client.toml'
+    good = TWO_SHOPS.format(out=tmp_path / 'out', extra='')
+    path.write_text(good, encoding='utf-8')
+    page = httpx.Response(200, headers={'content-type': 'text/html'}, text=PAGE)
+    shop_a = respx.get('https://shop-a.example/p/1').mock(return_value=page)
+    respx.get('https://shop-b.example/p/1').mock(return_value=page)
+    texts = iter(['[prices\nbroken', good])
+
+    async def sleep(seconds: float) -> None:
+        path.write_text(next(texts), encoding='utf-8')
+
+    requests: list[int] = []
+    original = cli._cycle
+
+    async def counting_cycle(*args, **kwargs) -> bool:
+        ok = await original(*args, **kwargs)
+        requests.append(shop_a.call_count)
+        return ok
+
+    clean_env.setattr(cli, '_cycle', counting_cycle)
+    ok = await cli.serve(
+        path, every_hours=1, sleep=sleep, max_cycles=3, provider=lambda: PricesProvider(resolver=public_dns)
+    )
+    assert ok is True
+    assert requests == [1, 1, 2]  # сломанный конфиг — ни одного запроса, а не проход по старому
+    events = EventLog(tmp_path / 'data' / 'acme-shop' / 'events.sqlite')
+    failed = events.last('prices', ('system.run_failed',))
+    assert failed is not None and 'битый TOML' in failed.payload['error']
+    last = events.last('prices', ('system.run_ok', 'system.run_failed'))
+    assert last is not None and last.kind == 'system.run_ok'
+
+
+def test__check__paused_site_without_links__noted_as_block_list_with_typo_hint(clean_env, tmp_path, capsys):
+    extra = '[prices.sites."gone.example"]\npaused = true\npaused_reason = "письмо владельца 2026-10-20"'
+    invoke('check', str(big_catalog_toml(tmp_path, 1, extra=extra)))
+    out = capsys.readouterr().out
+    assert (
+        '! сайт gone.example на паузе (письмо владельца 2026-10-20): ссылок на него в конфиге нет — действует '
+        'как запрет, в том числе для редиректов. Ставили паузу сайту, на который есть ссылки, — проверьте домен '
+        'на опечатку'
+    ) in out
+
+
+@respx.mock
+def test__probe__config__client_env_next_to_it_reaches_model_settings(clean_env, tmp_path, capsys, monkeypatch):
+    # Вне Docker окружение клиента — в clients/<id>/.env: probe --config обязан его подхватить.
+    for name in ('AUTOSTUDIO_LLM_PROVIDER', 'OPENAI_API_KEY'):
+        clean_env.setenv(name, 'placeholder')  # monkeypatch вернёт окружение после теста
+        clean_env.delenv(name)
+    (tmp_path / '.env').write_text('AUTOSTUDIO_LLM_PROVIDER=openai\nOPENAI_API_KEY=sk-test-from-env-file\n')
+    providers: list[LLMProvider] = []
+
+    def model_for(settings: Settings) -> FakeLLM:
+        providers.append(settings.llm_provider)
+        return FakeLLM({PriceGuess: guess_price})
+
+    monkeypatch.setattr(cli, 'make_llm', model_for)
+    respx.get(f'http://{IP}/p/1').mock(
+        return_value=httpx.Response(200, headers={'content-type': 'text/html'}, text=PAGE)
+    )
+    invoke('probe', f'http://{IP}/p/1', '--config', str(client_toml(tmp_path)), '--llm')
+    assert providers == [LLMProvider.OPENAI]  # без .env было бы fake — и make_llm не вызывался бы
+    out = capsys.readouterr().out
+    assert 'эвристика fake' not in out
+    assert 'модель ' in out

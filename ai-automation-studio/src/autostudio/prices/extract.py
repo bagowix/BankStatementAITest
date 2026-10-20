@@ -89,7 +89,10 @@ MULTIPLE_PRODUCTS: Final = 'multiple_products'
 # 429/5xx) — подождать; `config` (ключ, права, имя модели) — чинит оператор, и сразу;
 # `content` (отказ, ответ не по схеме) — не справилась с этой страницей.
 LLM_CONFIG: Final = 'llm_config'
-_LLM_REASONS: Final[dict[LLMErrorKind, str]] = {'outage': 'llm_outage', 'config': LLM_CONFIG, 'content': 'llm_error'}
+LLM_OUTAGE: Final = 'llm_outage'
+_LLM_REASONS: Final[dict[LLMErrorKind, str]] = {'outage': LLM_OUTAGE, 'config': LLM_CONFIG, 'content': 'llm_error'}
+# Провайдер не ответил вовсе: ни цены, ни отказа по существу страницы.
+LLM_UNREACHED: Final = frozenset({LLM_OUTAGE, LLM_CONFIG})
 AMBIGUOUS_DECIMAL: Final = 'schema_ambiguous_decimal'
 # Предупреждения, при которых под сомнением само число: оператору — сигнал, клиенту —
 # «нужна проверка» вместо уведомлений «цена изменилась» и «дешевле вас».
@@ -188,7 +191,15 @@ class SelectorSuggestion(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class LLMBudget:
-    """Сколько страниц модель ещё может прочитать за этот запуск.
+    """Сколько страниц модель ещё может прочитать за этот запуск — и сколько она прочитала.
+
+    Attributes:
+        limit: Лимит страниц на запуск.
+        used: Страниц отдано модели.
+        denied: Страниц ждали модель, но бюджет кончился.
+        answered: Страниц, на которые провайдер ответил (любым ответом, в том числе «цены нет»);
+            сбой провайдера (`llm_outage`, `llm_config`) сюда не входит. По нему видно, что
+            модель снова отвечает, а не только что её спросили.
 
     Args:
         pages: Лимит страниц на запуск.
@@ -198,6 +209,7 @@ class LLMBudget:
         self.limit = pages
         self.used = 0
         self.denied = 0
+        self.answered = 0
 
     def take(self) -> bool:
         """Списывает одну страницу; False — бюджет исчерпан (и это посчитано)."""

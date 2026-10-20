@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import datetime as dt
 from collections.abc import AsyncIterator, Callable
 
@@ -144,13 +145,51 @@ async def test__fetch__robots_cached_per_site_per_run():
     assert site.paths().count('a.example/robots.txt') == 1
 
 
-async def test__fetch__robots_5xx__site_skipped_this_run():
+async def test__fetch__robots_5xx__site_skipped_this_run_as_unavailable_not_disallowed():
     site = Site({'a.example/robots.txt': httpx.Response(503), 'a.example/p': ok()})
     fetcher, http, _ = make(site)
     async with http:
         result = await fetcher.fetch('https://a.example/p')
-    assert isinstance(result, FetchFailure)
-    assert result.reason == 'robots_disallowed'
+    # Сайт болеет, а не запрещает: клиенту — «сайт не ответил», а не «просит роботов не заходить».
+    assert result == FetchFailure(reason='robots_unavailable', detail='robots.txt: HTTP 503', status=503)
+    assert site.paths() == ['a.example/robots.txt']  # страницу не трогали
+
+
+async def test__fetch__robots_429_with_retry_after__site_skipped_no_page_request():
+    # Google и RFC 9309: 429 на robots.txt — сервер перегружен (как 5xx), а не «файла нет».
+    busy = httpx.Response(429, headers={'retry-after': '3600'})
+    site = Site({'a.example/robots.txt': busy, 'a.example/p': ok(), 'a.example/q': ok()})
+    fetcher, http, _ = make(site)
+    async with http:
+        first = await fetcher.fetch('https://a.example/p')
+        second = await fetcher.fetch('https://a.example/q')
+    assert first == FetchFailure(
+        reason='robots_unavailable', detail='robots.txt: HTTP 429, Retry-After 3600 с', status=429
+    )
+    assert second == first  # решение по сайту — на весь запуск, robots.txt второй раз не спрашиваем
+    assert site.paths() == ['a.example/robots.txt']
+
+
+async def test__fetch__robots_with_utf8_bom__first_group_rules_kept():
+    # BOM в начале файла иначе склеился бы с «User-agent» — и Disallow/Crawl-delay пропали бы молча.
+    rules = codecs.BOM_UTF8 + b'User-agent: *\nDisallow: /private/\nCrawl-delay: 30\n'
+    site = Site(
+        {
+            'a.example/robots.txt': httpx.Response(200, content=rules),
+            'a.example/private/1': ok(),
+            'a.example/1': ok(),
+            'a.example/2': ok(),
+        }
+    )
+    fetcher, http, time = make(site, min_delay_s=5.0)
+    async with http:
+        blocked = await fetcher.fetch('https://a.example/private/1')
+        await fetcher.fetch('https://a.example/1')
+        await fetcher.fetch('https://a.example/2')
+    assert isinstance(blocked, FetchFailure)
+    assert blocked.reason == 'robots_disallowed'
+    assert 'a.example/private/1' not in site.paths()
+    assert time.sleeps == [30.0, 30.0]  # Crawl-delay из первой группы соблюдён
 
 
 async def test__fetch__robots_unreachable__allowed():
@@ -588,7 +627,8 @@ async def test__fetch__robots_address_fails_its_own_check__site_skipped_not_allo
         fetcher = PoliteFetcher(http, settings, sleep=FakeTime().sleep, resolver=flaky)
         result = await fetcher.fetch('https://a.example/p')
     assert isinstance(result, FetchFailure)
-    assert result.reason == 'robots_disallowed'
+    assert result.reason == 'robots_unavailable'
+    assert result.detail.startswith('robots.txt: dns')
     assert site.requests == []
 
 
@@ -701,3 +741,69 @@ async def test__fetch__shared_client_follows_redirects__fetcher_still_rechecks_e
     assert isinstance(result, FetchFailure)
     assert result.reason == 'blocked_url'
     assert site.paths() == ['a.example/p']  # до метаданных облака запрос не дошёл
+
+
+async def test__fetch__robots_redirect_into_paused_site__no_request_no_dns_site_skipped():
+    # Алиас домена того, кто просил остановиться: robots.txt brand.example уводит на paused.example.
+    asked: list[str] = []
+
+    async def resolve(host: str, port: int) -> list[str]:
+        asked.append(host)
+        return [PUBLIC]
+
+    site = Site(
+        {
+            'brand.example/robots.txt': httpx.Response(301, headers={'location': 'https://paused.example/robots.txt'}),
+            'paused.example/robots.txt': httpx.Response(200, text='User-agent: *\nAllow: /\n'),
+            'brand.example/p/1': ok(),
+        }
+    )
+    settings = FetchSettings(user_agent='bot (+mailto:ops@studio.example)', paused_sites=frozenset({'paused.example'}))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(site)) as http:
+        fetcher = PoliteFetcher(http, settings, sleep=FakeTime().sleep, resolver=resolve)
+        result = await fetcher.fetch('https://brand.example/p/1')
+    assert result == FetchFailure(reason='paused', detail='paused.example')
+    assert site.paths() == ['brand.example/robots.txt']  # ни robots.txt сайта на паузе, ни страницы
+    assert 'paused.example' not in asked
+
+
+@pytest.mark.parametrize('location', ['https://xn--/p', 'http://xn--/', '//xn--/p'])
+async def test__fetch__redirect_to_broken_idna_host__blocked_url_not_crash(location):
+    # httpx строит запрос редиректа и при follow_redirects=False, а битый IDNA роняет его IDNAError.
+    site = Site({'a.example/p': httpx.Response(302, headers={'location': location})})
+    fetcher, http, _ = make(site, respect_robots=False)
+    async with http:
+        result = await fetcher.fetch('https://a.example/p')
+    assert isinstance(result, FetchFailure)
+    assert result.reason == 'blocked_url'
+    assert result.detail.startswith('битый адрес редиректа')
+    assert site.paths() == ['a.example/p']
+
+
+async def test__fetch__www_and_bare_domain_http_and_https__one_queue_per_domain():
+    # Бриф 5.8: частота — к домену. www. и голый домен, http и https — одна очередь и одна пауза.
+    site = Site({'www.a.example/1': ok(), 'a.example/2': ok(), 'a.example/3': ok(), 'b.example/1': ok()})
+    fetcher, http, time = make(site, respect_robots=False, min_delay_s=5.0)
+    async with http:
+        await fetcher.fetch('https://www.a.example/1')
+        await fetcher.fetch('https://a.example/2')
+        await fetcher.fetch('http://a.example/3')
+        await fetcher.fetch('https://b.example/1')
+    assert time.sleeps == [5.0, 5.0]  # другой домен — без ожидания
+
+
+async def test__fetch__crawl_delay_of_two_origins_one_domain__larger_honoured():
+    site = Site(
+        {
+            'www.a.example/robots.txt': httpx.Response(200, text='User-agent: *\nCrawl-delay: 20\n'),
+            'a.example/robots.txt': httpx.Response(200, text='User-agent: *\nCrawl-delay: 7\n'),
+            'www.a.example/1': ok(),
+            'a.example/2': ok(),
+        }
+    )
+    fetcher, http, time = make(site, min_delay_s=5.0)
+    async with http:
+        await fetcher.fetch('https://www.a.example/1')
+        await fetcher.fetch('https://a.example/2')
+    assert max(time.sleeps) == 20.0
+    assert all(pause >= 20.0 for pause in time.sleeps)

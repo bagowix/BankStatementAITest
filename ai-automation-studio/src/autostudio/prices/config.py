@@ -11,7 +11,7 @@ from selectolax.lexbor import LexborHTMLParser, SelectolaxError
 from autostudio.clientconf import ClientInfo, NotifyConfig, SinkConfig
 from autostudio.errors import ConfigError
 from autostudio.prices.money import MAX_AMOUNT, MAX_DECIMALS, bounded_amount
-from autostudio.prices.urls import covering_site, host_problem, url_problem
+from autostudio.prices.urls import covering_site, host_problem, url_problem, wire_host
 
 _PRODUCT_ID: Final = re.compile(r'^[A-Za-z0-9][\w.-]{0,63}$')
 _CURRENCY: Final = re.compile(r'^[A-Z]{3}$')
@@ -127,7 +127,8 @@ class SiteRule(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=
 
     Attributes:
         paused: Не обращаться к сайту совсем — ни к страницам, ни к robots.txt, ни после
-            редиректа с другого сайта. Ставится в день претензии владельца сайта (бриф 5.8).
+            редиректа с другого сайта (страницы или robots.txt). Ставится в день претензии
+            владельца сайта (бриф 5.8) и остаётся, когда его ссылки удалены из конфига.
         paused_reason: Почему (видит оператор в `check`): «письмо владельца 2026-10-20».
     """
 
@@ -162,6 +163,9 @@ class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
         max_run_minutes: Предел длины прохода: что не успели проверить — «не проверено» в этот раз,
             а не зависший проход, который держит и следующие запуски таймера.
         sites: Правила по сайтам (домен → `SiteRule`): например, пауза по претензии владельца.
+            Ключ можно писать и в punycode (`xn--…`), и в Unicode: сравнение идёт в IDNA-записи.
+            Пауза действует и без ссылок на этот сайт в конфиге: как запрет, в том числе для
+            редиректов.
     """
 
     products: list[Product]
@@ -202,7 +206,7 @@ class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
         _check_range('llm_max_pages_per_run', self.llm_max_pages_per_run, 0, 1000)
         _check_range('failure_alert_after', self.failure_alert_after, 1, 100)
         _check_range('max_run_minutes', self.max_run_minutes, 1, 360)
-        _check_sites(self)
+        _check_sites(self.sites)
 
     @property
     def offer_count(self) -> int:
@@ -229,19 +233,28 @@ class PricesSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fi
         return self.user_agent.format(contact_email=self.contact_email, token=ROBOTS_AGENT, version=version)
 
 
-def _check_sites(section: PricesSection) -> None:
-    hosts = {httpx.URL(offer.url).host for product in section.products for offer in product.offers}
-    for site in section.sites:
+def _check_sites(sites: dict[str, SiteRule]) -> None:
+    # Правило без ссылок на этот сайт — не ошибка: после претензии ссылки удаляют из конфига, а
+    # пауза остаётся запретом (и для редиректов с других сайтов). Опечатку в домене видно в
+    # `check`: «ссылок на него в конфиге нет».
+    seen: dict[str, str] = {}
+    for site in sites:
         where = f'prices.sites."{site}"'
         if site != site.strip().rstrip('.').lower():
             raise ConfigError(f'{where}: домен строчными, без пробелов и точки в конце')
         problem = host_problem(site)
         if problem is not None:
             raise ConfigError(f'{where}: {problem}')
-        if not any(covering_site(host, (site,)) for host in hosts):
-            # Опечатка в домене на паузе — это сбор с сайта, который просил перестать: такой
-            # конфиг не должен молча работать.
-            raise ConfigError(f'{where}: ни одна ссылка не ведёт на этот сайт — опечатка? Правило не сработает')
+        literal = f'[{site}]' if ':' in site else site
+        if url_problem(f'https://{literal}/') is not None:
+            # Ключ годится, только если годилась бы и ссылка на этот хост (битый punycode, имя не по IDNA).
+            raise ConfigError(f'{where}: не домен (битый punycode или недопустимые символы)')
+        # Сравнение с хостами ссылок идёт в IDNA-записи: ключ в punycode из письма владельца
+        # и Unicode-ключ — один и тот же сайт.
+        wire = wire_host(site)
+        if wire in seen:
+            raise ConfigError(f'{where}: тот же домен, что и "{seen[wire]}" (punycode и Unicode-запись)')
+        seen[wire] = site
 
 
 def _check_range(name: str, value: float, low: float, high: float) -> None:

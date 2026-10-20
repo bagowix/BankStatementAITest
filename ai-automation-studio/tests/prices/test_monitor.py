@@ -17,7 +17,16 @@ from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product
 from autostudio.prices.extract import MAX_EVIDENCE_CHARS, LLMBudget, PriceGuess
 from autostudio.prices.fetch import FetchFailure, FetchResult
 from autostudio.prices.heuristics import make_fake_llm
-from autostudio.prices.monitor import PricesDeps, RunResult, check_all, pct_change, render_digest, run_once
+from autostudio.prices.monitor import (
+    DIGEST_LIMIT,
+    Change,
+    PricesDeps,
+    RunResult,
+    check_all,
+    pct_change,
+    render_digest,
+    run_once,
+)
 from autostudio.prices.store import OfferKey, PriceStore
 from autostudio.runlog import RunSkipped
 from autostudio.sinks import CsvSink
@@ -1121,3 +1130,94 @@ async def test__run_once__model_outage__client_later_no_config_alert(tmp_path):
     assert result.failures == {'llm_outage': 1}
     assert result.operator_alert is None  # провайдер лёг — ждём; оператору — по порогу сбоев ссылки
     assert world.tab('Prices now')[1][10] == 'not checked this time — will be checked on the next run'
+
+
+async def test__run_once__model_key_broken_many_passes__one_alert_no_per_link_streak_lines(tmp_path):
+    # Ключ модели — одна тревога сразу; failure_alert_after проходов спустя не добавляет по строке на ссылку.
+    plain = '<html><body><p>Price 90 ₾</p></body></html>'
+    world = World(tmp_path, {URL_A: plain, URL_B: plain}, llm=failing_llm('config'))
+    config = make_config(product(offer(), offer(URL_B, 'Shop B')), llm_fallback=True, failure_alert_after=3)
+    alerts = [(await world.run(config)).operator_alert for _ in range(4)]
+    assert alerts[0] is not None and 'модель не отвечает из-за настроек' in alerts[0]
+    assert alerts[1:] == [None, None, None]
+    assert world.store.state(OfferKey('p1', 'Shop A', URL_A)).failures == 0
+    assert world.tab('Prices now')[1][10] == 'not checked this time — will be checked on the next run'
+
+
+async def test__run_once__model_config_then_outage__no_false_recovery_until_model_answers(tmp_path):
+    plain = '<html><body><p>Price 90 ₾</p></body></html>'
+    world = World(tmp_path, {URL_A: plain}, llm=failing_llm('config'))
+    config = make_config(product(offer()), llm_fallback=True)
+    first = await world.run(config)
+    assert first.operator_alert is not None and 'из-за настроек' in first.operator_alert
+    world.deps = msgspec.structs.replace(world.deps, llm=failing_llm('outage'))
+    outage = await world.run(config)
+    assert outage.failures == {'llm_outage': 1}
+    assert outage.operator_alert is None  # спросили, но провайдер лёг — это не «снова отвечает»
+    world.deps = msgspec.structs.replace(world.deps, llm=make_fake_llm())
+    answered = await world.run(config)
+    assert answered.operator_alert is not None and 'модель снова отвечает' in answered.operator_alert
+
+
+def busy_day(count: int, *, name: str = 'Samsung Galaxy S24 Ultra 512GB Titanium Black') -> list[Change]:
+    changes: list[Change] = []
+    for i in range(count):
+        base = Change(kind='price', product=f'{name} #{i}', competitor=f'Shop {i}', url=URL_A, currency='GEL')
+        changes.append(
+            msgspec.structs.replace(base, old_amount=Decimal('2749'), new_amount=Decimal('2599'), pct=Decimal('-5.5'))
+        )
+    for i in range(count // 4):
+        base = Change(kind='undercut', product=f'{name} U{i}', competitor='Shop U', url=URL_A, currency='GEL')
+        changes.append(
+            msgspec.structs.replace(base, new_amount=Decimal('2599'), own_price=Decimal('2699'), pct=Decimal('-3.7'))
+        )
+    return changes
+
+
+@pytest.mark.parametrize('language', ['en', 'ru'])
+def test__render_digest__busy_day__fits_telegram_footer_and_every_section_kept(language):
+    changes = busy_day(60)
+    sheet = 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'
+    digest = render_digest(
+        changes, client='Acme', language=language, when='2026-10-20 10:00', failed=7, total=90, sheet_url=sheet
+    )
+    assert digest is not None
+    assert len(digest) <= DIGEST_LIMIT
+    lines = digest.split('\n')
+    # Хвост — всегда: «не проверено N из M» и ссылка на таблицу.
+    assert lines[-1].endswith(sheet)
+    assert ('7 of 90' if language == 'en' else '7 из 90') in lines[-2]
+    # «Дешевле вас» — первым и целиком (их 15), «изменения цен» сокращены с честным «и ещё N».
+    titles = [line for line in lines if line.endswith(':') and not line.startswith('•')]
+    assert titles == (
+        ['Cheaper than you:', 'Price changes:'] if language == 'en' else ['Дешевле вас:', 'Изменения цен:']
+    )
+    undercuts = [line for line in lines if '— Shop U:' in line and line.startswith('•')]
+    prices = [line for line in lines if '#' in line and line.startswith('•')]
+    more = [line for line in lines if line.startswith('…')]
+    assert len(undercuts) == 15
+    assert 0 < len(prices) < 60
+    (rest,) = more
+    assert str(60 - len(prices)) in rest
+    # Ни одна строка не обрезана посередине.
+    assert all(line.endswith('%)') for line in undercuts + prices)
+
+
+def test__render_digest__quiet_day__unchanged_no_more_line():
+    changes = busy_day(4)
+    digest = render_digest(changes, client='Acme', language='en', when='now', failed=0, total=4, sheet_url=None)
+    assert digest is not None
+    assert '…' not in digest
+    assert digest.split('\n')[2] == 'Cheaper than you:'
+
+
+def test__render_digest__tiny_limit__sections_shrink_evenly():
+    changes = busy_day(8)
+    digest = render_digest(
+        changes, client='Acme', language='en', when='now', failed=0, total=8, sheet_url=None, limit=500
+    )
+    assert digest is not None
+    assert len(digest) <= 500
+    shown = [line for line in digest.split('\n') if line.startswith('•')]
+    undercuts = [line for line in shown if '— Shop U:' in line]
+    assert len(undercuts) >= 1 and len(shown) - len(undercuts) >= 1  # каждому разделу — хотя бы строка

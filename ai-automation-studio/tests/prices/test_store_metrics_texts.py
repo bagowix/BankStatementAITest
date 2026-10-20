@@ -237,6 +237,8 @@ def test__cells__machine_friendly():
     [
         ('robots_disallowed', 'skipped: the site asks robots not to visit this page'),
         ('timeout', 'the site did not respond'),
+        # robots.txt ответил 5xx/429: сайт болеет, а не «просит роботов не заходить».
+        ('robots_unavailable', 'the site did not respond'),
         ('too_large', 'page could not be read'),
         ('selector_not_found', 'price not found on the page'),
         ('llm_unverified', 'price not found on the page'),

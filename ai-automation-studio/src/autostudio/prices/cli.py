@@ -130,7 +130,7 @@ def capacity_report(load: Capacity, section: PricesSection) -> list[str]:
     out = [f'Нагрузка на сайты (пауза {section.min_delay_s:g} с между запросами{robots}; без Crawl-delay):']
     for site in load.sites[:_SHOWN_SITES]:
         out.append(
-            f'  {httpx.URL(site.site).host:<32} ссылок {site.offers}, запросов за проход {site.requests}, '
+            f'  {site.site:<32} ссылок {site.offers}, запросов за проход {site.requests}, '
             f'≈ {duration_text(site.pass_s)}, до {site.per_hour} запросов/ч'
         )
     if len(load.sites) > _SHOWN_SITES:
@@ -148,19 +148,29 @@ def capacity_report(load: Capacity, section: PricesSection) -> list[str]:
 
 
 def paused_notes(config: PricesConfig) -> list[str]:
-    """Сайты на паузе: что не проверяется и почему (замечания `check`, не ошибки)."""
+    """Сайты на паузе: что не проверяется и почему (замечания `check`, не ошибки).
+
+    Пауза без ссылок на этот сайт — тоже замечание, а не ошибка: так выглядит конфиг после
+    претензии (ссылки удалены, запрет остался). Опечатку в домене оператор видит здесь же.
+    """
     section = config.prices
-    counts: dict[str, int] = {}
+    counts = dict.fromkeys(sorted(section.paused_sites), 0)
     for product in section.products:
         for offer in product.offers:
             site = section.paused_site(offer.url)
             if site is not None:
-                counts[site] = counts.get(site, 0) + 1
-    return [
-        f'сайт {site} на паузе ({section.sites[site].paused_reason or "причина не указана"}): '
-        f'ссылок не проверяется: {count}'
-        for site, count in sorted(counts.items())
-    ]
+                counts[site] += 1
+    notes: list[str] = []
+    for site, count in counts.items():
+        head = f'сайт {site} на паузе ({section.sites[site].paused_reason or "причина не указана"}): '
+        if count:
+            notes.append(f'{head}ссылок не проверяется: {count}')
+        else:
+            notes.append(
+                f'{head}ссылок на него в конфиге нет — действует как запрет, в том числе для редиректов. '
+                'Ставили паузу сайту, на который есть ссылки, — проверьте домен на опечатку'
+            )
+    return notes
 
 
 def _reserved(host: str) -> bool:
@@ -273,6 +283,12 @@ async def serve(
 ) -> bool:
     """Боевой цикл: проход под `supervised_run` (журнал, healthcheck, сигнал оператору).
 
+    Конфиг читается перед каждым проходом, как и при запуске по таймеру: пауза сайта,
+    добавленная в день претензии, действует со следующего прохода `run --every-hours` без
+    перезапуска процесса. Сломанный между проходами конфиг — сбой прохода (оператору — через
+    `supervised_run`), и ни один сайт не запрашивается, пока его не починят: со старым
+    конфигом цикл мог бы собирать цены с сайта, который только что поставили на паузу.
+
     Args:
         config_path: Конфиг клиента.
         every_hours: Пауза между проходами или None — один проход (для cron/systemd timer).
@@ -285,46 +301,70 @@ async def serve(
         пропущен: другой проход ещё держит замок клиента).
     """
     settings = Settings.from_env(os.environ)
+    # Первое чтение — без поблажек: сломанный конфиг на старте останавливает команду сразу.
     config = load_client_config(config_path, PricesConfig)
-    for warning in capacity(config.prices, every_hours=every_hours).warnings:
-        # Не стоп: оператор узнаёт из лога, что сайт перегружен или проход не успеет.
-        logger.warning('prices %s: ёмкость: %s', config.client.id, warning)
+    cycles = 0
+    while True:
+        broken: ConfigError | None = None
+        if cycles:
+            try:
+                config = load_client_config(config_path, PricesConfig)
+            except ConfigError as exc:
+                # Журнал, пинг и канал оператора — по последнему исправному конфигу.
+                broken = exc
+        ok = await _cycle(config, settings, every_hours=every_hours, provider=provider, broken=broken)
+        cycles += 1
+        if every_hours is None or (max_cycles is not None and cycles >= max_cycles):
+            return ok
+        await sleep(every_hours * _HOUR_S)
+
+
+async def _cycle(
+    config: PricesConfig,
+    settings: Settings,
+    *,
+    every_hours: float | None,
+    provider: Callable[[], Provider],
+    broken: ConfigError | None,
+) -> bool:
+    """Один проход в своём контейнере: зависимости собираются по конфигу этого прохода."""
+    if broken is None:
+        for warning in capacity(config.prices, every_hours=every_hours).warnings:
+            # Не стоп: оператор узнаёт из лога, что сайт перегружен или проход не успеет.
+            logger.warning('prices %s: ёмкость: %s', config.client.id, warning)
     container = make_async_container(CoreProvider(), provider(), context={Settings: settings, PricesConfig: config})
     try:
         deps = await container.get(PricesDeps)
         heartbeat = await container.get(Heartbeat)
         operator = await container.get(OperatorAlerts)
         clock = await container.get(Clock)
-        cycles = 0
-        while True:
-            skipped = False
+        skipped = False
 
-            async def job() -> RunResult:
-                nonlocal skipped
-                try:
-                    return await run_once(config, deps, clock())
-                except RunSkipped:
-                    # supervised_run вернёт None и на пропуск, и на сбой — а это разные исходы.
-                    skipped = True
-                    raise
+        async def job() -> RunResult:
+            nonlocal skipped
+            if broken is not None:
+                raise broken
+            try:
+                return await run_once(config, deps, clock())
+            except RunSkipped:
+                # supervised_run вернёт None и на пропуск, и на сбой — а это разные исходы.
+                skipped = True
+                raise
 
-            result = await supervised_run(
-                package='prices',
-                job=job,
-                events=deps.events,
-                heartbeat=heartbeat,
-                operator=operator.notifier,
-                client_name=config.client.name,
-                now=clock,
-            )
-            if result is not None:
-                print(summary(result), flush=True)
-            elif skipped:
-                print(SKIPPED, flush=True)
-            cycles += 1
-            if every_hours is None or (max_cycles is not None and cycles >= max_cycles):
-                return result is not None or skipped
-            await sleep(every_hours * _HOUR_S)
+        result = await supervised_run(
+            package='prices',
+            job=job,
+            events=deps.events,
+            heartbeat=heartbeat,
+            operator=operator.notifier,
+            client_name=config.client.name,
+            now=clock,
+        )
+        if result is not None:
+            print(summary(result), flush=True)
+        elif skipped:
+            print(SKIPPED, flush=True)
+        return result is not None or skipped
     finally:
         await container.close()
 

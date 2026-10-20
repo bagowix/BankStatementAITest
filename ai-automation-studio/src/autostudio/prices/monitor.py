@@ -44,11 +44,13 @@ from autostudio.errors import AutoStudioError, NotifyError, SinkError
 from autostudio.events import EventLog
 from autostudio.llm import LLMClient
 from autostudio.notify import Notifier
+from autostudio.notify.channels import TELEGRAM_LIMIT
 from autostudio.prices import texts
 from autostudio.prices.config import PARALLEL_SITES, PAUSED, Offer, PricesConfig, PricesSection, Product
 from autostudio.prices.extract import (
     AMBIGUOUS_DECIMAL,
     LLM_CONFIG,
+    LLM_UNREACHED,
     MULTIPLE_PRODUCTS,
     Availability,
     ExtractionFailure,
@@ -71,7 +73,7 @@ from autostudio.prices.store import (
     SheetRow,
     StoredReading,
 )
-from autostudio.prices.urls import origin, redact
+from autostudio.prices.urls import redact, site_key
 from autostudio.runlog import RunSkipped
 from autostudio.sinks import Cell, TableSink
 
@@ -84,6 +86,9 @@ _SHEETS_URL: Final = 'https://docs.google.com/spreadsheets/d/{id}'
 # владельцу: «2 499 → 2.50» чаще ошибка вёрстки или разметки, чем распродажа.
 MAX_PLAUSIBLE_JUMP_PCT: Final = Decimal(50)
 _BUDGET_FLAG: Final = 'llm_budget_exhausted'
+# Предел длины уведомления владельцу — тот же, по которому ядро обрезает сообщение Telegram
+# (4096 у Bot API, с запасом). Дайджест укладывается в него сам, а не теряет хвост при обрезке.
+DIGEST_LIMIT: Final = TELEGRAM_LIMIT
 _MODEL_CONFIG_FLAG: Final = 'llm_config_broken'
 REDIRECTED: Final = 'redirected'
 # Предупреждения удачного чтения — оператору, один раз, когда предупреждение появилось.
@@ -345,8 +350,10 @@ def _failed(
     section: PricesSection,
 ) -> Assessment:
     key = OfferKey(product.id, offer.competitor, offer.url)
-    if outcome.reason == PAUSED:
-        # Пауза — решение оператора, а не поломка: счётчик сбоев и предупреждения не трогаем.
+    if outcome.reason in (PAUSED, LLM_CONFIG):
+        # Пауза — решение оператора, а не поломка. Ключ модели — одна тревога на весь проход
+        # (`_model_config_lines`), а не строка на каждую ссылку через failure_alert_after проходов.
+        # Счётчик сбоев и предупреждения не трогаем.
         return Assessment(key=key, product=product, offer=offer, outcome=outcome, previous=previous, state=state)
     failures = state.failures + 1
     lines: tuple[str, ...] = ()
@@ -593,7 +600,8 @@ async def check_all(
     бюджет делится в порядке конфига, поэтому одни и те же ссылки получают модель от запуска
     к запуску (а не те, чей сайт ответил быстрее). Что не уложилось в срок прохода, — сбой
     `run_timeout` для этой ссылки, а не зависший проход. Ссылки сайтов на паузе не
-    загружаются: их итог — `paused`.
+    загружаются: их итог — `paused`. Очередь — одна на домен (`site_key`): ссылки на
+    `www.shop.ge` и `shop.ge` идут друг за другом, а не двумя параллельными потоками.
 
     Args:
         section: Товары и настройки.
@@ -614,7 +622,7 @@ async def check_all(
             # Претензия владельца сайта — стоп сразу: ни страницы, ни robots.txt, ни DNS.
             first[index] = CheckFailure(reason=PAUSED, detail=paused)
         else:
-            by_site.setdefault(origin(offer.url), []).append(index)
+            by_site.setdefault(site_key(offer.url), []).append(index)
     loop = asyncio.get_running_loop()
     limit_s = deadline_s if deadline_s is not None else section.max_run_minutes * 60
     deadline = loop.time() + limit_s
@@ -650,7 +658,9 @@ async def check_all(
         else:
             final[index] = _settle(budget_denied(outcome.failure), ())
     if llm is not None and granted:
-        final.update(await _ask_all(pairs, granted, llm=llm, section=section, deadline=deadline, late=late))
+        final.update(
+            await _ask_all(pairs, granted, llm=llm, budget=budget, section=section, deadline=deadline, late=late)
+        )
     return [(product, offer, final[index]) for index, (product, offer) in enumerate(pairs)]
 
 
@@ -659,6 +669,7 @@ async def _ask_all(
     granted: list[tuple[int, _NeedsModel]],
     *,
     llm: LLMClient,
+    budget: LLMBudget,
     section: PricesSection,
     deadline: float,
     late: CheckFailure,
@@ -682,6 +693,9 @@ async def _ask_all(
             # Неожиданный сбой SDK на одной странице не роняет проход: это сбой ссылки.
             logger.exception('модель на %s / %s упала', product.id, offer.competitor)
             return index, CheckFailure(reason='internal_error', detail=type(exc).__name__)
+        if waiting.text and not (isinstance(answer, ExtractionFailure) and answer.reason in LLM_UNREACHED):
+            # Провайдер ответил (ценой или отказом по существу): «модель снова отвечает» — по этому.
+            budget.answered += 1
         return index, _settle(merge_model(waiting.failure, answer), waiting.warnings)
 
     return dict(await asyncio.gather(*(ask(index, waiting) for index, waiting in granted)))
@@ -816,8 +830,14 @@ def render_digest(
     failed: int,
     total: int,
     sheet_url: str | None,
+    limit: int = DIGEST_LIMIT,
 ) -> str | None:
     """Одно сообщение владельцу за запуск, только если есть что сказать.
+
+    Сообщение укладывается в `limit` само: в насыщенный день разделы сокращаются поровну
+    («…и ещё N — в таблице»), а строка о непроверенных страницах и ссылка на таблицу остаются
+    всегда. Обрезка ядром отрезала бы именно хвост — последние «дешевле вас» и ссылку. Первым
+    идёт «дешевле вас»: по нему владелец действует.
 
     Args:
         changes: Значимые события запуска.
@@ -827,6 +847,7 @@ def render_digest(
         failed: Сколько ссылок не проверено.
         total: Сколько ссылок всего.
         sheet_url: Ссылка на таблицу или None.
+        limit: Предел длины сообщения в символах.
 
     Returns:
         Текст или None, если значимого ничего нет.
@@ -834,55 +855,88 @@ def render_digest(
     if not changes:
         return None
     t = texts.DIGEST[language]
-    out = [t['title'].format(client=client, when=when)]
-
-    def section(kind: ChangeKind, render: Callable[[Change], str]) -> None:
-        items = [render(change) for change in changes if change.kind == kind]
-        if items:
-            out.extend(['', t[kind], *items])
 
     def amount(value: Decimal | None) -> str:
         return texts.show_amount(value, language) if value is not None else '?'
 
-    section(
-        'price',
-        lambda c: t['price_line'].format(
-            product=c.product,
-            competitor=c.competitor,
-            old=amount(c.old_amount),
-            new=amount(c.new_amount),
-            currency=c.currency or '',
-            pct=f' ({texts.show_pct(c.pct, language)}%)' if c.pct is not None else '',
+    renderers: tuple[tuple[ChangeKind, Callable[[Change], str]], ...] = (
+        (
+            'undercut',
+            lambda c: t['undercut_line'].format(
+                product=c.product,
+                competitor=c.competitor,
+                price=amount(c.new_amount),
+                currency=c.currency or '',
+                own=amount(c.own_price),
+                pct=texts.show_pct(c.pct or Decimal(0), language),
+            ),
+        ),
+        (
+            'price',
+            lambda c: t['price_line'].format(
+                product=c.product,
+                competitor=c.competitor,
+                old=amount(c.old_amount),
+                new=amount(c.new_amount),
+                currency=c.currency or '',
+                pct=f' ({texts.show_pct(c.pct, language)}%)' if c.pct is not None else '',
+            ),
+        ),
+        (
+            'stock',
+            lambda c: t['stock_out' if c.availability is Availability.OUT_OF_STOCK else 'stock_back'].format(
+                product=c.product, competitor=c.competitor
+            ),
+        ),
+        (
+            'currency',
+            lambda c: t['currency_line'].format(
+                product=c.product, competitor=c.competitor, new=c.currency or '?', old=c.old_currency or '?'
+            ),
         ),
     )
-    section(
-        'undercut',
-        lambda c: t['undercut_line'].format(
-            product=c.product,
-            competitor=c.competitor,
-            price=amount(c.new_amount),
-            currency=c.currency or '',
-            own=amount(c.own_price),
-            pct=texts.show_pct(c.pct or Decimal(0), language),
-        ),
-    )
-    section(
-        'stock',
-        lambda c: t['stock_out' if c.availability is Availability.OUT_OF_STOCK else 'stock_back'].format(
-            product=c.product, competitor=c.competitor
-        ),
-    )
-    section(
-        'currency',
-        lambda c: t['currency_line'].format(
-            product=c.product, competitor=c.competitor, new=c.currency or '?', old=c.old_currency or '?'
-        ),
-    )
-    if failed:
-        out.extend(['', t['unchecked'].format(failed=failed, total=total)])
+    sections = [
+        (t[kind], lines)
+        for kind, render in renderers
+        if (lines := [render(change) for change in changes if change.kind == kind])
+    ]
+    head = [t['title'].format(client=client, when=when)]
+    tail = ['', t['unchecked'].format(failed=failed, total=total)] if failed else []
     if sheet_url:
-        out.append(t['sheet'].format(url=sheet_url))
-    return '\n'.join(out)
+        tail.append(t['sheet'].format(url=sheet_url))
+    return _fit_digest(head, sections, tail, more=t['more'], limit=limit)
+
+
+def _fit_digest(
+    head: list[str], sections: list[tuple[str, list[str]]], tail: list[str], *, more: str, limit: int
+) -> str:
+    """Собирает сообщение, сокращая разделы поровну, пока оно не уложится в `limit`."""
+
+    def build(shown: Sequence[int]) -> str:
+        out = list(head)
+        for (title, lines), count in zip(sections, shown, strict=True):
+            out.extend(['', title, *lines[:count]])
+            if count < len(lines):
+                out.append(more.format(n=len(lines) - count))
+        return '\n'.join([*out, *tail])
+
+    full = [len(lines) for _, lines in sections]
+    if len(build(full)) <= limit:
+        return build(full)
+    # По строке в каждый раздел по кругу, пока влезает: короткий раздел не отдаёт место
+    # длинному, а строка не режется посередине. Заголовок, «…и ещё N» и хвост — всегда.
+    shown = [0] * len(sections)
+    grew = True
+    while grew:
+        grew = False
+        for index, total in enumerate(full):
+            if shown[index] < total:
+                shown[index] += 1
+                if len(build(shown)) <= limit:
+                    grew = True
+                else:
+                    shown[index] -= 1
+    return build(shown)
 
 
 def _event_payload(item: Assessment, reading: PriceReading) -> dict[str, str]:
@@ -1034,7 +1088,7 @@ async def _run_locked(config: PricesConfig, deps: PricesDeps, now: dt.datetime) 
 
     operator_lines = [line for item in assessments for line in item.operator_lines]
     operator_lines += _budget_lines(deps.store, budget, now)
-    operator_lines += _model_config_lines(deps.store, failures, asked=budget.used > 0, now=now)
+    operator_lines += _model_config_lines(deps.store, failures, answered=budget.answered > 0, now=now)
     operator_alert = f'🛠 {config.client.name} / prices:\n' + '\n'.join(operator_lines) if operator_lines else None
     await _tell_operator(deps.operator, operator_alert)
     logger.info(
@@ -1078,7 +1132,7 @@ def _budget_lines(store: PriceStore, budget: LLMBudget, now: dt.datetime) -> lis
 
 
 def _model_config_lines(
-    store: PriceStore, failures: Sequence[CheckFailure], *, asked: bool, now: dt.datetime
+    store: PriceStore, failures: Sequence[CheckFailure], *, answered: bool, now: dt.datetime
 ) -> list[str]:
     # Ключ, права или имя модели (`LLMError.kind == 'config'`) не чинятся повтором: оператору —
     # сразу и один раз, а не через `failure_alert_after` проходов по строке на каждую ссылку.
@@ -1091,7 +1145,9 @@ def _model_config_lines(
             f'Страниц без цены в этом проходе: {len(broken)}, клиенту — «в этот раз не проверено». '
             'Проверьте AUTOSTUDIO_LLM_PROVIDER, AUTOSTUDIO_LLM_MODEL и ключ провайдера'
         ]
-    if flagged and asked and not broken:
+    # «Снова отвечает» — только если провайдер действительно ответил в этом проходе: спросили, а
+    # он лёг (llm_outage), — это не починка, флаг остаётся до первого настоящего ответа.
+    if flagged and answered and not broken:
         store.set_flag(_MODEL_CONFIG_FLAG, None)
         return ['• модель снова отвечает']
     return []

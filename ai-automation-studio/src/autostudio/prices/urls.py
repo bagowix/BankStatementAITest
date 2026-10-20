@@ -93,24 +93,59 @@ def url_problem(url: str) -> str | None:
     return host_problem(host)
 
 
+def wire_host(host: str) -> str:
+    """Хост так, как он уходит в DNS и TLS: IDNA (punycode), строчными, без точки в конце.
+
+    Хосты ссылок и ключи `[prices.sites]` сравниваются только в этом виде: `httpx.URL.host`
+    декодирует punycode, лишь когда с него начинается весь хост («xn--….ge» → Unicode, а
+    «www.xn--….ge» остаётся punycode), — и Unicode-ключ не совпал бы с `www.`-ссылкой, а
+    ключ из письма владельца в punycode — с Unicode-ссылкой.
+
+    Args:
+        host: Имя или IP-литерал (IPv6 — без квадратных скобок), в любой записи.
+
+    Returns:
+        ASCII-имя.
+
+    Raises:
+        httpx.InvalidURL: Unicode-имя не кодируется в IDNA.
+        ValueError: Битый punycode (`xn--…`, который не декодируется).
+    """
+    literal = f'[{host}]' if ':' in host else host
+    return httpx.URL(f'https://{literal}/').raw_host.decode('ascii').rstrip('.').lower()
+
+
 def covering_site(host: str, sites: Iterable[str]) -> str | None:
     """Домен из списка, под который попадает хост: он сам или его поддомен.
 
     Args:
         host: Хост из URL.
-        sites: Домены строчными (ключи `[prices.sites]`).
+        sites: Домены (ключи `[prices.sites]`, проверенные при загрузке конфига).
 
     Returns:
-        Самый точный из подходящих доменов или None.
+        Самый точный из подходящих доменов (ключ, как он записан) или None.
     """
-    name = host.rstrip('.').lower()
+    name = wire_host(host)
+    wires = {site: wire_host(site) for site in sites}
     # «shop.ge» накрывает «www.shop.ge», но не «myshop.ge»: сравниваем по границе метки.
-    matches = [site for site in sites if name == site or name.endswith(f'.{site}')]
-    return max(matches, key=len) if matches else None
+    matches = [site for site, wire in wires.items() if name == wire or name.endswith(f'.{wire}')]
+    return max(matches, key=lambda site: len(wires[site])) if matches else None
+
+
+def site_key(url: str) -> str:
+    """Ключ вежливости: хост без `www.` — один сайт для очереди запросов и расчёта ёмкости.
+
+    Бриф 5.8 ограничивает частоту запросов к домену, а не к `scheme://host`: ссылки одного
+    магазина на `www.shop.ge` и `shop.ge` (или по http и https) иначе получали бы две
+    независимые очереди — вдвое больше разрешённого. Хост — в IDNA-записи (как `wire_host`):
+    Unicode- и punycode-ссылки на один сайт — тоже одна очередь.
+    """
+    host = httpx.URL(url).raw_host.decode('ascii').rstrip('.').lower()
+    return host.removeprefix('www.') or host
 
 
 def origin(url: str) -> str:
-    """`scheme://host[:port]` — ключ кэша robots.txt и паузы между запросами.
+    """`scheme://host[:port]` — ключ кэша robots.txt (RFC 9309: свой файл у каждого origin).
 
     IPv6-литерал остаётся в квадратных скобках: без них `https://2606:4700::1111/robots.txt`
     — уже не URL, и robots.txt такого сайта молча считался бы отсутствующим.

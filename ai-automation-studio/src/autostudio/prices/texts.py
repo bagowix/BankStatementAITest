@@ -156,6 +156,8 @@ _FAILURE_GROUPS: Final[dict[str, str]] = {
     'timeout': 'unavailable',
     'network': 'unavailable',
     'dns': 'unavailable',
+    # robots.txt ответил 5xx/429 или его адрес не проверился: сайт болеет, а не запрещает нас.
+    'robots_unavailable': 'unavailable',
     'too_large': 'unreadable',
     'not_html': 'unreadable',
     'too_many_redirects': 'unreadable',
@@ -223,6 +225,7 @@ DIGEST: Final[dict[str, dict[str, str]]] = {
         'currency_line': '• {product} — {competitor}: now in {new} (was {old}), not compared with your price',
         'unchecked': '{failed} of {total} pages could not be checked this time — we are on it.',
         'sheet': 'Full table: {url}',
+        'more': '…and {n} more — see the table',
     },
     'ru': {
         'title': '📈 Цены конкурентов — {client} · {when}',
@@ -237,6 +240,7 @@ DIGEST: Final[dict[str, dict[str, str]]] = {
         'currency_line': '• {product} — {competitor}: теперь в {new} (было {old}), с вашей ценой не сравниваем',
         'unchecked': 'Не удалось проверить {failed} из {total} страниц — уже разбираемся.',
         'sheet': 'Вся таблица: {url}',
+        'more': '…и ещё {n} — в таблице',
     },
 }
 
