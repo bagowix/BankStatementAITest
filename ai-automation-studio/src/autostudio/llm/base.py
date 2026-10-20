@@ -71,6 +71,14 @@ class LLMClient(Protocol):
         """
         ...
 
+    async def aclose(self) -> None:
+        """Закрывает HTTP-клиент провайдера.
+
+        Асинхронный клиент нельзя честно закрыть сборщиком мусора, поэтому его закрывает
+        тот, кто создал, — провайдер dishka при закрытии контейнера.
+        """
+        ...
+
 
 def output_schema(schema: type[msgspec.Struct]) -> JSONObject:
     """JSON Schema для «строгих» структурированных ответов OpenAI и Anthropic.

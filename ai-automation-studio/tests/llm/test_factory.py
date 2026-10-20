@@ -24,3 +24,16 @@ def test__make_llm__anthropic__anthropic_client(monkeypatch):
     llm = make_llm(Settings.from_env({'AUTOSTUDIO_LLM_PROVIDER': 'anthropic', 'ANTHROPIC_API_KEY': 'k'}))
     assert isinstance(llm, AnthropicClient)
     assert llm.model == 'claude-opus-5-5'
+
+
+async def test__llm_clients__aclose__closes_sdk_client():
+    closed = []
+
+    class _Sdk:
+        async def close(self):
+            closed.append(True)
+
+    await OpenAIClient(_Sdk(), 'm').aclose()
+    await AnthropicClient(_Sdk(), 'm').aclose()
+    await FakeLLM().aclose()
+    assert closed == [True, True]

@@ -37,6 +37,9 @@ class OpenAIClient:
     def usage(self) -> LLMUsage:
         return self._usage
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
     async def extract[T: msgspec.Struct](self, *, system: str, prompt: str, schema: type[T]) -> T:
         json_schema: dict[str, object] = dict(output_schema(schema))
         text_format: ResponseFormatTextJSONSchemaConfigParam = {

@@ -56,6 +56,9 @@ class FakeLLM:
     def usage(self) -> LLMUsage:
         return self._usage
 
+    async def aclose(self) -> None:
+        """Закрывать нечего: заглушка не держит соединений."""
+
     def register(self, schema: type[msgspec.Struct], handler: ExtractHandler) -> None:
         """Добавляет эвристику для схемы (последняя регистрация побеждает)."""
         self._extractors[schema] = handler

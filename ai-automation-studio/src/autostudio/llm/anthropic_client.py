@@ -53,6 +53,9 @@ class AnthropicClient:
     def usage(self) -> LLMUsage:
         return self._usage
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
     async def extract[T: msgspec.Struct](self, *, system: str, prompt: str, schema: type[T]) -> T:
         json_format: JSONOutputFormatParam = {'type': 'json_schema', 'schema': dict(output_schema(schema))}
         text = await self._respond(system=system, prompt=prompt, json_format=json_format)
