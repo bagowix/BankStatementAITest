@@ -11,7 +11,7 @@ from typing import Annotated, Final, Literal
 
 import cyclopts
 
-from autostudio import __version__
+from autostudio import __version__, logsafe
 from autostudio.clientconf import events_path, load_client_info
 from autostudio.errors import AutoStudioError, ConfigError
 from autostudio.events import EventLog
@@ -136,6 +136,7 @@ def demo_all(*, out: Path = Path('var/demo')) -> None:
 # httpx и httpcore на уровне INFO пишут каждый запрос с полным URL, а в URL Bot API
 # Telegram лежит токен бота (`/bot<token>/sendMessage`), в ссылках сайтов — метки
 # и токены в query. Выше WARNING они ничего такого не пишут.
+_LOG_FORMAT: Final = '%(asctime)s %(levelname)s %(name)s: %(message)s'
 _NOISY_HTTP_LOGGERS: Final = ('httpx', 'httpcore', 'hpack', 'aiogram.event')
 
 
@@ -147,9 +148,8 @@ def quiet_http_loggers() -> None:
 
 def main() -> None:
     """Точка входа `autostudio`: ошибки пакета печатаются коротко, без трассировки."""
-    logging.basicConfig(
-        level=os.environ.get('AUTOSTUDIO_LOG_LEVEL', 'INFO'), format='%(asctime)s %(levelname)s %(name)s: %(message)s'
-    )
+    logging.basicConfig(level=os.environ.get('AUTOSTUDIO_LOG_LEVEL', 'INFO'), format=_LOG_FORMAT)
+    logsafe.install(_LOG_FORMAT)
     quiet_http_loggers()
     try:
         app()
