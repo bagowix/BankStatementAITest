@@ -23,11 +23,14 @@ class LLMProvider(StrEnum):
     FAKE = 'fake'
 
 
-# Модель по умолчанию для каждого провайдера. Переопределяется AUTOSTUDIO_LLM_MODEL:
-# выбор между ценой и качеством — решение оператора, а не кода.
+# Модель по умолчанию для каждого провайдера. Переопределяется AUTOSTUDIO_LLM_MODEL.
+# Anthropic — Haiku 5.5 (решение оператора): задачи пакетов — классификация, извлечение
+# полей и короткие ответы, а Opus 5.5 ($4/$20 за 1 млн токенов против $0,10/$0,50)
+# съел бы почти всю абонентскую плату. Клиенту с трудными письмами можно включить
+# Sonnet или Opus одной строкой в его .env.
 DEFAULT_MODELS: Final[Mapping[LLMProvider, str]] = {
     LLMProvider.OPENAI: 'gpt-5.4-mini',
-    LLMProvider.ANTHROPIC: 'claude-opus-5-5',
+    LLMProvider.ANTHROPIC: 'claude-haiku-5-5',
     LLMProvider.FAKE: 'fake',
 }
 

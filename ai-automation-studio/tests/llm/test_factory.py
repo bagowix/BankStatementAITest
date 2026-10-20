@@ -23,7 +23,7 @@ def test__make_llm__anthropic__anthropic_client(monkeypatch):
     monkeypatch.setenv('ANTHROPIC_API_KEY', 'k')
     llm = make_llm(Settings.from_env({'AUTOSTUDIO_LLM_PROVIDER': 'anthropic', 'ANTHROPIC_API_KEY': 'k'}))
     assert isinstance(llm, AnthropicClient)
-    assert llm.model == 'claude-opus-5-5'
+    assert llm.model == 'claude-haiku-5-5'
 
 
 async def test__llm_clients__aclose__closes_sdk_client():
