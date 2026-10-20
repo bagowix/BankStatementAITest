@@ -13,6 +13,7 @@ from autostudio.inbox.triage import (
     build_draft_system,
     build_email_block,
     build_triage_system,
+    country_written,
     detect_injection,
     draft_language,
     guess_language,
@@ -115,6 +116,64 @@ def test__verify_phone__foreign_number_written_internationally__found_without_it
     assert verify_phone('+48 599 123 456', texts, []) == VerifiedPhone('+48 599 123 456', '+48599123456')
     # Местная запись чужой страны без её региона в конфиге не подтверждается (а не угадывается).
     assert verify_phone('+7 916 123 45 67', ['8 (916) 123-45-67'], ['GE']) is None
+
+
+@pytest.mark.parametrize('local', ['(917) 555-0134', '(415) 555-0134', '347-555-0134'])
+def test__verify_phone__us_local_number_valid_in_ru_fallback__literal_kept_without_e164(local):
+    # Регрессия: местный американский номер без +1 читался в запасном регионе RU (10 цифр, как в
+    # NANP; коды 917, 415, 347 есть и в России), и владелец получал в Telegram «+7…» для звонка в
+    # один тап — не тому человеку. Номер в письме есть, а его страну ничто не доказывает.
+    texts = [f'Hi! Please call me at {local} tomorrow.']
+    assert verify_phone(local, texts, ['GE', 'RU']) == VerifiedPhone(local, None)
+    # Модель «достроила» +7 — в таблицу всё равно идёт запись из письма, и E.164 нет.
+    assert verify_phone(f'+7 {local}', texts, ['GE', 'RU']) == VerifiedPhone(local, None)
+
+
+@pytest.mark.parametrize(
+    'literal',
+    ['8 (917) 555-01-34', '8-917-555-01-34', '7 917 555 01 34', '+7 917 555-01-34', '8 10 7 917 555 01 34'],
+)
+def test__verify_phone__fallback_region_named_by_record__e164_filled(literal):
+    # Префикс «8», код страны с плюсом или без, международный выход «8 10» — страна в самой записи.
+    assert verify_phone(literal, [f'Мой номер {literal}'], ['GE', 'RU']) == VerifiedPhone(literal, '+79175550134')
+
+
+def test__verify_phone__record_with_country_later_in_email__preferred_over_bare_record():
+    texts = ['Call me at (917) 555-0134.', 'Тел.: 8 (917) 555-01-34']
+    assert verify_phone('(917) 555-0134', texts, ['GE', 'RU']) == VerifiedPhone('8 (917) 555-01-34', '+79175550134')
+
+
+def test__verify_phone__bare_local_number_of_home_region__e164_filled():
+    # Основной регион — страна самого бизнеса: местная запись без кода — его номер.
+    texts = ['Call (917) 555-0134']
+    assert verify_phone('(917) 555-0134', texts, ['US', 'RU']) == VerifiedPhone('(917) 555-0134', '+19175550134')
+
+
+@pytest.mark.parametrize(
+    ('literal', 'region', 'written'),
+    [
+        ('8 (916) 123-45-67', 'RU', True),
+        ('8-916-123-45-67', 'RU', True),
+        ('7 916 123 45 67', 'RU', True),
+        ('+1 415 555 0134', 'RU', True),
+        ('00995 599 12 34 56', 'GE', True),
+        ('(917) 555-0134', 'RU', False),
+        ('916 123-45-67', 'RU', False),
+        ('(812) 555-01-34', 'RU', False),  # восьмёрка — код Петербурга, а не префикс
+        ('06 1234 5678', 'IT', False),  # у Италии нет национального префикса
+        ('not a phone', 'RU', False),
+    ],
+)
+def test__country_written__prefix_or_country_code_in_record__named_or_not(literal, region, written):
+    assert country_written(literal, region) is written
+
+
+def test__validate__us_local_phone_with_ru_fallback__kept_as_written_without_e164_not_corrected():
+    email = _email(body='Hi! What is the price for 4 people? Please call me at (917) 555-0134.')
+    result = validate_triage(_raw(phone='(917) 555-0134'), email, SECTION, [])
+    assert SECTION.phone_regions == ['GE', 'RU']
+    assert result.phone == '(917) 555-0134' and result.phone_e164 is None
+    assert result.corrected == []
 
 
 def test__normalize_phone__regions_in_order__e164_or_none():

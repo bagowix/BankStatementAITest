@@ -59,6 +59,9 @@ _TEXTS: Final[dict[str, dict[str, str]]] = {
         'reason_lines_incomplete': 'some lines have no amount',
         'reason_no_lines': 'no line items extracted — nothing to check the total against',
         'reason_line_not_in_pdf': 'a line amount is not printed in the PDF',
+        'reason_single_line_is_total': 'the only line is the total itself — no line amounts printed, '
+        'nothing to check the total against',
+        'reason_line_amount_reused': 'a line repeats an amount printed only once (as the total, tax or another line)',
         'reason_total_is_subtotal': 'this total looks like a subtotal: the PDF also shows it plus another amount',
         'reason_bad_date': 'a date could not be read',
         'reason_due_before_issue': 'due date is before the invoice date',
@@ -122,6 +125,10 @@ _TEXTS: Final[dict[str, dict[str, str]]] = {
         'reason_lines_incomplete': 'у части строк нет суммы',
         'reason_no_lines': 'строки счёта не извлечены — итог не с чем сверить',
         'reason_line_not_in_pdf': 'суммы одной из строк нет в тексте PDF',
+        'reason_single_line_is_total': 'единственная строка — это сам итог: сумм строк в PDF нет, итог не с чем '
+        'сверить',
+        'reason_line_amount_reused': 'строка повторяет сумму, напечатанную в PDF один раз (итог, налог или другая '
+        'строка)',
         'reason_total_is_subtotal': 'похоже на подытог: в PDF есть и эта сумма плюс другая (налог, доставка)',
         'reason_bad_date': 'дата не разбирается',
         'reason_due_before_issue': 'срок оплаты раньше даты счёта',

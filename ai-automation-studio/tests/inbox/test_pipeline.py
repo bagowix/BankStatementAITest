@@ -158,6 +158,18 @@ async def test__run__hallucinated_phone__dropped_from_sheet_and_notification(tmp
     assert '415' not in h.owner.sent[0]
 
 
+async def test__run__us_local_phone_with_ru_fallback__alert_without_wrong_country_number(tmp_path):
+    # Регрессия: «(917) 555-0134» туриста из США читался в запасном регионе RU, и владелец получал
+    # «Phone: (917) 555-0134 (+79175550134)» — звонок в один тап не тому человеку.
+    h = Harness(tmp_path)
+    body = 'Hi! What is the price of the Kazbegi tour for 4 people? Please call me at (917) 555-0134. Thanks, John'
+    h.box.add(make_email(subject='Kazbegi tour price', body=body))
+    result = await run_once(h.config, h.deps, NOW)
+    assert result.processed == 1 and result.outcomes[0].corrected == []
+    assert 'Phone: (917) 555-0134\n' in h.owner.sent[0] and '+7' not in h.owner.sent[0]
+    assert h.sheet()[1][8] == '(917) 555-0134'
+
+
 async def test__run__auto_reply_and_bulk__llm_not_called(tmp_path):
     h = Harness(tmp_path)
     h.box.add(make_email(subject='Out of office', headers={'Auto-Submitted': 'auto-replied'}))

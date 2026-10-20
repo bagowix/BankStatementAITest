@@ -15,7 +15,7 @@ from typing import Final, Literal
 
 import msgspec
 import phonenumbers
-from phonenumbers import Leniency, PhoneNumber, PhoneNumberFormat, PhoneNumberMatcher
+from phonenumbers import CountryCodeSource, Leniency, PhoneNumber, PhoneNumberFormat, PhoneNumberMatcher
 
 from autostudio.errors import LLMError
 from autostudio.inbox import texts
@@ -180,7 +180,8 @@ class TriageResult(msgspec.Struct, frozen=True, kw_only=True):
     Attributes:
         source: `prefilter` — правила без модели, `model` — модель и проверка кодом.
         phone: Телефон, как он написан в письме (так его видит владелец в таблице).
-        phone_e164: Тот же телефон в E.164 — для звонка в один тап и сравнения.
+        phone_e164: Тот же телефон в E.164 — для звонка в один тап. None, если страну номера
+            не доказывает ни конфиг (основной регион), ни сама запись (код страны, префикс «8»).
         injection_markers: Что нашли правила (пусто — пометила только модель).
         corrected: Поля, которые код исправил или выбросил как непроверенные.
     """
@@ -412,15 +413,46 @@ class VerifiedPhone(msgspec.Struct, frozen=True):
 
     Attributes:
         literal: Как он написан в письме — так он идёт в таблицу и уведомление.
-        e164: Тот же номер в E.164 (`+995599123456`) — по нему и сравниваем.
+        e164: Тот же номер в E.164 (`+995599123456`) — для звонка в один тап. None, если номер
+            найден только в запасном регионе, а запись страну не называет: «(917) 555-0134»
+            существует и в России, и в США, и по цифрам их не различить.
     """
 
     literal: str
-    e164: str
+    e164: str | None
 
 
 def _e164(number: PhoneNumber) -> str:
     return phonenumbers.format_number(number, PhoneNumberFormat.E164)
+
+
+def country_written(literal: str, region: str) -> bool:
+    """Называет ли запись номера страну сама: кодом страны или национальным префиксом региона.
+
+    `+7 916 …`, `00995 …`, `7 916 …` несут код страны; `8 (916) 123-45-67` — префикс «8»,
+    которым так пишут только в России. А `(917) 555-0134` страну не называет: такая запись
+    есть и у американского номера, и у российского без «8». `PhoneNumberMatcher` стирает у
+    найденного номера `country_code_source`, поэтому запись разбирается заново с
+    `keep_raw_input=True` — так же, как её разбирал сам матчер.
+
+    Args:
+        literal: Номер, как он написан в письме.
+        region: Регион, в котором номер нашёлся.
+
+    Returns:
+        True, если страна видна из самой записи.
+    """
+    try:
+        number = phonenumbers.parse(literal, region, keep_raw_input=True)
+    except phonenumbers.NumberParseException:
+        return False
+    if number.country_code_source != CountryCodeSource.FROM_DEFAULT_COUNTRY:
+        return True
+    # Префикс должен стоять перед самим номером («8» + 10 цифр), а не просто быть первой цифрой:
+    # у «(812) 555-01-34» восьмёрка — часть кода города, и о стране она не говорит.
+    prefix = phonenumbers.ndd_prefix_for_region(region, True)
+    national = phonenumbers.national_significant_number(number)
+    return bool(prefix) and phonenumbers.normalize_digits_only(literal) == f'{prefix}{national}'
 
 
 def normalize_phone(value: str, regions: Sequence[str | None]) -> str | None:
@@ -458,13 +490,19 @@ def verify_phone(
     «599 12 34 56» подтверждался бы как польский номер. Сравнение цифр «хвостом», как было
     раньше, «достройку» пропускало (var/review_inbox/compare_phones.py).
 
+    Запасной регион подтверждает, что номер есть в письме, но не его страну. Местный номер
+    читается в основном регионе (это страна самого бизнеса), а в запасном — только если запись
+    сама называет страну (`country_written`): «8 (916) 123-45-67». Иначе E.164 не заполняется:
+    американское «(917) 555-0134» существует и как российский +7 917 555-01-34, и владелец
+    звонил бы в один тап не тому человеку. Номер при этом остаётся в таблице как написан.
+
     Args:
         phone: Телефон от модели.
         texts_: Тексты письма (без адресов самого бизнеса).
         regions: Регионы для номеров без кода страны: основной, затем запасные.
 
     Returns:
-        Запись из письма и E.164 или None.
+        Запись из письма и E.164 (None, если страну номера ничто не доказывает) или None.
     """
     if not phone or not phone.strip():
         return None
@@ -473,12 +511,19 @@ def verify_phone(
     wanted = normalize_phone(phone, known)
     if wanted is None:
         return None
+    home = regions[0] if regions else None
+    unproven: VerifiedPhone | None = None
     for text in texts_:
         for region in known:
             for match in PhoneNumberMatcher(text, region, leniency=Leniency.VALID):
-                if _e164(match.number) == wanted:
-                    return VerifiedPhone(literal=match.raw_string.strip(), e164=wanted)
-    return None
+                if _e164(match.number) != wanted:
+                    continue
+                literal = match.raw_string.strip()
+                if region is None or region == home or country_written(literal, region):
+                    return VerifiedPhone(literal=literal, e164=wanted)
+                # Та же запись со страной может встретиться дальше (в подписи) — ищем её.
+                unproven = unproven or VerifiedPhone(literal=literal, e164=None)
+    return unproven
 
 
 def verify_email(address: str | None, email: ParsedEmail) -> str | None:

@@ -244,7 +244,8 @@ class InboxSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fie
         alert_operator_on_injection: Сообщать оператору о письмах с подозрением на prompt-инъекцию.
         sheet_tab: Вкладка таблицы.
         phone_region: Регион для номеров без кода страны (`599 12 34 56` → +995…): ISO 3166-1.
-        phone_fallback_regions: Регионы для номеров, которые в `phone_region` не существуют.
+        phone_fallback_regions: Регионы для номеров, которых нет в `phone_region`; E.164 из них — только
+            если запись сама называет страну (`8 (916) …`, `+7 …`).
         invoices: Извлечение счетов из PDF.
     """
 
@@ -275,7 +276,9 @@ class InboxSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fie
     phone_region: str = 'GE'
     # Русскоязычные гости пишут грузинскому бизнесу номер по-домашнему: «8 (916) 123-45-67».
     # В регионе GE такого номера нет, и без запасного региона телефон честного лида терялся бы.
-    # Запасной регион берётся только для номеров, которых нет в `phone_region`.
+    # Запасной регион берётся только для номеров, которых нет в `phone_region`, и подтверждает лишь
+    # то, что номер есть в письме. E.164 из него — только когда запись сама называет страну («8 …»,
+    # «+7 …»): «(917) 555-0134» туриста из США — тоже валидный российский номер.
     phone_fallback_regions: list[str] = msgspec.field(default_factory=lambda: ['RU'])
     invoices: InvoiceSection = InvoiceSection()
 

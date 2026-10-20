@@ -7,6 +7,9 @@
   «1 850,00», «1,850.00» и «1850.00» — одно и то же; знак тоже сверяется: «-500.00»,
   «(500.00)» и «500.00 CR» — отрицательные суммы кредит-нот и скидок);
 - налог, если модель его назвала, — тоже; каждая строка — тоже;
+- каждое число модели опирается на своё место в PDF: итог, напечатанный один раз, не может
+  быть ещё и строкой (таблица, сведённая моделью в одну строку «= итог», иначе сходилась бы
+  сама с собой);
 - строки должны быть: сумма строк (плюс налог, если он начисляется сверху) должна сойтись с
   итогом до 0,01;
 - «итог» не должен быть подытогом: если в PDF напечатано и «итог + другая сумма» (НДС,
@@ -27,6 +30,7 @@ import datetime as dt
 import email
 import io
 import re
+from collections import Counter
 from collections.abc import Sequence
 from decimal import Decimal
 from typing import Final, Literal
@@ -346,6 +350,23 @@ def amounts_in(text: str) -> set[Decimal]:
     return {amount for amount, _ in _scan_amounts(text)}
 
 
+def _reused_amounts(given: Sequence[Decimal], claimed: Sequence[Decimal | None], printed: Counter[Decimal]) -> bool:
+    # Итог и налог занимают свои места в PDF первыми, строки — оставшиеся. Строка, которой места
+    # не досталось, — это число, уже отданное итогу, налогу или другой строке. Суммы, которых в
+    # PDF нет вовсе, здесь не считаются: это другая причина (`line_not_in_pdf`).
+    unused = Counter(printed)
+    for amount in claimed:
+        if amount is not None and unused[amount] > 0:
+            unused[amount] -= 1
+    reused = False
+    for amount in given:
+        if unused[amount] > 0:
+            unused[amount] -= 1
+        elif printed[amount] > 0:
+            reused = True
+    return reused
+
+
 def _total_is_subtotal(total: Decimal, money: set[Decimal], lines: set[Decimal]) -> bool:
     # Итог — самая большая сумма к оплате. Если в документе напечатана и «итог + другая
     # напечатанная сумма» (НДС, доставка, сбор), модель назвала итогом промежуточную сумму.
@@ -411,7 +432,8 @@ def verify_invoice(fields: InvoiceFields, text: str, *, file: str, received: dt.
     """
     reasons: list[str] = []
     scanned = _scan_amounts(text)
-    present = {amount for amount, _ in scanned}
+    printed = Counter(amount for amount, _ in scanned)
+    present = set(printed)
     money = {amount for amount, cents in scanned if cents}
     total = parse_amount(fields.total)
     tax = parse_amount(fields.tax)
@@ -436,6 +458,11 @@ def verify_invoice(fields: InvoiceFields, text: str, *, file: str, received: dt.
     if any(amount not in present for amount in given):
         # Модель могла «поправить» строку, чтобы сумма сошлась, — строка должна быть в документе.
         reasons.append('line_not_in_pdf')
+    if _reused_amounts(given, (total, tax), printed):
+        # «420 + 480 ≠ 1 000», сведённое моделью в одну строку «1 000», сходится само с собой:
+        # единственное место, где напечатано 1 000, — строка итога. Честный счёт на одну услугу
+        # («Guide 300.00 / Total 300.00») печатает сумму дважды и проходит.
+        reasons.append('single_line_is_total' if given == [total] else 'line_amount_reused')
     if given:
         lines_sum = sum(given, Decimal(0))
         if total is not None:
@@ -517,8 +544,9 @@ def build_invoice_system(company: str) -> str:
             'never a subtotal; null if absent.',
             '- tax: the total VAT or tax amount, as printed; null if the invoice shows no tax.',
             '- lines: every line item with description, quantity, unit_price and amount as printed '
-            '(null for values not printed), including discount lines. An invoice for a single service without '
-            'a table has one line. Do not invent lines; if the table cannot be read, return [].',
+            '(null for values not printed), including discount lines. A single service printed with its own '
+            'amount is one line. Never turn the total into a line and do not invent lines; if no line amounts '
+            'are printed or the table cannot be read, return [].',
         ]
     )
 

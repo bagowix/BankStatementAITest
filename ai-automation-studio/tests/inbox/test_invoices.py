@@ -11,6 +11,7 @@ import pytest
 from pypdf import PdfReader, PdfWriter
 
 from autostudio.errors import ConfigError, LLMError
+from autostudio.inbox import texts
 from autostudio.inbox.config import InvoiceSection
 from autostudio.inbox.heuristics import invoice_heuristic, make_fake_llm
 from autostudio.inbox.invoices import (
@@ -181,6 +182,81 @@ def test__verify__model_adjusts_a_line_so_lines_add_up__unverified_line_not_in_p
     assert record.status == 'unverified' and record.reasons == ['line_not_in_pdf']
     faithful = _verify(msgspec.structs.replace(fields, lines=[_line('420.00'), _line('480.00')]), WINE)
     assert faithful.reasons == ['lines_sum'] and faithful.delta == Decimal('100.00')
+
+
+def _shipped_wine_text() -> str:
+    # Тот же путь, что в бою: письмо из examples/ → PDF-вложение → текстовый слой pypdf.
+    raw = next(raw for raw in load_invoice_samples(SAMPLES) if b'WC-0931' in raw)
+    (attachment,) = pdf_attachments(raw, max_bytes=1_000_000)
+    return read_pdf(attachment.data, max_pages=10, max_chars=20_000).text
+
+
+def test__verify__shipped_wine_table_collapsed_into_line_equal_to_total__unverified_single_line_is_total():
+    # Регрессия: напечатано 420 + 480 ≠ 1 000. Модель свела таблицу в одну строку «1 000», и счёт
+    # «сверялся»: строка равна итогу, а 1 000 в PDF есть — но только в строке итога.
+    text = _shipped_wine_text()
+    fields = _fields(
+        vendor='Kakheti Wine Cellars',
+        invoice_number='WC-0931',
+        invoice_date='2026-10-16',
+        due_date='2026-11-15',
+        total='1,000.00',
+        tax=None,
+        lines=[_line('1,000.00', 'Wine tasting and lunch')],
+    )
+    record = _verify(fields, text)
+    assert record.status == 'unverified' and record.reasons == ['single_line_is_total']
+    faithful = _verify(msgspec.structs.replace(fields, lines=[_line('420.00'), _line('480.00')]), text)
+    assert faithful.reasons == ['lines_sum'] and faithful.delta == Decimal('100.00')
+
+
+@pytest.mark.parametrize(
+    ('text', 'amount'),
+    [
+        ('ACME\nGuide 300.00\nTotal 300.00', '300.00'),
+        ('ACME\nGuide 1 x 300.00 = 300.00\nTotal: 300.00 GEL', '300.00'),
+        ('ACME\nGuide, 3 days 1 300,00\nTotal 1 300,00', '1 300,00'),
+    ],
+)
+def test__verify__single_service_printed_apart_from_total__verified(text, amount):
+    fields = _fields(invoice_number=None, total=amount, tax=None, lines=[_line(amount, 'Guide')])
+    record = _verify(fields, text)
+    assert record.status == 'verified' and record.reasons == [] and record.delta == Decimal('0.00')
+
+
+def test__verify__single_service_with_only_total_printed__unverified_nothing_to_reconcile():
+    # Сумма напечатана один раз: строка «= итог» и пустые строки одинаково не сверяют ничего.
+    text = 'ACME\nGuide services for 15 October\nAmount due: 300.00 GEL'
+    fields = _fields(invoice_number=None, total='300.00', tax=None, lines=[_line('300.00', 'Guide services')])
+    assert _verify(fields, text).reasons == ['single_line_is_total']
+    assert _verify(msgspec.structs.replace(fields, lines=[]), text).reasons == ['no_lines']
+
+
+def test__verify__lines_borrow_amount_printed_once__unverified_line_amount_reused():
+    # 480 + 480 + 40 = 1 000: каждое число напечатано, но 480 — один раз, а строк с ним две.
+    fields = _fields(
+        invoice_number='WC-0931', total='1,000.00', tax=None, lines=[_line('480.00')] * 2 + [_line('40.00')]
+    )
+    assert _verify(fields, WINE).reasons == ['line_amount_reused']
+    # НДС, записанный и налогом, и строкой: 18 + 18 = 36, но 18.00 в PDF одно.
+    vat = _fields(invoice_number=None, total='36.00', tax='18.00', lines=[_line('18.00', 'VAT')])
+    assert _verify(vat, 'ACME\nVAT 18.00\nTotal 36.00').reasons == ['line_amount_reused']
+
+
+def test__verify__same_amount_on_two_printed_lines__verified():
+    text = 'ACME\nTransfer to airport 75.00\nTransfer from airport 75.00\nTotal 150.00'
+    fields = _fields(invoice_number=None, total='150.00', tax=None, lines=[_line('75.00'), _line('75.00')])
+    assert _verify(fields, text).status == 'verified'
+
+
+@pytest.mark.parametrize('language', ['en', 'ru'])
+def test__invoice_reasons__borrowed_amount_codes__owner_words_not_codes(language):
+    codes = ['single_line_is_total', 'line_amount_reused']
+    assert all(word not in codes for word in texts.invoice_reasons(language, codes))
+
+
+def test__invoice_system__single_service__no_total_as_line():
+    assert 'Never turn the total into a line' in build_invoice_system('Acme')
 
 
 @pytest.mark.parametrize('tax', ['216.00', None])
