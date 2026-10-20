@@ -1,14 +1,20 @@
 """Команды пакета: `autostudio booking check | run | chat | agenda | demo`.
 
 Команды оператора — на русском, как и в ядре; тексты бота для покупателей — в `texts`.
+
+Команды, которые ходят в сеть (`check --online`, `run`, `chat`), глушат INFO-лог httpx:
+он пишет полный URL каждого запроса, а в URL Bot API — токен бота (свой и общий бот
+оператора), в URL вебхука `[notify]` — его секрет. Без этого токены оказались бы в логах
+контейнера клиента.
 """
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -50,6 +56,28 @@ _OFFLINE_KEY: Final = 'offline-check'  # заглушка вместо ключ�
 _TELEGRAM_API: Final = 'https://api.telegram.org'
 _PROBE_TIMEOUT_S: Final = 15.0
 _DRAIN_TIMEOUT_S: Final = 30.0
+# Логгеры транспорта, в записи которых попадает адрес или заголовки запроса (httpx — на INFO,
+# httpcore и hpack — на DEBUG). Пакет не полагается на то, что их заглушит корневой `main()`:
+# команду могут вызвать и в обход него (тесты, встраивание), а уровни здесь возвращаются.
+TRANSPORT_LOGGERS: Final = ('httpx', 'httpcore', 'hpack')
+
+
+@contextlib.contextmanager
+def quiet_transport_logs() -> Generator[None]:
+    """Поднимает логгеры транспорта (`TRANSPORT_LOGGERS`) до WARNING на время команды и возвращает как было.
+
+    Уровень логгера, а не фильтр обработчика: запись с URL даже не создаётся, при любом
+    `AUTOSTUDIO_LOG_LEVEL` (и DEBUG тоже). Уровень, заданный выше WARNING, не понижается.
+    """
+    loggers = [logging.getLogger(name) for name in TRANSPORT_LOGGERS]
+    saved = [item.level for item in loggers]
+    for item, level in zip(loggers, saved, strict=True):
+        item.setLevel(max(level, logging.WARNING))
+    try:
+        yield
+    finally:
+        for item, level in zip(loggers, saved, strict=True):
+            item.setLevel(level)
 
 
 def _container(settings: Settings, config: BookingConfig, *, telegram: bool) -> AsyncContainer:
@@ -257,6 +285,11 @@ def check(config: Path, *, offline: bool = False, online: bool = False) -> None:
     """
     if offline and online:
         raise ConfigError('--offline и --online взаимоисключающи')
+    with quiet_transport_logs():
+        _check(config, offline=offline, online=online)
+
+
+def _check(config: Path, *, offline: bool, online: bool) -> None:
     settings = _check_settings(offline=offline)
     loaded = load_booking_config(config)
     require_owner_channel(loaded)
@@ -306,7 +339,8 @@ def run(config: Path) -> None:
     Args:
         config: Конфиг клиента (TOML).
     """
-    asyncio.run(_run(config))
+    with quiet_transport_logs():
+        asyncio.run(_run(config))
     print('бот остановлен')
 
 
@@ -339,7 +373,9 @@ def chat(config: Path, *, admin: bool = False, language: str | None = None, data
         language: Язык «клиента Telegram», например ru.
         data_dir: Каталог песочницы (не каталог боевых данных клиента).
     """
-    asyncio.run(_chat(config, admin=admin, language=language, data_dir=data_dir))
+    # Модель и сигнал оператору о её сбое тоже ходят через httpx.
+    with quiet_transport_logs():
+        asyncio.run(_chat(config, admin=admin, language=language, data_dir=data_dir))
 
 
 @app.command

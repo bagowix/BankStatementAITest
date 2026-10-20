@@ -6,7 +6,16 @@ import pytest
 from autostudio.booking import callbacks as cb
 from autostudio.booking.callbacks import SlotRef
 from autostudio.booking.domain import BookingStatus, Customer
-from autostudio.booking.engine import HANDOFFS, MODEL_CALLS, Conversation, Conversations, Engine, Step
+from autostudio.booking.engine import (
+    HANDOFF_WINDOW,
+    HANDOFFS,
+    HANDOFFS_PER_DAY,
+    MODEL_CALLS,
+    Conversation,
+    Conversations,
+    Engine,
+    Step,
+)
 from autostudio.booking.heuristics import answer_faq
 from autostudio.booking.messages import ADMINS, CALLBACK_DATA_LIMIT
 from autostudio.booking.prompts import BookingIntent, FaqAnswer
@@ -852,16 +861,94 @@ async def test__shared_contact__someone_elses_card__strict_validation(app):
     assert replies[0].text == 'Got it ✅'
 
 
-async def test__handoff_flood__owner_alerted_twice_customer_acknowledged(app):
+LIMIT_EN = "Sorry, I couldn't pass this message on"
+
+
+async def ask_person(app: App, text: str, user: str = USER, **fields) -> list:
+    await app.send(user, data=cb.HUMAN, **fields)
+    return await app.text(user, text, **fields)
+
+
+def alerts_of(replies) -> list[str]:
+    return [reply.text for reply in replies if reply.to == ADMINS]
+
+
+async def test__handoff_flood__distinct_texts__owner_alerted_up_to_limit_rest_refused_honestly(app):
     replies = []
     for index in range(MODEL_CALLS):
         last = await app.text(USER, f'I want to talk to a human please {index}')
         replies += last
-    alerts = [r for r in replies if r.to == ADMINS]
-    assert len(alerts) == HANDOFFS
+    assert len(alerts_of(replies)) == HANDOFFS
     assert len(app.events_of('booking.handoff')) == HANDOFFS
-    assert [r.text for r in last] == ["Thanks! We've already passed your message on — a person will reply here soon."]
+    throttled = app.events_of('booking.handoff_throttled')
+    assert len(throttled) == MODEL_CALLS - HANDOFFS
+    assert throttled[0].payload == {'reason': 'requested', 'language': 'en'}
+    [refusal] = last
+    assert refusal.text.startswith(LIMIT_EN) and 'You can also call us: +995 555 00 00 00' in refusal.text
+    assert find_button([refusal], '⬅️ Menu').data == cb.MENU
+    # Ни одному непереданному сообщению не сказано «уже передали».
+    assert 'already passed' not in texts_of(replies)
     assert app.store.customer(USER).language == 'en'  # язык для ответа /reply
+
+
+async def test__handoff__three_distinct_questions_in_ten_minutes__owner_gets_every_text(app):
+    questions = ['Is there a metro nearby?', 'How much is a gift card?', 'Can I bring my dog?']
+    alerts: list[str] = []
+    for question in questions:
+        app.clock.advance(dt.timedelta(minutes=2))
+        await app.text(USER, '/start')
+        await app.press(USER, '❓')
+        replies = await app.text(USER, question)
+        assert replies[0].text.startswith('Good question!')
+        alerts += alerts_of(replies)
+    assert [sum(question in alert for alert in alerts) for question in questions] == [1, 1, 1]
+    assert len(app.events_of('booking.handoff')) == len(questions)
+
+
+async def test__handoff__same_text_again__one_alert_customer_told_truthfully(app):
+    first = await ask_person(app, 'Please call me back')
+    assert len(alerts_of(first)) == 1
+    again = await ask_person(app, '  please call me BACK!! ')
+    assert alerts_of(again) == []
+    assert again[0].text == "Thanks! We've already passed your message on — a person will reply here soon."
+    assert len(app.events_of('booking.handoff')) == 1 and app.events_of('booking.handoff_throttled') == []
+    # Повтор не съел лимит: следующие разные тексты доходят.
+    for index in range(HANDOFFS - 1):
+        assert len(alerts_of(await ask_person(app, f'another thing {index}'))) == 1
+
+
+async def test__handoff__admin_replied__customer_follow_up_reaches_owner_past_limit(app):
+    for index in range(HANDOFFS):
+        await ask_person(app, f'question number {index}')
+    refused = await ask_person(app, 'and one more')
+    assert refused[0].text.startswith(LIMIT_EN) and alerts_of(refused) == []
+    reply = await app.text(ADMIN, f'/reply {USER} Sure, see you at five', is_admin=True)
+    assert any(item.to == USER for item in reply)
+    follow_up = await ask_person(app, 'and one more')
+    assert any('and one more' in alert for alert in alerts_of(follow_up))
+
+
+async def test__handoff__spread_over_a_day__daily_cap_then_refused(app):
+    forwarded = 0
+    for index in range(HANDOFFS_PER_DAY + 1):
+        app.clock.advance(HANDOFF_WINDOW)  # каждое сообщение — в новом коротком окне
+        replies = await ask_person(app, f'message {index}')
+        forwarded += len(alerts_of(replies))
+    assert forwarded == HANDOFFS_PER_DAY
+    assert replies[0].text.startswith(LIMIT_EN)
+    assert len(app.events_of('booking.handoff_throttled')) == 1
+
+
+async def test__handoff_limit__russian_without_contact_phone__no_call_line(tmp_path):
+    app = App(tmp_path, make_config(contact_phone=None))
+    for index in range(HANDOFFS):
+        await ask_person(app, f'вопрос {index}', language='ru')
+    [refusal] = await ask_person(app, 'ещё вопрос', language='ru')
+    assert refusal.text == (
+        'Извините, это сообщение не передано: у администратора уже есть несколько ваших — вам скоро ответят здесь. '
+        'Пожалуйста, отправьте его чуть позже.'
+    )
+    assert app.events_of('booking.handoff_throttled')[0].payload == {'reason': 'requested', 'language': 'ru'}
 
 
 async def test__free_text_flood__model_budget__slow_down_without_model_call(app):

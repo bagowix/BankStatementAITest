@@ -93,6 +93,10 @@ _EN: Final[dict[str, str]] = {
     'ask_question': 'Sure — type your question.',
     'handoff': "Good question! I've passed it to our team — a person will reply here soon.",
     'handoff_pending': "Thanks! We've already passed your message on — a person will reply here soon.",
+    'handoff_limit': (
+        "Sorry, I couldn't pass this message on: our team already has several of yours and will reply here soon. "
+        'Please send it again a little later.'
+    ),
     'slow_down': "You're sending messages very quickly — please use the buttons below, or try again in a few minutes.",
     'you_are_welcome': "You're welcome! See you soon 👋",
     'hours_closed': 'closed',
@@ -233,6 +237,10 @@ _RU: Final[dict[str, str]] = {
     'ask_question': 'Конечно — напишите ваш вопрос.',
     'handoff': 'Хороший вопрос! Передаём его администратору — вам ответят здесь в ближайшее время.',
     'handoff_pending': 'Спасибо! Мы уже передали ваше сообщение — вам ответят здесь в ближайшее время.',
+    'handoff_limit': (
+        'Извините, это сообщение не передано: у администратора уже есть несколько ваших — вам скоро ответят здесь. '
+        'Пожалуйста, отправьте его чуть позже.'
+    ),
     'slow_down': 'Слишком много сообщений подряд — воспользуйтесь кнопками ниже или напишите через несколько минут.',
     'you_are_welcome': 'Пожалуйста! Ждём вас 👋',
     'hours_closed': 'выходной',

@@ -36,6 +36,7 @@ def test__metrics__specs__honest_minutes_per_action():
         'booking.reminded': 1,
         'booking.question_answered': 3,
         'booking.handoff': 0,
+        'booking.handoff_throttled': 0,
         'booking.walk_in': 0,
     }
     assert all(set(spec.label) == {'en', 'ru'} for spec in METRICS)

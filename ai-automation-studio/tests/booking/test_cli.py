@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -10,6 +11,7 @@ from autostudio.booking import cli
 from autostudio.booking.domain import Customer, Slot
 from autostudio.booking.store import BookingStore
 from autostudio.errors import ConfigError
+from autostudio.notify import TelegramNotifier
 from tests.booking.helpers import WED, local
 
 EXAMPLE = Path(__file__).resolve().parents[2] / 'examples' / 'booking' / 'client.toml'
@@ -227,3 +229,86 @@ def test__describe__service_only_idle_staff__warning(env, write_toml):
     assert any(
         line.endswith('услуга combo: никто из её мастеров не работает — записаться на неё нельзя') for line in lines
     )
+
+
+OPERATOR_TOKEN = '987654321:' + 'B' * 35
+
+
+def run_root_cli(monkeypatch, *argv: str) -> int:
+    from autostudio.cli import main
+
+    monkeypatch.setattr('sys.argv', ['autostudio', *argv])
+    # Корневой main() настраивает логирование процесса насовсем; в общем прогоне тестов
+    # уровни логгеров возвращаются, чтобы не менять поведение соседних тестов.
+    names = ('httpx', 'httpcore', 'hpack', 'aiogram.event')
+    saved = {name: logging.getLogger(name).level for name in names}
+    try:
+        main()
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    finally:
+        for name, level in saved.items():
+            logging.getLogger(name).setLevel(level)
+    return 0
+
+
+# Корневой `main()` читает sys.argv — как в бою; cyclopts предупреждает об этом под pytest.
+@pytest.mark.filterwarnings('ignore:Cyclopts application invoked without tokens')
+@respx.mock
+def test__check_online__root_cli_at_info__token_not_in_logs(env, monkeypatch, caplog, capsys):
+    caplog.set_level(logging.INFO)  # как `autostudio` по умолчанию (AUTOSTUDIO_LOG_LEVEL=INFO)
+    monkeypatch.setenv('BOOKING_BOT_TOKEN', TOKEN)
+    respx.get(f'{API}/getMe').mock(return_value=httpx.Response(200, json={'ok': True, 'result': {'username': 'b'}}))
+    respx.get(f'{API}/getChat').mock(return_value=httpx.Response(200, json={'ok': True, 'result': {'id': 1}}))
+    assert run_root_cli(monkeypatch, 'booking', 'check', str(EXAMPLE), '--online') == 0
+    assert 'чаты администраторов доступны' in capsys.readouterr().out
+    assert TOKEN not in caplog.text
+    # Ловушка настоящая: вне команды тот же запрос попадает в лог вместе с токеном.
+    httpx.get(f'{API}/getMe')
+    assert TOKEN in caplog.text
+
+
+@respx.mock
+def test__run__notifications_over_httpx_at_debug__tokens_not_in_logs(env, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv('BOOKING_BOT_TOKEN', TOKEN)
+    route = respx.post(f'https://api.telegram.org/bot{OPERATOR_TOKEN}/sendMessage').mock(
+        return_value=httpx.Response(200, json={'ok': True})
+    )
+
+    async def fake_polling(bot, booking_bot, loop, languages):
+        # Так ядро шлёт сигнал оператору и уведомление в чат [notify], пока бот работает.
+        async with httpx.AsyncClient() as http:
+            await TelegramNotifier(http, OPERATOR_TOKEN, '42').send('⚠️ alert')
+
+    monkeypatch.setattr(cli, 'run_polling', fake_polling)
+    cli.run(EXAMPLE)
+    assert route.called
+    assert OPERATOR_TOKEN not in caplog.text and TOKEN not in caplog.text
+
+
+def test__chat__session__transport_logs_quiet(env, monkeypatch):
+    seen: list[int] = []
+
+    async def fake_repl(engine, *, admin, language):
+        seen.append(logging.getLogger('httpx').getEffectiveLevel())
+        return 0
+
+    monkeypatch.setattr(cli, 'repl', fake_repl)
+    cli.chat(EXAMPLE, data_dir=env / 'sandbox')
+    assert seen == [logging.WARNING]
+
+
+def test__quiet_transport_logs__raised_then_restored__higher_level_kept():
+    transport, pool, frames = (logging.getLogger(name) for name in cli.TRANSPORT_LOGGERS)
+    saved = transport.level, pool.level, frames.level
+    transport.setLevel(logging.NOTSET)
+    pool.setLevel(logging.ERROR)
+    try:
+        with cli.quiet_transport_logs():
+            assert transport.level == logging.WARNING and pool.level == logging.ERROR
+            assert frames.getEffectiveLevel() >= logging.WARNING
+        assert transport.level == logging.NOTSET and pool.level == logging.ERROR
+    finally:
+        for item, level in zip((transport, pool, frames), saved, strict=True):
+            item.setLevel(level)
