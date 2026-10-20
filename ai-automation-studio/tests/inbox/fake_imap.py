@@ -17,7 +17,7 @@ class FakeImapServer:
         self,
         *,
         user: str = 'info@acme.example',
-        password: str = 'app-pass-1234',  # noqa: S107 - фиктивный пароль заглушки
+        password: str = 'app-pass-1234',
         messages: dict[int, bytes] | None = None,
         uidvalidity: int = 7,
         folders: list[bytes | tuple[bytes, bytes]] | None = None,

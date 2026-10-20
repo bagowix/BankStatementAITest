@@ -18,7 +18,7 @@ from tests.inbox.fake_imap import FakeImapServer
 from tests.inbox.helpers import NOW, make_email
 
 
-def _box(server: FakeImapServer, password: str = 'app-pass-1234') -> ImapMailBox:  # noqa: S107 - фиктивный пароль
+def _box(server: FakeImapServer, password: str = 'app-pass-1234') -> ImapMailBox:
     return ImapMailBox(
         host='imap.example.com',
         port=993,

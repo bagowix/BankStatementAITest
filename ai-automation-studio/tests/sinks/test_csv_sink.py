@@ -44,7 +44,9 @@ async def test__csv_append__unwritable__sink_error(tmp_path):
         await CsvSink(blocker / 'sub').append('t', ['a'], [['1']])
 
 
-@pytest.mark.parametrize(('value', 'expected'), [('hello', 'hello'), ('-5', '-5'), ('-x', "'-x"), ('+1', '+1'), ('+x', "'+x")])
+@pytest.mark.parametrize(
+    ('value', 'expected'), [('hello', 'hello'), ('-5', '-5'), ('-x', "'-x"), ('+1', '+1'), ('+x', "'+x")]
+)
 def test__neutralize_formula__cases(value, expected):
     assert neutralize_formula(value) == expected
 
@@ -61,3 +63,17 @@ def test__neutralize_formula__international_phone__untouched(phone):
 def test__neutralize_formula__plus_formula__still_escaped():
     assert neutralize_formula('+SUM(A1:A2)') == "'+SUM(A1:A2)"
     assert neutralize_formula('+1+cmd|calc') == "'+1+cmd|calc"
+
+
+async def test__csv_append__numeric_cells__written_as_numbers(tmp_path):
+    from decimal import Decimal
+
+    sink = CsvSink(tmp_path)
+    await sink.append(
+        'Prices', ['product', 'price', 'qty'], [['Phone', Decimal('2499.00'), 3], ['=evil', Decimal('-1.5'), 0]]
+    )
+    assert _read(tmp_path / 'Prices.csv') == [
+        ['product', 'price', 'qty'],
+        ['Phone', '2499.00', '3'],
+        ["'=evil", '-1.5', '0'],
+    ]

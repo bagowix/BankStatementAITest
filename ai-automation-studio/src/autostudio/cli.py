@@ -7,12 +7,12 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 import cyclopts
 
 from autostudio import __version__
-from autostudio.clientconf import client_data_dir, load_client_info
+from autostudio.clientconf import events_path, load_client_info
 from autostudio.errors import AutoStudioError, ConfigError
 from autostudio.events import EventLog
 from autostudio.registry import PACKAGES, demo_for, highlights_for, metrics_for
@@ -52,7 +52,7 @@ def report(
     """
     settings = Settings.from_env(os.environ)
     client = load_client_info(config)
-    log = EventLog(client_data_dir(settings.data_dir, client) / 'events.sqlite')
+    log = EventLog(events_path(settings.data_dir, client))
     start, end = month_bounds(_parse_month(month), client.zone)
     events = log.between(start, end)
     specs = [spec for info in PACKAGES.values() for spec in metrics_for(info)]
@@ -109,7 +109,9 @@ def new_client(
     if env_example.exists() and not (target / '.env').exists():
         shutil.copyfile(env_example, target / '.env')
     print(
-        f'готово: {config}\nдальше: заполните {config} и {target / ".env"}, затем `autostudio {package} check {config}`'
+        f'готово: {config}\n'
+        f'дальше: замените в {config} демо-данные (адреса, домены, e-mail), заполните {target / ".env"}\n'
+        f'и проверьте: autostudio {package} check {config}'
     )
 
 
@@ -131,11 +133,24 @@ def demo_all(*, out: Path = Path('var/demo')) -> None:
         raise AutoStudioError('демо упали: ' + '; '.join(failed))
 
 
+# httpx и httpcore на уровне INFO пишут каждый запрос с полным URL, а в URL Bot API
+# Telegram лежит токен бота (`/bot<token>/sendMessage`), в ссылках сайтов — метки
+# и токены в query. Выше WARNING они ничего такого не пишут.
+_NOISY_HTTP_LOGGERS: Final = ('httpx', 'httpcore', 'hpack', 'aiogram.event')
+
+
+def quiet_http_loggers() -> None:
+    """Поднимает уровень HTTP-логгеров до WARNING, чтобы URL с секретами не попадали в логи."""
+    for name in _NOISY_HTTP_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main() -> None:
     """Точка входа `autostudio`: ошибки пакета печатаются коротко, без трассировки."""
     logging.basicConfig(
         level=os.environ.get('AUTOSTUDIO_LOG_LEVEL', 'INFO'), format='%(asctime)s %(levelname)s %(name)s: %(message)s'
     )
+    quiet_http_loggers()
     try:
         app()
     except AutoStudioError as exc:

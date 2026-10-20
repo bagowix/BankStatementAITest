@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 
 _RUN_OK: Final = 'system.run_ok'
 _RUN_FAILED: Final = 'system.run_failed'
+_RUN_SKIPPED: Final = 'system.run_skipped'
+
+
+class RunSkipped(AutoStudioError):  # noqa: N818 - это сигнал, а не ошибка
+    """Работа сознательно не выполнялась (например, предыдущий проход ещё держит блокировку).
+
+    Пропуск — не успех и не сбой: в надёжность месячного отчёта он не входит, оператору
+    о нём не пишем, а healthcheck получает обычный пинг, чтобы не поднять ложную тревогу.
+    """
 
 
 class Heartbeat:
@@ -68,7 +77,8 @@ async def supervised_run[T](
     """Запускает плановую работу с журналом, пингом и сигналом о сбое.
 
     Ловятся только ошибки пакета (`AutoStudioError`): баг в коде должен упасть
-    громко, с трассировкой, а не превратиться в строчку журнала.
+    громко, с трассировкой, а не превратиться в строчку журнала. `RunSkipped` —
+    сознательный пропуск: не успех и не сбой.
 
     Args:
         package: Код пакета для журнала.
@@ -86,6 +96,11 @@ async def supervised_run[T](
     await heartbeat.ping('/start')
     try:
         result = await job()
+    except RunSkipped as skipped:
+        events.record(package, _RUN_SKIPPED, now(), {'reason': str(skipped)[:200]})
+        await heartbeat.ping()
+        logger.info('%s: запуск пропущен: %s', package, skipped)
+        return None
     except AutoStudioError as exc:
         error = str(exc)[:500]
         events.record(package, _RUN_FAILED, now(), {'error': error})

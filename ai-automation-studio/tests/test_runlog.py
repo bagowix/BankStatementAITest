@@ -170,3 +170,35 @@ async def test__supervised_run__error_text_changes__alerts_again(tmp_path, clock
             now=clock,
         )
     assert len(operator.sent) == 2
+
+
+async def test__supervised_run__skipped__recorded_no_alert_and_not_a_recovery(tmp_path, clock):
+    from autostudio.runlog import RunSkipped
+
+    log = EventLog(tmp_path / 'e.sqlite')
+    operator = Recorder()
+
+    async def failing():
+        raise LLMError('down')
+
+    async def busy():
+        raise RunSkipped('другой проход держит блокировку')
+
+    async with httpx.AsyncClient() as http:
+        heartbeat = Heartbeat(http, None)
+        await supervised_run(
+            package='prices',
+            job=failing,
+            events=log,
+            heartbeat=heartbeat,
+            operator=operator,
+            client_name='A',
+            now=clock,
+        )
+        result = await supervised_run(
+            package='prices', job=busy, events=log, heartbeat=heartbeat, operator=operator, client_name='A', now=clock
+        )
+    assert result is None
+    assert operator.sent == ['⚠️ A / prices: down']
+    kinds = [e.kind for e in log.between(clock().replace(year=2000), clock().replace(year=2100))]
+    assert kinds == ['system.run_failed', 'system.run_skipped']

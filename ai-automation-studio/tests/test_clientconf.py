@@ -78,3 +78,51 @@ def test__require_env__present__value():
 def test__require_env__missing__names_variable():
     with pytest.raises(ConfigError, match='MY_TOKEN'):
         require_env('MY_TOKEN', {})
+
+
+def test__load_client_config__float_in_toml__decimal_without_float_noise(write_toml):
+    from decimal import Decimal
+
+    class _Money(msgspec.Struct, frozen=True):
+        client: ClientInfo
+        price: Decimal
+        delay: float
+
+    conf = load_client_config(write_toml('price = 0.1\ndelay = 1.5\n[client]\nid = "acme"\nname = "A"\n'), _Money)
+    assert conf.price == Decimal('0.1')
+    assert conf.delay == 1.5
+
+
+def test__load_env_file__formats_and_no_override(tmp_path):
+    from autostudio.clientconf import load_env_file
+
+    env = tmp_path / '.env'
+    env.write_text('# comment\n\nexport A=1\nB = "two words"\nC=\'x=y\'\nD=keep\n', encoding='utf-8')
+    target = {'D': 'already'}
+    assert load_env_file(env, target) == ['A', 'B', 'C']
+    assert target == {'A': '1', 'B': 'two words', 'C': 'x=y', 'D': 'already'}
+
+
+def test__load_env_file__garbage_line__config_error(tmp_path):
+    from autostudio.clientconf import load_env_file
+
+    env = tmp_path / '.env'
+    env.write_text('JUST_TEXT\n', encoding='utf-8')
+    with pytest.raises(ConfigError, match=r'\.env:1'):
+        load_env_file(env, {})
+
+
+def test__load_sibling_env__present_and_absent(tmp_path):
+    from autostudio.clientconf import load_sibling_env
+
+    config = tmp_path / 'booking.toml'
+    assert load_sibling_env(config, {}) == []
+    (tmp_path / '.env').write_text('TOKEN=1\n', encoding='utf-8')
+    target: dict[str, str] = {}
+    assert load_sibling_env(config, target) == ['TOKEN']
+
+
+def test__events_path__under_client_dir():
+    from autostudio.clientconf import events_path
+
+    assert events_path(Path('var'), ClientInfo(id='acme', name='A')) == Path('var/acme/events.sqlite')

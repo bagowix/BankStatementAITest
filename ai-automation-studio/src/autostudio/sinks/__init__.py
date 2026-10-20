@@ -4,11 +4,22 @@ import os
 from pathlib import Path
 
 from autostudio.clientconf import SinkConfig, require_env
-from autostudio.sinks.base import Row, TableSink
-from autostudio.sinks.csv_sink import CsvSink, neutralize_formula
-from autostudio.sinks.gsheets import GoogleSheetsSink
+from autostudio.sinks.base import Cell, Row, Rows, TableSink
+from autostudio.sinks.csv_sink import CsvSink, csv_cell, neutralize_formula
+from autostudio.sinks.gsheets import GoogleSheetsSink, sheet_cell
 
-__all__ = ['CsvSink', 'GoogleSheetsSink', 'Row', 'TableSink', 'make_sink', 'neutralize_formula']
+__all__ = [
+    'Cell',
+    'CsvSink',
+    'GoogleSheetsSink',
+    'Row',
+    'Rows',
+    'TableSink',
+    'csv_cell',
+    'make_sink',
+    'neutralize_formula',
+    'sheet_cell',
+]
 
 
 def make_sink(config: SinkConfig) -> TableSink:

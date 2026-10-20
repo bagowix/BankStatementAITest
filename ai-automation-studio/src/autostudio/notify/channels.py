@@ -1,8 +1,9 @@
 """Каналы уведомлений: Telegram, входящий вебхук, консоль и их сумма."""
 
+import asyncio
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Final, TextIO
 
 import httpx
@@ -15,6 +16,11 @@ logger = logging.getLogger(__name__)
 # Лимит Telegram на текст сообщения — 4096 символов; запас оставлен под многоточие.
 TELEGRAM_LIMIT: Final = 4000
 _TELEGRAM_API: Final = 'https://api.telegram.org'
+# Telegram отвечает 429 с `retry_after` при превышении лимита (≈1 сообщение в секунду в
+# чат) и изредка 5xx. Пара повторов с честной паузой спасает сообщение; дольше ждать
+# не будем — плановый запуск не должен висеть на уведомлении.
+_TELEGRAM_RETRIES: Final = 2
+_MAX_RETRY_AFTER_S: Final = 30.0
 
 
 def clip(text: str, limit: int = TELEGRAM_LIMIT) -> str:
@@ -31,20 +37,42 @@ class TelegramNotifier:
         chat_id: Чат получателя (личный id или id группы).
     """
 
-    def __init__(self, http: httpx.AsyncClient, token: str, chat_id: str) -> None:
+    def __init__(
+        self,
+        http: httpx.AsyncClient,
+        token: str,
+        chat_id: str,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self._http = http
         self._token = token
         self._chat_id = chat_id
+        self._sleep = sleep
 
     async def send(self, text: str) -> None:
         url = f'{_TELEGRAM_API}/bot{self._token}/sendMessage'
-        try:
-            response = await self._http.post(url, json={'chat_id': self._chat_id, 'text': clip(text)})
-        except httpx.HTTPError as exc:
-            # В тексте исключения httpx есть URL, а в URL — токен бота.
-            raise NotifyError(f'Telegram недоступен: {type(exc).__name__}') from None
-        if response.status_code != httpx.codes.OK:
-            raise NotifyError(f'Telegram ответил {response.status_code}: {response.text[:200]}')
+        payload = {'chat_id': self._chat_id, 'text': clip(text)}
+        for attempt in range(_TELEGRAM_RETRIES + 1):
+            try:
+                response = await self._http.post(url, json=payload)
+            except httpx.HTTPError as exc:
+                # В тексте исключения httpx есть URL, а в URL — токен бота.
+                raise NotifyError(f'Telegram недоступен: {type(exc).__name__}') from None
+            if response.status_code == httpx.codes.OK:
+                return
+            retryable = response.status_code == httpx.codes.TOO_MANY_REQUESTS or response.is_server_error
+            if not retryable or attempt == _TELEGRAM_RETRIES:
+                break
+            await self._sleep(_retry_after(response, attempt))
+        raise NotifyError(f'Telegram ответил {response.status_code}: {response.text[:200]}')
+
+
+def _retry_after(response: httpx.Response, attempt: int) -> float:
+    try:
+        hinted = float(response.json()['parameters']['retry_after'])
+    except (ValueError, KeyError, TypeError):
+        hinted = float(2**attempt)
+    return min(max(hinted, 0.0), _MAX_RETRY_AFTER_S)
 
 
 class WebhookNotifier:

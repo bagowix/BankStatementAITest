@@ -81,3 +81,11 @@ def test__make_sink__google__needs_credentials_env(monkeypatch, tmp_path):
         make_sink(config)
     monkeypatch.setenv('TEST_GOOGLE_KEY', str(tmp_path / 'k.json'))
     assert isinstance(make_sink(config), GoogleSheetsSink)
+
+
+async def test__gsheets__decimal_and_int__sent_as_numbers(tmp_path):
+    from decimal import Decimal
+
+    sink = _sink(tmp_path)
+    await sink.replace('Now', ['p', 'price'], [['Phone', Decimal('2499.50')], ['=x', 7]])
+    assert sink._book.sheets['Now'].rows == [['p', 'price'], ['Phone', 2499.5], ["'=x", 7]]

@@ -93,3 +93,54 @@ async def test__make_notifier__variants(monkeypatch):
         monkeypatch.setenv('HOOK', 'https://hooks.example.test/a')
         both = make_notifier(NotifyConfig(telegram_chat_id='1', webhook_url_env='HOOK', console=True), http)
         assert isinstance(both, FanoutNotifier)
+
+
+@respx.mock
+async def test__telegram_send__429_then_ok__retries_with_retry_after():
+    route = respx.post('https://api.telegram.org/bott/sendMessage').mock(
+        side_effect=[
+            httpx.Response(429, json={'ok': False, 'parameters': {'retry_after': 3}}),
+            httpx.Response(200, json={'ok': True}),
+        ]
+    )
+    slept: list[float] = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    async with httpx.AsyncClient() as http:
+        await TelegramNotifier(http, 't', '42', sleep=sleep).send('hi')
+    assert route.call_count == 2
+    assert slept == [3.0]
+
+
+@respx.mock
+async def test__telegram_send__5xx_exhausted__notify_error_after_retries():
+    route = respx.post('https://api.telegram.org/bott/sendMessage').mock(
+        return_value=httpx.Response(502, text='bad gateway')
+    )
+    slept: list[float] = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(NotifyError, match='502'):
+            await TelegramNotifier(http, 't', '42', sleep=sleep).send('hi')
+    assert route.call_count == 3
+    assert slept == [1.0, 2.0]
+
+
+@respx.mock
+async def test__telegram_send__huge_retry_after__capped():
+    respx.post('https://api.telegram.org/bott/sendMessage').mock(
+        side_effect=[httpx.Response(429, json={'parameters': {'retry_after': 3600}}), httpx.Response(200)]
+    )
+    slept: list[float] = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    async with httpx.AsyncClient() as http:
+        await TelegramNotifier(http, 't', '42', sleep=sleep).send('hi')
+    assert slept == [30.0]

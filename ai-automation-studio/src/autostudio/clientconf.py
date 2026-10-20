@@ -8,7 +8,8 @@
 import os
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
+from decimal import Decimal
 from pathlib import Path
 from typing import Final, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -18,6 +19,7 @@ import msgspec
 from autostudio.errors import ConfigError
 
 _CLIENT_ID: Final = re.compile(r'^[a-z0-9][a-z0-9-]{1,40}$')
+_ENV_KEY: Final = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 class ClientInfo(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
@@ -105,7 +107,8 @@ def load_client_config[T: msgspec.Struct](path: Path, kind: type[T]) -> T:
         ConfigError: Файла нет, TOML битый или поля не сходятся со схемой.
     """
     try:
-        data = tomllib.loads(path.read_text(encoding='utf-8'))
+        # Дробные числа TOML — сразу Decimal: деньги в конфиге не проходят через float.
+        data = tomllib.loads(path.read_text(encoding='utf-8'), parse_float=Decimal)
     except FileNotFoundError:
         raise ConfigError(f'конфиг не найден: {path}') from None
     except tomllib.TOMLDecodeError as exc:
@@ -138,6 +141,63 @@ def load_client_info(path: Path) -> ClientInfo:
 def client_data_dir(base: Path, client: ClientInfo) -> Path:
     """Каталог данных клиента: журнал событий, SQLite пакетов, выгрузки."""
     return base / client.id
+
+
+def events_path(data_dir: Path, client: ClientInfo) -> Path:
+    """Файл журнала событий клиента — один адрес для пакетов, которые пишут, и отчёта, который читает."""
+    return client_data_dir(data_dir, client) / 'events.sqlite'
+
+
+def load_env_file(path: Path, environ: MutableMapping[str, str] | None = None) -> list[str]:
+    """Загружает `KEY=VALUE` из `.env`, не перетирая уже заданные переменные.
+
+    Нужно для `autostudio <pkg> run clients/<id>/<pkg>.toml` вне Docker: poe читает
+    `.env` только для своих задач, а compose — только для контейнеров. Формат —
+    подмножество dotenv: комментарии `#`, пустые строки, `export KEY=...`, значения в
+    одинарных или двойных кавычках. Подстановок `${VAR}` нет намеренно.
+
+    Args:
+        path: Путь к `.env`.
+        environ: Куда загружать; по умолчанию `os.environ`.
+
+    Returns:
+        Имена переменных, которые были заданы этим файлом.
+
+    Raises:
+        ConfigError: Строка без `=` или с недопустимым именем.
+    """
+    target = os.environ if environ is None else environ
+    loaded: list[str] = []
+    for number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        stripped = stripped.removeprefix('export ').strip()
+        key, sep, value = stripped.partition('=')
+        key = key.strip()
+        if not sep or not _ENV_KEY.match(key):
+            raise ConfigError(f'{path}:{number}: ожидается KEY=VALUE')
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1]
+        if key not in target:
+            target[key] = value
+            loaded.append(key)
+    return loaded
+
+
+def load_sibling_env(config: Path, environ: MutableMapping[str, str] | None = None) -> list[str]:
+    """Загружает `.env` из каталога конфига клиента, если он там есть.
+
+    Args:
+        config: Путь к конфигу клиента (`clients/<id>/<pkg>.toml`).
+        environ: Куда загружать; по умолчанию `os.environ`.
+
+    Returns:
+        Имена загруженных переменных (пусто, если файла нет).
+    """
+    env = config.parent / '.env'
+    return load_env_file(env, environ) if env.is_file() else []
 
 
 def require_env(name: str, environ: Mapping[str, str] | None = None) -> str:

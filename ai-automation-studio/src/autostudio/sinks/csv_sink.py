@@ -3,11 +3,12 @@
 import asyncio
 import csv
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
 from autostudio.errors import SinkError
-from autostudio.sinks.base import Row
+from autostudio.sinks.base import Cell, Rows
 
 _UNSAFE: Final = re.compile(r'[^\w.-]+', re.UNICODE)
 # Ячейка, начинающаяся с этих символов, в Excel и Sheets исполняется как формула.
@@ -35,6 +36,11 @@ def neutralize_formula(value: str) -> str:
     return "'" + value
 
 
+def csv_cell(value: Cell) -> str:
+    """Ячейка для CSV: строки защищены от формул, числа — в каноничной записи."""
+    return neutralize_formula(value) if isinstance(value, str) else str(value)
+
+
 def _looks_numeric(value: str) -> bool:
     try:
         float(value.replace(',', '').replace(' ', ''))
@@ -58,13 +64,13 @@ class CsvSink:
         name = _UNSAFE.sub('_', tab).strip('._') or 'sheet'
         return self._dir / f'{name}.csv'
 
-    async def append(self, tab: str, header: Row, rows: list[Row]) -> None:
+    async def append(self, tab: str, header: Sequence[str], rows: Rows) -> None:
         await asyncio.to_thread(self._write, tab, header, rows, 'a')
 
-    async def replace(self, tab: str, header: Row, rows: list[Row]) -> None:
+    async def replace(self, tab: str, header: Sequence[str], rows: Rows) -> None:
         await asyncio.to_thread(self._write, tab, header, rows, 'w')
 
-    def _write(self, tab: str, header: Row, rows: list[Row], mode: str) -> None:
+    def _write(self, tab: str, header: Sequence[str], rows: Rows, mode: str) -> None:
         path = self.path_for(tab)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +78,7 @@ class CsvSink:
             with path.open(mode, encoding='utf-8', newline='') as fh:
                 writer = csv.writer(fh)
                 if fresh:
-                    writer.writerow(header)
-                writer.writerows([[neutralize_formula(cell) for cell in row] for row in rows])
+                    writer.writerow([neutralize_formula(name) for name in header])
+                writer.writerows([[csv_cell(cell) for cell in row] for row in rows])
         except OSError as exc:
             raise SinkError(f'не удалось записать {path}: {exc}') from None

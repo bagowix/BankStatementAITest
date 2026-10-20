@@ -1,18 +1,24 @@
 """Таблица клиента: то место, где владелец бизнеса видит результат работы."""
 
+from collections.abc import Sequence
+from decimal import Decimal
 from typing import Protocol
 
+# Ячейка: строка — как есть (с защитой от формул), число — числом, чтобы клиент мог
+# сортировать, суммировать и строить графики без VALUE().
+type Cell = str | int | Decimal
 type Row = list[str]
+type Rows = Sequence[Sequence[Cell]]
 
 
 class TableSink(Protocol):
     """Пишет строки во вкладку таблицы.
 
-    Значения — уже отформатированные строки: деньги, даты и проценты форматирует
-    пакет, потому что только он знает, как их хочет видеть клиент.
+    Строки пишутся как текст, числа (`int`, `Decimal`) — как числа. Даты и подписи
+    форматирует пакет: только он знает, как их хочет видеть клиент.
     """
 
-    async def append(self, tab: str, header: Row, rows: list[Row]) -> None:
+    async def append(self, tab: str, header: Sequence[str], rows: Rows) -> None:
         """Дописывает строки в конец вкладки, создавая её с заголовком при первом обращении.
 
         Args:
@@ -25,7 +31,7 @@ class TableSink(Protocol):
         """
         ...
 
-    async def replace(self, tab: str, header: Row, rows: list[Row]) -> None:
+    async def replace(self, tab: str, header: Sequence[str], rows: Rows) -> None:
         """Заменяет содержимое вкладки целиком (текущий срез: цены сейчас, слоты на неделю).
 
         Args:
