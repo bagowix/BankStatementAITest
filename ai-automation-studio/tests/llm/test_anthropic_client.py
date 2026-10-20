@@ -48,9 +48,10 @@ async def test__anthropic__bad_stop__llm_error(stop_reason, text, match):
 
 
 async def test__anthropic__status_error__llm_error():
-    client = AnthropicClient(anthropic_stub(error=status_error(anthropic.APIStatusError, 529)), 'claude-haiku-5-5')
-    with pytest.raises(LLMError, match='529'):
+    client = AnthropicClient(anthropic_stub(error=status_error(anthropic.APIStatusError, 401)), 'claude-haiku-5-5')
+    with pytest.raises(LLMError, match='401') as info:
         await client.write(system='s', prompt='p')
+    assert info.value.kind == 'config'
 
 
 async def test__anthropic__connection_error__llm_error():

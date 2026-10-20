@@ -53,6 +53,9 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
         healthcheck_url: URL пинга (healthchecks.io и аналоги) или None.
         operator_chat_id: Telegram-чат оператора для сигналов о сбоях или None.
         operator_token_env: Переменная окружения с токеном бота оператора.
+        llm_provider_explicit: Провайдер задан в окружении явно, а не взят по умолчанию.
+            Боевой запуск пакета, которому нужна модель, по нему отказывается молча
+            работать на заглушке.
     """
 
     llm_provider: LLMProvider = LLMProvider.FAKE
@@ -62,6 +65,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     healthcheck_url: str | None = None
     operator_chat_id: str | None = None
     operator_token_env: str = 'AUTOSTUDIO_OPERATOR_BOT_TOKEN'  # noqa: S105 - имя переменной, а не секрет
+    llm_provider_explicit: bool = False
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str]) -> Self:
@@ -94,6 +98,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
 
         return cls(
             llm_provider=provider,
+            llm_provider_explicit=bool(environ.get('AUTOSTUDIO_LLM_PROVIDER', '').strip()),
             llm_model=environ.get('AUTOSTUDIO_LLM_MODEL', '') or DEFAULT_MODELS[provider],
             llm_effort=effort,
             data_dir=Path(environ.get('AUTOSTUDIO_DATA_DIR', '') or 'var'),

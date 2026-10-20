@@ -7,7 +7,7 @@ import openai
 from openai.types.responses import ResponseFormatTextJSONSchemaConfigParam, ResponseTextConfigParam
 from openai.types.shared_params import Reasoning
 
-from autostudio.errors import LLMError
+from autostudio.errors import LLMError, kind_for_status
 from autostudio.llm.base import LLMUsage, decode_output, output_schema
 from autostudio.settings import Effort
 
@@ -68,9 +68,13 @@ class OpenAIClient:
                 store=False,
             )
         except openai.APIStatusError as exc:
-            raise LLMError(f'OpenAI {exc.status_code}: {exc.message}', status_code=exc.status_code) from None
+            raise LLMError(
+                f'OpenAI {exc.status_code}: {exc.message}',
+                status_code=exc.status_code,
+                kind=kind_for_status(exc.status_code),
+            ) from None
         except openai.APIConnectionError as exc:
-            raise LLMError(f'OpenAI недоступен: {type(exc).__name__}') from None
+            raise LLMError(f'OpenAI недоступен: {type(exc).__name__}', kind='outage') from None
         if response.usage is not None:
             self._usage.add(response.usage.input_tokens, response.usage.output_tokens)
         if response.status != 'completed':

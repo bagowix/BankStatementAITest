@@ -103,7 +103,8 @@ def new_client(
         raise ConfigError(f'нет образца {source}')
     target.mkdir(parents=True, exist_ok=True)
     text = source.read_text(encoding='utf-8')
-    config.write_text(text.replace('id = "demo-', f'id = "{client_id}"  # было: "demo-', 1), encoding='utf-8')
+    # id клиента входит не только в `[client].id`, но и в пути данных (`/data/demo-inbox/out`).
+    config.write_text(text.replace(f'demo-{package}', client_id), encoding='utf-8')
     env_example = examples / package / '.env.example'
     if env_example.exists() and not (target / '.env').exists():
         shutil.copyfile(env_example, target / '.env')

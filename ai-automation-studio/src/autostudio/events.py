@@ -83,6 +83,35 @@ class EventLog:
                 (at.astimezone(dt.UTC).isoformat(), package, kind, msgspec.json.encode(dict(payload or {})).decode()),
             )
 
+    def last(self, package: str, kinds: tuple[str, ...]) -> Event | None:
+        """Последнее событие пакета одного из видов.
+
+        Args:
+            package: Пакет-источник.
+            kinds: Коды событий, из которых выбирать.
+
+        Returns:
+            Самое позднее такое событие или None.
+        """
+        if not kinds:
+            return None
+        marks = ', '.join('?' for _ in kinds)
+        with self._connect() as conn:
+            row = conn.execute(
+                f'SELECT at, package, kind, payload FROM events WHERE package = ? AND kind IN ({marks}) '  # noqa: S608 - плейсхолдеры, не данные
+                'ORDER BY at DESC, id DESC LIMIT 1',
+                (package, *kinds),
+            ).fetchone()
+        if row is None:
+            return None
+        at, pkg, kind, payload = row
+        return Event(
+            at=dt.datetime.fromisoformat(at),
+            package=pkg,
+            kind=kind,
+            payload=msgspec.json.decode(payload, type=dict[str, str]),
+        )
+
     def between(self, start: dt.datetime, end: dt.datetime) -> list[Event]:
         """События в полуинтервале [start, end), по времени.
 

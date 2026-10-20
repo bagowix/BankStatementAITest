@@ -5,11 +5,16 @@
 здесь: успех и сбой пишутся в журнал (из него — надёжность в отчёте), пинг уходит
 на healthchecks-сервис (он сам поднимет тревогу, если пинги прекратились), а
 текст ошибки — оператору в Telegram.
+
+Оператору пишем о переходах, а не о каждом запуске: о первом сбое, о смене текста
+ошибки и о восстановлении. Лимит расходов до 1-го числа при запуске раз в 10 минут —
+это сотни одинаковых сообщений, которые приучают их не читать.
 """
 
 import datetime as dt
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Final
 
 import httpx
 
@@ -18,6 +23,9 @@ from autostudio.events import EventLog
 from autostudio.notify import Notifier
 
 logger = logging.getLogger(__name__)
+
+_RUN_OK: Final = 'system.run_ok'
+_RUN_FAILED: Final = 'system.run_failed'
 
 
 class Heartbeat:
@@ -74,19 +82,30 @@ async def supervised_run[T](
     Returns:
         Результат работы или None, если она завершилась ошибкой пакета.
     """
+    previous = events.last(package, (_RUN_OK, _RUN_FAILED))
     await heartbeat.ping('/start')
     try:
         result = await job()
     except AutoStudioError as exc:
-        events.record(package, 'system.run_failed', now(), {'error': str(exc)[:500]})
+        error = str(exc)[:500]
+        events.record(package, _RUN_FAILED, now(), {'error': error})
         await heartbeat.ping('/fail', str(exc))
-        if operator is not None:
-            try:
-                await operator.send(f'⚠️ {client_name} / {package}: {exc}')
-            except AutoStudioError as notify_exc:
-                logger.error('оператор не уведомлён о сбое %s: %s', package, notify_exc)
+        repeated = previous is not None and previous.kind == _RUN_FAILED and previous.payload.get('error') == error
+        if not repeated:
+            await _alert(operator, package, f'⚠️ {client_name} / {package}: {exc}')
         logger.error('%s: запуск завершился ошибкой: %s', package, exc)
         return None
-    events.record(package, 'system.run_ok', now())
+    events.record(package, _RUN_OK, now())
     await heartbeat.ping()
+    if previous is not None and previous.kind == _RUN_FAILED:
+        await _alert(operator, package, f'✅ {client_name} / {package}: снова работает')
     return result
+
+
+async def _alert(operator: Notifier | None, package: str, text: str) -> None:
+    if operator is None:
+        return
+    try:
+        await operator.send(text)
+    except AutoStudioError as notify_exc:
+        logger.error('оператор не уведомлён (%s): %s', package, notify_exc)

@@ -91,3 +91,82 @@ async def test__heartbeat__network_error__swallowed():
     respx.post('https://hc.example.test/x').mock(side_effect=httpx.ConnectError('down'))
     async with httpx.AsyncClient() as http:
         await Heartbeat(http, 'https://hc.example.test/x').ping()
+
+
+async def test__supervised_run__same_error_twice__one_alert_then_recovery_notice(tmp_path, clock):
+    log = EventLog(tmp_path / 'e.sqlite')
+    operator = Recorder()
+
+    async def failing():
+        raise LLMError('Anthropic 429: enforced_spend_limit_reached')
+
+    async def working():
+        return 1
+
+    async with httpx.AsyncClient() as http:
+        heartbeat = Heartbeat(http, None)
+        for _ in range(3):
+            await supervised_run(
+                package='inbox',
+                job=failing,
+                events=log,
+                heartbeat=heartbeat,
+                operator=operator,
+                client_name='Acme',
+                now=clock,
+            )
+        await supervised_run(
+            package='inbox',
+            job=working,
+            events=log,
+            heartbeat=heartbeat,
+            operator=operator,
+            client_name='Acme',
+            now=clock,
+        )
+        await supervised_run(
+            package='inbox',
+            job=working,
+            events=log,
+            heartbeat=heartbeat,
+            operator=operator,
+            client_name='Acme',
+            now=clock,
+        )
+    assert operator.sent == [
+        '⚠️ Acme / inbox: Anthropic 429: enforced_spend_limit_reached',
+        '✅ Acme / inbox: снова работает',
+    ]
+
+
+async def test__supervised_run__error_text_changes__alerts_again(tmp_path, clock):
+    log = EventLog(tmp_path / 'e.sqlite')
+    operator = Recorder()
+
+    def failing(text):
+        async def job():
+            raise LLMError(text)
+
+        return job
+
+    async with httpx.AsyncClient() as http:
+        heartbeat = Heartbeat(http, None)
+        await supervised_run(
+            package='inbox',
+            job=failing('a'),
+            events=log,
+            heartbeat=heartbeat,
+            operator=operator,
+            client_name='A',
+            now=clock,
+        )
+        await supervised_run(
+            package='inbox',
+            job=failing('b'),
+            events=log,
+            heartbeat=heartbeat,
+            operator=operator,
+            client_name='A',
+            now=clock,
+        )
+    assert len(operator.sent) == 2

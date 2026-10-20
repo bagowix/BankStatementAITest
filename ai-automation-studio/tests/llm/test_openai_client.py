@@ -43,14 +43,17 @@ async def test__openai__incomplete_status__llm_error():
 
 async def test__openai__api_status_error__llm_error():
     client = OpenAIClient(openai_stub(error=status_error(openai.APIStatusError, 429)), 'm')
-    with pytest.raises(LLMError, match='429'):
+    with pytest.raises(LLMError, match='429') as info:
         await client.write(system='s', prompt='p')
+    assert info.value.kind == 'outage'
+    assert info.value.status_code == 429
 
 
 async def test__openai__connection_error__llm_error():
     client = OpenAIClient(openai_stub(error=connection_error(openai.APIConnectionError)), 'm')
-    with pytest.raises(LLMError, match='недоступен'):
+    with pytest.raises(LLMError, match='недоступен') as info:
         await client.write(system='s', prompt='p')
+    assert info.value.kind == 'outage'
 
 
 async def test__openai__schema_mismatch__llm_error():

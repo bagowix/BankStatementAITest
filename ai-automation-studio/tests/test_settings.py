@@ -56,3 +56,8 @@ def test__settings__operator_and_healthcheck__read():
     assert settings.healthcheck_url == 'https://hc-ping.com/x'
     assert settings.operator_chat_id == '42'
     assert settings.data_dir == Path('/data')
+
+
+def test__settings__provider_explicit__flag():
+    assert Settings.from_env({}).llm_provider_explicit is False
+    assert Settings.from_env({'AUTOSTUDIO_LLM_PROVIDER': 'fake'}).llm_provider_explicit is True

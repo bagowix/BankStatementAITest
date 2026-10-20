@@ -8,7 +8,7 @@ import msgspec
 from anthropic.types import JSONOutputFormatParam, MessageParam, OutputConfigParam
 from anthropic.types.beta import BetaMessageParam, BetaOutputConfigParam
 
-from autostudio.errors import LLMError
+from autostudio.errors import LLMError, kind_for_status
 from autostudio.llm.base import LLMUsage, decode_output, output_schema
 from autostudio.settings import Effort
 
@@ -77,9 +77,13 @@ class AnthropicClient:
             else:
                 reply = await self._plain_call(system, prompt, output_config)
         except anthropic.APIStatusError as exc:
-            raise LLMError(f'Anthropic {exc.status_code}: {exc.message}', status_code=exc.status_code) from None
+            raise LLMError(
+                f'Anthropic {exc.status_code}: {exc.message}',
+                status_code=exc.status_code,
+                kind=kind_for_status(exc.status_code),
+            ) from None
         except anthropic.APIConnectionError as exc:
-            raise LLMError(f'Anthropic недоступен: {type(exc).__name__}') from None
+            raise LLMError(f'Anthropic недоступен: {type(exc).__name__}', kind='outage') from None
         self._usage.add(reply.input_tokens, reply.output_tokens)
         if reply.stop_reason == 'refusal':
             raise LLMError('модель отказалась отвечать на этот ввод')

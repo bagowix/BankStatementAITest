@@ -44,10 +44,20 @@ async def test__csv_append__unwritable__sink_error(tmp_path):
         await CsvSink(blocker / 'sub').append('t', ['a'], [['1']])
 
 
-@pytest.mark.parametrize(('value', 'expected'), [('hello', 'hello'), ('-5', '-5'), ('-x', "'-x"), ('+1', "'+1")])
+@pytest.mark.parametrize(('value', 'expected'), [('hello', 'hello'), ('-5', '-5'), ('-x', "'-x"), ('+1', '+1'), ('+x', "'+x")])
 def test__neutralize_formula__cases(value, expected):
     assert neutralize_formula(value) == expected
 
 
 def test__make_sink__csv_default__csv_sink(tmp_path):
     assert isinstance(make_sink(SinkConfig(csv_dir=tmp_path)), CsvSink)
+
+
+@pytest.mark.parametrize('phone', ['+995 555 12-34-56', '+1 (415) 555-0100', '+79990001122'])
+def test__neutralize_formula__international_phone__untouched(phone):
+    assert neutralize_formula(phone) == phone
+
+
+def test__neutralize_formula__plus_formula__still_escaped():
+    assert neutralize_formula('+SUM(A1:A2)') == "'+SUM(A1:A2)"
+    assert neutralize_formula('+1+cmd|calc') == "'+1+cmd|calc"

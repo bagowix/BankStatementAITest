@@ -14,10 +14,13 @@ _UNSAFE: Final = re.compile(r'[^\w.-]+', re.UNICODE)
 # Данные приходят от посторонних людей (письма, сайты конкурентов), поэтому
 # такие значения экранируются апострофом.
 _FORMULA_PREFIXES: Final = ('=', '+', '-', '@', '\t', '\r')
+# Телефон в международном формате («+995 555 12-34-56») начинается с «+», но формулой не
+# является: без исключения каждый номер в таблице получал бы видимый апостроф.
+_PHONE_LIKE: Final = re.compile(r'^\+[\d][\d\s().-]{4,}$')
 
 
 def neutralize_formula(value: str) -> str:
-    """Защищает от CSV/formula-инъекции, не трогая обычные отрицательные числа.
+    """Защищает от CSV/formula-инъекции, не трогая числа со знаком и телефоны.
 
     Args:
         value: Значение ячейки.
@@ -27,7 +30,7 @@ def neutralize_formula(value: str) -> str:
     """
     if not value.startswith(_FORMULA_PREFIXES):
         return value
-    if value.startswith('-') and _looks_numeric(value):
+    if value.startswith(('-', '+')) and (_looks_numeric(value) or _PHONE_LIKE.match(value)):
         return value
     return "'" + value
 
