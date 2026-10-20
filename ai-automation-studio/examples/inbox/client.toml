@@ -1,0 +1,81 @@
+# Образец конфига клиента пакета inbox: турагентство в Тбилиси.
+# Секретов здесь нет — только имена переменных окружения (см. .env.example).
+# Проверка: uv run autostudio inbox check examples/inbox/client.toml --skip-env
+
+[client]
+id = "demo-inbox"
+name = "Demo Tours"
+timezone = "Asia/Tbilisi"
+language = "en"            # язык таблицы и уведомлений владельцу: en или ru
+
+[notify]
+# telegram_chat_id = "123456789"           # чат владельца; токен — в AUTOSTUDIO_NOTIFY_BOT_TOKEN
+console = true
+
+[sink]
+backend = "csv"            # "google" + spreadsheet_id для Google Sheets
+csv_dir = "var/out/demo-inbox"
+# spreadsheet_id = "1AbC...xyz"
+
+[inbox]
+imap_host = "imap.gmail.com"
+imap_port = 993
+username_env = "INBOX_IMAP_USER"
+password_env = "INBOX_IMAP_PASSWORD"       # пароль ПРИЛОЖЕНИЯ, не основной
+folder = "INBOX"
+drafts_folder = "[Gmail]/Drafts"           # в Gmail; check --connect подскажет точное имя
+first_run_since_days = 3
+max_per_run = 50
+max_body_chars = 8000
+notify_on_urgency = "normal"               # сообщать о каждом лиде и заявке, не только о срочных
+mask_pii_in_sheet = false
+alert_operator_on_injection = true
+sheet_tab = "Inbox"
+
+[inbox.company]
+name = "Demo Tours"
+signature = """Best regards,
+Demo Tours team
++995 32 200 00 00 · demotours.example"""
+tone = "warm, concise and professional; short paragraphs; no pressure"
+reply_language = "auto"                    # отвечать на языке отправителя
+facts = [
+    "Group day tours from Tbilisi: Kazbegi and Gergeti Trinity Church — 120 GEL per person; Kakheti wine tour with tastings — 140 GEL per person; Mtskheta and Jvari — 70 GEL per person.",
+    "Tbilisi old town walking tour — 60 GEL per person, every day at 11:00, English or Russian-speaking guide.",
+    "Private tours for groups of up to 15 people: from 450 GEL per day for the car, driver and an English- or Russian-speaking guide; multi-day programmes are quoted individually after we know the dates and the group size.",
+    "To book: reply with the date, the number of people and the tour; we confirm availability within one working day and take a 20% deposit by card or bank transfer.",
+    "Free cancellation up to 72 hours before the tour; later cancellations are non-refundable. Complaints are reviewed by the manager within 2 working days.",
+    "Hotel pick-up in central Tbilisi is included in all tours. Lunch is not included unless stated.",
+    "Office hours: Monday to Saturday, 10:00–19:00 Tbilisi time (GMT+4).",
+]
+
+[[inbox.categories]]
+id = "booking_request"
+description = "A customer wants to book or reserve a specific tour or date, or asks to confirm a booking."
+notify = true
+draft_reply = true
+
+[[inbox.categories]]
+id = "lead"
+description = "A potential customer asks about prices, availability, programmes or a quote, without a firm booking yet."
+notify = true
+draft_reply = true
+
+[[inbox.categories]]
+id = "support"
+description = "An existing customer: a question about their booking, a change, a complaint or a refund request."
+draft_reply = true
+
+[[inbox.categories]]
+id = "invoice"
+description = "Invoices, bills, payment requests or receipts from hotels, drivers and other partners."
+move_to = "Invoices"
+
+[[inbox.categories]]
+id = "marketing"
+description = "Newsletters, promotions, cold sales pitches, SEO or advertising offers and other bulk mail."
+move_to = "Newsletters"
+
+[[inbox.categories]]
+id = "other"
+description = "Anything else: personal, internal, partner chatter, service notifications, unclear messages."

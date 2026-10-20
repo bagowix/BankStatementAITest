@@ -1,0 +1,94 @@
+# Образец конфига монитора цен. Новый клиент: `autostudio new-client <id> --package prices`.
+# Секретов здесь нет — только имена переменных окружения (см. .env.example).
+#
+# Демо (`autostudio prices demo`) гоняет именно этот файл на офлайн-фикстурах:
+# домены *.example обслуживает httpx.MockTransport, в настоящую сеть ничего не уходит.
+
+[client]
+id = "demo-prices"
+name = "Tech Corner Tbilisi"
+timezone = "Asia/Tbilisi"
+language = "en"            # en или ru: язык таблицы и уведомлений владельцу
+
+[notify]
+console = true             # для боевого клиента: telegram_chat_id = "123456789"
+# telegram_token_env = "AUTOSTUDIO_NOTIFY_BOT_TOKEN"
+
+[sink]
+backend = "csv"            # для клиента: "google" + spreadsheet_id (таблица расшарена на сервисный аккаунт)
+csv_dir = "var/out/demo-prices"
+# spreadsheet_id = "1AbC...xyz"
+# credentials_env = "GOOGLE_APPLICATION_CREDENTIALS"
+
+[prices]
+# Адрес оператора уходит в User-Agent: владелец сайта должен знать, кому написать.
+contact_email = "monitor@autostudio.example"
+alert_change_pct = "3"     # строкой — чтобы Decimal не проходил через float
+alert_undercut = true
+respect_robots = true
+min_delay_s = 5            # пауза между запросами к одному сайту
+timeout_s = 20
+max_retries = 2
+llm_fallback = true        # платная ступень для страниц без разметки (в демо — FakeLLM)
+llm_max_pages_per_run = 5
+failure_alert_after = 2    # тариф Basic проверяет раз в день: два дня сбоев подряд — повод вмешаться
+sheet_history = "changes"  # в «History» только новые значения; полная история — в SQLite
+
+[[prices.products]]
+id = "iphone-15-128"
+name = "iPhone 15 128GB"
+own_price = "2699.00"
+currency = "GEL"
+
+  [[prices.products.offers]]
+  competitor = "Shop A"
+  url = "https://shop-a.example/p/iphone-15-128"
+
+  [[prices.products.offers]]
+  competitor = "Shop B"
+  url = "https://shop-b.example/catalog/apple-iphone-15-128gb"
+
+  [[prices.products.offers]]
+  competitor = "Shop C"
+  url = "https://shop-c.example/item/1015"
+  selector = ".price-now"  # найден командой `autostudio prices probe <url>`
+  currency = "GEL"
+
+[[prices.products]]
+id = "galaxy-s24-256"
+name = "Samsung Galaxy S24 256GB"
+own_price = "2499.00"
+currency = "GEL"
+
+  [[prices.products.offers]]
+  competitor = "Shop A"
+  url = "https://shop-a.example/p/galaxy-s24-256"
+
+  [[prices.products.offers]]
+  competitor = "Shop B"
+  url = "https://shop-b.example/catalog/samsung-galaxy-s24-256gb"
+
+  [[prices.products.offers]]
+  competitor = "Shop C"
+  url = "https://shop-c.example/item/2024"
+  selector = ".price-now"
+  currency = "GEL"
+
+[[prices.products]]
+id = "airpods-pro-2"
+name = "AirPods Pro 2"
+own_price = "749.00"
+currency = "GEL"
+
+  [[prices.products.offers]]
+  competitor = "Shop A"
+  url = "https://shop-a.example/p/airpods-pro-2"
+
+  [[prices.products.offers]]
+  competitor = "Shop B"
+  url = "https://shop-b.example/old/airpods-pro-2.html"
+  currency = "GEL"
+
+  [[prices.products.offers]]
+  competitor = "Shop C"
+  url = "https://shop-c.example/private/airpods-pro-2"

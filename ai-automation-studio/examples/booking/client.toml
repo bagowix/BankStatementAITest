@@ -1,0 +1,110 @@
+# Образец конфига клиента пакета booking: барбершоп в Тбилиси.
+# Новый клиент: `uv run autostudio new-client <id> --package booking`, затем правьте копию
+# и проверяйте: `uv run autostudio booking check clients/<id>/booking.toml`.
+# Секретов здесь нет: токены и ключи — в .env (см. .env.example рядом).
+
+[client]
+id = "demo-booking"
+name = "Demo Barbers"
+timezone = "Asia/Tbilisi"
+# Язык уведомлений владельцу, таблицы и месячного отчёта: "en" или "ru".
+language = "en"
+
+[notify]
+# Уведомления о записях приходят владельцу в этого же бота (admin_chat_ids ниже).
+# Здесь — дополнительный канал: webhook_url_env для Slack/Make, telegram_chat_id для отдельного бота.
+console = true
+
+[sink]
+# "csv" — файлы в csv_dir; "google" — Google Sheets (нужны spreadsheet_id и ключ сервисного аккаунта).
+backend = "csv"
+csv_dir = "var/out/demo-booking"
+# backend = "google"
+# spreadsheet_id = "1AbC...из URL таблицы"
+
+[booking]
+bot_token_env = "BOOKING_BOT_TOKEN"
+# Telegram id владельца и сотрудников (узнать: написать @userinfobot). Им — уведомления и
+# команды /today, /tomorrow, /week, /cancel_booking <id>, /reply <user> <текст>.
+admin_chat_ids = [111111111]
+# Языки покупателей; первый — по умолчанию. Язык выбирается по настройкам Telegram покупателя.
+languages = ["en", "ru"]
+slot_step_min = 15
+min_lead_min = 60
+horizon_days = 14
+buffer_min = 0
+reminders_min_before = [1440, 120]
+cancellation_min_before = 120
+contact_phone = "+995 555 12 34 56"
+closed_dates = [2026-12-31, 2027-01-01, 2027-01-02, 2027-01-07]
+
+[booking.hours]
+mon = ["10:00-14:00", "15:00-20:00"]
+tue = ["10:00-14:00", "15:00-20:00"]
+wed = ["10:00-14:00", "15:00-20:00"]
+thu = ["10:00-14:00", "15:00-20:00"]
+fri = ["10:00-14:00", "15:00-20:00"]
+sat = ["10:00-14:00", "15:00-18:00"]
+sun = []
+
+[[booking.services]]
+id = "haircut"
+name = { en = "Haircut", ru = "Стрижка" }
+duration_min = 45
+price = "40"
+currency = "GEL"
+
+[[booking.services]]
+id = "beard"
+name = { en = "Beard trim", ru = "Оформление бороды" }
+duration_min = 30
+price = "25"
+currency = "GEL"
+
+[[booking.services]]
+id = "combo"
+name = { en = "Haircut + beard", ru = "Стрижка + борода" }
+duration_min = 75
+price = "55"
+currency = "GEL"
+# Комплекс делает только старший мастер.
+staff_ids = ["giorgi"]
+
+[[booking.staff]]
+id = "giorgi"
+name = "Giorgi"
+
+[[booking.staff]]
+id = "nika"
+name = "Nika"
+
+# Ника работает со среды по субботу; часы пересекаются с часами салона (обед — общий).
+[booking.staff.hours]
+wed = ["12:00-20:00"]
+thu = ["12:00-20:00"]
+fri = ["12:00-20:00"]
+sat = ["10:00-18:00"]
+
+[[booking.faq]]
+id = "address"
+question = { en = "Where are you located?", ru = "Где вы находитесь?" }
+answer = { en = "12 Rustaveli Ave, Tbilisi — a 2-minute walk from Rustaveli metro station.", ru = "Тбилиси, проспект Руставели, 12 — 2 минуты пешком от метро «Руставели»." }
+
+[[booking.faq]]
+id = "parking"
+question = { en = "Is there parking nearby?", ru = "Есть ли рядом парковка?" }
+answer = { en = "Yes, free parking in our courtyard; the entrance is from Chitadze St.", ru = "Да, бесплатная парковка во дворе, въезд с улицы Читадзе." }
+
+[[booking.faq]]
+id = "payment"
+question = { en = "Do you accept cards?", ru = "Можно оплатить картой?" }
+answer = { en = "Yes — Visa, Mastercard, Apple Pay and cash (GEL).", ru = "Да — Visa, Mastercard, Apple Pay и наличные (лари)." }
+
+[[booking.faq]]
+id = "cancellation"
+question = { en = "What is your cancellation policy?", ru = "Как отменить или перенести запись?" }
+answer = { en = "Cancel or reschedule free of charge up to 2 hours before your visit, right here in the bot. Later than that, please call us.", ru = "Отменить или перенести запись можно бесплатно не позже чем за 2 часа до визита — прямо здесь, в боте. Позже — позвоните нам, пожалуйста." }
+
+# Переопределение любого текста бота (ключи — в src/autostudio/booking/texts.py):
+# [booking.texts.ru]
+# booked = "Записали! ✅\n{service}, {when}, мастер: {staff}.\nЗапись №{id}. До встречи!"

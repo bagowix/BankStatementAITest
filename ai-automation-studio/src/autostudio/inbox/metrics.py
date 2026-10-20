@@ -1,0 +1,92 @@
+"""Как работа разбора почты выглядит в месячном отчёте клиенту.
+
+Минуты — честная оценка ручной работы на одно действие: прочитать письмо, понять,
+что это, и занести в таблицу ≈ 2 минуты; набросать ответ по шаблону ≈ 4 минуты;
+отметить лид ≈ 1 минута; смахнуть рассылку или автоответ ≈ 0,5 минуты.
+Заблокированные инъекции и сбои времени не экономят — их минуты 0.
+"""
+
+from collections import Counter
+from collections.abc import Sequence
+from typing import Final
+
+from autostudio.events import Event
+from autostudio.report import MetricSpec
+
+METRICS: Final[list[MetricSpec]] = [
+    MetricSpec(
+        kind='inbox.triaged',
+        label={'en': 'Emails sorted and logged to the sheet', 'ru': 'Писем разобрано и занесено в таблицу'},
+        minutes_saved=2,
+    ),
+    MetricSpec(
+        kind='inbox.filtered',
+        label={'en': 'Newsletters and auto-replies filtered', 'ru': 'Рассылок и автоответов отфильтровано'},
+        minutes_saved=0.5,
+    ),
+    MetricSpec(
+        kind='inbox.draft_created',
+        label={'en': 'Reply drafts prepared', 'ru': 'Черновиков ответа подготовлено'},
+        minutes_saved=4,
+    ),
+    MetricSpec(
+        kind='inbox.lead_found',
+        label={'en': 'Leads found', 'ru': 'Лидов найдено'},
+        minutes_saved=1,
+    ),
+    MetricSpec(
+        kind='inbox.injection_blocked',
+        label={'en': 'Suspicious emails blocked', 'ru': 'Подозрительных писем заблокировано'},
+        minutes_saved=0,
+    ),
+    MetricSpec(
+        kind='inbox.failed',
+        label={'en': 'Emails left for manual review', 'ru': 'Писем оставлено на ручную проверку'},
+        minutes_saved=0,
+    ),
+]
+
+_TEXT: Final[dict[str, dict[str, str]]] = {
+    'en': {
+        'leads': '{n} new leads found in the inbox, {high} of them urgent.',
+        'drafts': 'Reply drafts were ready for {drafts} of {needed} emails that needed an answer ({share}%).',
+        'hours': 'About {hours} h of manual email work saved (estimate).',
+        'injections': '{n} emails with hidden instructions to the AI were blocked — no action was taken on them.',
+    },
+    'ru': {
+        'leads': 'Найдено новых лидов: {n}, из них срочных: {high}.',
+        'drafts': 'Черновики ответа были готовы для {drafts} из {needed} писем, которые ждали ответа ({share}%).',
+        'hours': 'Сэкономлено около {hours} ч ручной работы с почтой (оценка).',
+        'injections': 'Заблокировано писем со скрытыми инструкциями для ИИ: {n} — по ним ничего не делалось.',
+    },
+}
+
+
+def highlights(events: Sequence[Event], language: str) -> list[str]:
+    """Главное за месяц для отчёта клиенту.
+
+    Args:
+        events: События пакета inbox за месяц.
+        language: Язык клиента.
+
+    Returns:
+        Строки «главного»; пусто, если за месяц писем не было.
+    """
+    t = _TEXT.get(language, _TEXT['en'])
+    counts = Counter(event.kind for event in events)
+    out: list[str] = []
+    leads = [event for event in events if event.kind == 'inbox.lead_found']
+    if leads:
+        high = sum(event.payload.get('urgency') == 'high' for event in leads)
+        out.append(t['leads'].format(n=len(leads), high=high))
+    needed = sum(event.kind == 'inbox.triaged' and event.payload.get('needs_reply') == 'yes' for event in events)
+    drafts = counts['inbox.draft_created']
+    if needed and drafts:
+        share = round(100 * min(drafts, needed) / needed)
+        out.append(t['drafts'].format(drafts=drafts, needed=needed, share=share))
+    minutes = sum(counts[spec.kind] * spec.minutes_saved for spec in METRICS)
+    if minutes:
+        out.append(t['hours'].format(hours=f'{minutes / 60:.1f}'))
+    if counts['inbox.injection_blocked']:
+        out.append(t['injections'].format(n=counts['inbox.injection_blocked']))
+    return out

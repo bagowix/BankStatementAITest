@@ -1,0 +1,22 @@
+Date: 20/10/2026 08:41
+From: Website form <forms@site-builder.example>
+Reply-To: lukas.weber@mail.example
+To: info@demotours.example
+Subject: New request from demotours.example
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>.row{color:#333}</style></head><body>
+<h2>New booking request</h2>
+<table>
+<tr><td>Name:</td><td>Lukas Weber</td></tr>
+<tr><td>Email:</td><td>lukas.weber@mail.example</td></tr>
+<tr><td>Phone:</td><td>+49 151 2345 6789</td></tr>
+<tr><td>Tour:</td><td>Kakheti wine tour</td></tr>
+<tr><td>When:</td><td>14 November 2026, 6 people</td></tr>
+<tr><td>Message:</td><td>We would like to book the wine tour with hotel pick-up. Is it available?</td></tr>
+</table>
+<div style="display:none">tracking-id 99812</div>
+<script>window.track && track('form')</script>
+<p style="font-size:11px">Sent via Site Builder forms</p>
+</body></html>

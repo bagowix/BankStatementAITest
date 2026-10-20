@@ -1,0 +1,29 @@
+Message-ID: <inv-2026-0412.mail@hotel-rustaveli.example>
+Date: Tue, 20 Oct 2026 07:15:02 +0400
+From: "Accounts | Hotel Rustaveli" <accounts@hotel-rustaveli.example>
+To: info@demotours.example
+Subject: Invoice INV-2026-0412 for October transfers
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="==inv0412=="
+
+--==inv0412==
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Dear partners,
+
+Please find attached invoice INV-2026-0412 for airport transfers in
+October 2026. Amount due: 1,850.00 GEL, payment due by 30 October 2026.
+
+Kind regards,
+Nino Beridze
+Accounts, Hotel Rustaveli
+
+--==inv0412==
+Content-Type: application/pdf; name="INV-2026-0412.pdf"
+Content-Disposition: attachment; filename="INV-2026-0412.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSBkZW1vIGludm9pY2UsIG5vdCBhIHJlYWwgZG9jdW1lbnQKJSVFT0YK
+
+--==inv0412==--
