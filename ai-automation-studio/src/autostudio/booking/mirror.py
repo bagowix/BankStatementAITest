@@ -18,15 +18,18 @@
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from typing import Final
 
 from autostudio.errors import SinkError
-from autostudio.sinks import Row, TableSink
+from autostudio.sinks import Cell, TableSink
 
 logger = logging.getLogger(__name__)
 
 SINK_TIMEOUT_S: Final = 20.0
 PENDING_MAX: Final = 500
+
+type Line = Sequence[Cell]
 
 
 class SheetMirror:
@@ -40,7 +43,7 @@ class SheetMirror:
     def __init__(self, sink: TableSink, *, timeout: float = SINK_TIMEOUT_S) -> None:
         self._sink = sink
         self._timeout = timeout
-        self._pending: dict[str, list[Row]] = {}
+        self._pending: dict[str, list[Line]] = {}
         self._last: asyncio.Task[None] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -49,7 +52,7 @@ class SheetMirror:
         """Сколько строк ждут повтора после сбоя таблицы."""
         return sum(len(rows) for rows in self._pending.values())
 
-    def append(self, tab: str, header: Row, rows: list[Row]) -> None:
+    def append(self, tab: str, header: Sequence[str], rows: Sequence[Line]) -> None:
         """Ставит строки в очередь записи и сразу возвращает управление.
 
         Args:
@@ -68,13 +71,15 @@ class SheetMirror:
         while self._tasks:
             await asyncio.wait(set(self._tasks))
 
-    async def _after(self, previous: asyncio.Task[None] | None, tab: str, header: Row, rows: list[Row]) -> None:
+    async def _after(
+        self, previous: asyncio.Task[None] | None, tab: str, header: Sequence[str], rows: Sequence[Line]
+    ) -> None:
         if previous is not None:
             # `wait`, а не `await`: исключения предыдущей задачи уже обработаны внутри неё.
             await asyncio.wait({previous})
         await self._write(tab, header, rows)
 
-    async def _write(self, tab: str, header: Row, rows: list[Row]) -> None:
+    async def _write(self, tab: str, header: Sequence[str], rows: Sequence[Line]) -> None:
         batch = [*self._pending.pop(tab, []), *rows]
         try:
             await asyncio.wait_for(self._sink.append(tab, header, batch), timeout=self._timeout)

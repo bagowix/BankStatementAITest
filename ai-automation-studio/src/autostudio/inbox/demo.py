@@ -1,8 +1,10 @@
-"""Офлайн-демо разбора почты: 10 настоящих по устройству писем, без сети и ключей.
+"""Офлайн-демо разбора почты: 12 настоящих по устройству писем, без сети и ключей.
 
-Ящик — `FakeMailBox` с письмами из `examples/inbox/emails/*.eml`, модель — `FakeLLM`
-с эвристиками пакета, таблица — CSV. Запуск идёт дважды: второй ничего не делает
-(идемпотентность). Черновики пишутся файлами `.eml` — их можно открыть почтовым клиентом.
+Ящик — `FakeMailBox` с письмами из `examples/inbox/emails/*.eml` и двумя письмами со
+счетами, PDF которых собирается из `examples/inbox/invoices/*.toml` при запуске (один счёт
+сходится, у другого строки не сходятся с итогом). Модель — `FakeLLM` с эвристиками пакета,
+таблица — CSV. Запуск идёт дважды: второй ничего не делает (идемпотентность). Черновики
+пишутся файлами `.eml` — их можно открыть почтовым клиентом.
 """
 
 import datetime as dt
@@ -22,6 +24,7 @@ from autostudio.inbox.config import InboxConfig
 from autostudio.inbox.heuristics import make_fake_llm, triage_heuristic
 from autostudio.inbox.imap import FakeMailBox
 from autostudio.inbox.pipeline import InboxDeps, RunResult, run_once
+from autostudio.inbox.samples import load_invoice_samples
 from autostudio.inbox.store import InboxStore
 from autostudio.inbox.triage import Triage
 from autostudio.sinks import CsvSink
@@ -36,6 +39,8 @@ _SLUG: Final = re.compile(r'\W+', re.UNICODE)
 # удаляет только свои файлы — по точным именам — и только в каталоге со своей меткой.
 _MARKER: Final = '.autostudio-demo'
 _SHEET_FILE: Final = 'Inbox.csv'
+_INVOICES_FILE: Final = 'Invoices.csv'
+_OWN_SHEETS: Final = (_SHEET_FILE, _INVOICES_FILE)
 _DRAFTS_DIR: Final = 'drafts'
 _STATE_DIR: Final = 'state'
 _DRAFT_FILE: Final = re.compile(r'^\d{2}-[\w-]*\.eml$')
@@ -72,10 +77,7 @@ def _forgetful(system: str, prompt: str) -> Triage:
 
 
 def _own_files(out_dir: Path) -> list[Path]:
-    files: list[Path] = []
-    sheet = out_dir / _SHEET_FILE
-    if sheet.is_file():
-        files.append(sheet)
+    files = [out_dir / name for name in _OWN_SHEETS if (out_dir / name).is_file()]
     drafts, state = out_dir / _DRAFTS_DIR, out_dir / _STATE_DIR
     if drafts.is_dir():
         files += [path for path in drafts.iterdir() if path.is_file() and _DRAFT_FILE.match(path.name)]
@@ -89,7 +91,7 @@ def _demo_made(out_dir: Path) -> bool:
     # что демо создаёт само. Любой посторонний файл — и каталог не наш.
     own = set(_own_files(out_dir))
     for entry in out_dir.iterdir():
-        if entry.name == _SHEET_FILE and entry in own:
+        if entry.name in _OWN_SHEETS and entry in own:
             continue
         if entry.name in (_DRAFTS_DIR, _STATE_DIR) and entry.is_dir() and all(p in own for p in entry.iterdir()):
             continue
@@ -115,7 +117,7 @@ def prepare_out_dir(out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / _MARKER).write_text(
         'Каталог офлайн-демо `autostudio inbox demo`: при повторном запуске демо перезаписывает '
-        'Inbox.csv, drafts/NN-*.eml и state/*.sqlite. Другие файлы не трогаются.\n',
+        'Inbox.csv, Invoices.csv, drafts/NN-*.eml и state/*.sqlite. Другие файлы не трогаются.\n',
         encoding='utf-8',
     )
 
@@ -156,9 +158,34 @@ def _actions(result: RunResult, index: int) -> str:
         parts.append('older than a day: logged only')
     if outcome.injection:
         parts.append('BLOCKED: injection, operator alerted')
+    if outcome.invoices:
+        parts.append('invoice PDF: ' + ', '.join(outcome.invoices))
     if outcome.corrected:
         parts.append(f'dropped unverified: {", ".join(outcome.corrected)}')
     return ', '.join(parts) or '—'
+
+
+def _invoice_lines(result: RunResult, out_dir: Path) -> list[str]:
+    path = out_dir / _INVOICES_FILE
+    if not path.is_file():
+        return []
+    import csv
+
+    with path.open(encoding='utf-8', newline='') as fh:
+        rows = list(csv.DictReader(fh))
+    lines = [
+        '',
+        f'Invoices from PDF attachments: {result.invoices_verified} verified, '
+        f'{result.invoices_unverified} need a manual check (model proposed, code reconciled):',
+    ]
+    for row in rows:
+        detail = f'total {row["Total"]} {row["Currency"]}, lines {row["Lines sum"]}, difference {row["Difference"]}'
+        if not row['Total']:
+            detail = row['Notes']
+        elif row['Notes']:
+            detail += f' — {row["Notes"]}'
+        lines.append(f'  {row["File"]:<18} {row["Status"]:<30} {detail}')
+    return lines
 
 
 def _summary(
@@ -176,7 +203,7 @@ def _summary(
         f'AI inbox triage — offline demo for {config.client.name} ({total} emails, stub model, no network)',
         '',
         f'Run 1: {first.processed} processed, {first.failed} failed; '
-        f'{by_rules} sorted by rules without AI, {first.llm_calls} model calls (triage + drafts)',
+        f'{by_rules} sorted by rules without AI, {first.llm_calls} model calls (triage, drafts, invoices)',
         f'  {"#":>2}  {"From":<34}  {"Subject":<44}  {"Category":<15}  {"Urgency":<7}  Actions',
     ]
     for index, outcome in enumerate(first.outcomes):
@@ -194,6 +221,7 @@ def _summary(
         f'Operator alerts ({len(operator.sent)}):',
         *[f'  {text}' for text in operator.sent],
     ]
+    lines += _invoice_lines(first, out_dir)
     dropped = [o for o in first.outcomes if 'phone' in o.corrected]
     for outcome in dropped:
         lines.append(
@@ -205,7 +233,9 @@ def _summary(
         f'Run 2 (same mailbox, 15 min later): {second.processed} processed, {second.llm_calls} model calls, '
         f'{second.drafts} drafts — idempotent, nothing done twice.',
         '',
-        f'Sheet:  {out_dir / "Inbox.csv"} ({first.sheet_rows} rows, formula-safe)',
+        f'Sheet:  {out_dir / _SHEET_FILE} ({first.sheet_rows} rows, formula-safe)',
+        f'Invoices: {out_dir / _INVOICES_FILE} ({first.invoice_rows} rows; verified amounts as numbers, '
+        'unverified ones as ⚠ text)',
         f'Drafts: {out_dir / "drafts"} ({len(drafts)} .eml files with In-Reply-To/References for threading)',
     ]
     return '\n'.join(lines)
@@ -232,6 +262,8 @@ async def run_demo(out_dir: Path) -> str:
     box = FakeMailBox(folders=extra)
     for path in sorted((examples / 'emails').glob('*.eml')):
         box.add(path.read_bytes(), section.folder)
+    for raw in load_invoice_samples(examples / 'invoices'):
+        box.add(raw, section.folder)
 
     llm = make_fake_llm()
     llm.register(Triage, _forgetful)

@@ -33,7 +33,7 @@ async def test__run__lead__row_draft_notification_events(tmp_path):
     assert header[:4] == ['Received', 'From', 'Subject', 'Category']
     assert row[0] == '2026-10-19 14:00'  # время письма в поясе клиента (Тбилиси, +4)
     assert row[1:5] == ['Jane Doe <jane@client.example>', 'Tour price', 'lead', 'normal']
-    assert row[8] == "'+995 599 12 34 56"  # sink обезвреживает ведущий «+»
+    assert row[8] == '+995 599 12 34 56'  # телефон с «+» — не формула, апостроф ядро больше не ставит
     assert row[13] == 'yes'
     assert h.owner.sent and 'Phone: +995 599 12 34 56' in h.owner.sent[0]
     assert 'What is the price' not in h.owner.sent[0]
@@ -191,7 +191,7 @@ async def test__run__corrupt_email__run_continues_retried_then_given_up(tmp_path
 
 async def test__run__llm_down_for_everything__breaker_aborts_attempts_not_counted(tmp_path):
     def down(system: str, prompt: str) -> Triage:
-        raise LLMError('OpenAI 429: quota exceeded', status_code=429)
+        raise LLMError('OpenAI 429: quota exceeded', status_code=429, kind='outage')
 
     h = Harness(tmp_path, llm=FakeLLM({Triage: down}))
     for index in range(5):
@@ -341,12 +341,15 @@ async def test__run__copy_to_category_folder__never_deleted(tmp_path):
     assert uid in h.box.folders_['INBOX'].messages
 
 
-async def test__run__another_run_holds_lock__skipped(tmp_path):
+async def test__run__another_run_holds_lock__run_skipped_raised_mailbox_untouched(tmp_path):
+    from autostudio.runlog import RunSkipped
+
     h = Harness(tmp_path)
     h.box.add(make_email(**LEAD))
     assert h.store.acquire_lock(NOW, dt.timedelta(minutes=30))
-    result = await run_once(h.config, h.deps, _later(1))
-    assert result.locked and result.processed == 0 and h.box.sessions == 0
+    with pytest.raises(RunSkipped, match='предыдущий запуск'):
+        await run_once(h.config, h.deps, _later(1))
+    assert h.box.sessions == 0 and h.sheet() == []
 
 
 async def test__run__mailbox_down__error_propagates_lock_released(tmp_path):

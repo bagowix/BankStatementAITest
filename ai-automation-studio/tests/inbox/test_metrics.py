@@ -27,9 +27,13 @@ def test__metrics__codes_labels_and_honest_minutes():
         'inbox.draft_created',
         'inbox.lead_found',
         'inbox.injection_blocked',
+        'inbox.invoice_extracted',
+        'inbox.invoice_unverified',
         'inbox.failed',
     }
     assert (kinds['inbox.triaged'].minutes_saved, kinds['inbox.draft_created'].minutes_saved) == (2, 4)
+    # Не сверенный счёт человек всё равно проверяет руками — минут он не экономит.
+    assert (kinds['inbox.invoice_extracted'].minutes_saved, kinds['inbox.invoice_unverified'].minutes_saved) == (5, 0)
     assert kinds['inbox.lead_found'].minutes_saved == 1 and kinds['inbox.injection_blocked'].minutes_saved == 0
     assert all(spec.label['en'] and spec.label['ru'] for spec in METRICS)
 
@@ -72,3 +76,12 @@ def test__highlights__single_lead_draft_and_injection__singular_wording():
 
 def test__highlights__russian_drafts__no_plural_agreement_needed():
     assert highlights(EVENTS, 'ru')[1] == 'Писем, ждавших ответа: 2; черновик был готов для 1 (50%).'
+
+
+def test__highlights__invoices__reconciled_and_flagged_counts():
+    events = [_event('inbox.invoice_extracted'), _event('inbox.invoice_extracted'), _event('inbox.invoice_unverified')]
+    assert highlights(events, 'en') == [
+        'About 0.2 h of manual email work saved (estimate).',
+        'Invoices from PDF attachments: 2 reconciled automatically, 1 flagged for a manual check.',
+    ]
+    assert 'сверено автоматически — 2, отмечено на ручную сверку — 1' in highlights(events, 'ru')[1]

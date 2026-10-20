@@ -24,10 +24,19 @@ csv_dir = "/data/demo-inbox/out"
 # spreadsheet_id = "1AbC...xyz"
 
 [inbox]
-imap_host = "imap.gmail.com"
+imap_host = "imap.gmail.com"               # Microsoft 365: "outlook.office365.com"
 imap_port = 993
-username_env = "INBOX_IMAP_USER"
-password_env = "INBOX_IMAP_PASSWORD"       # пароль ПРИЛОЖЕНИЯ, не основной
+# Вход: "password" — пароль приложения (личный Gmail, Яндекс, Zoho, Mail.ru);
+# "google_oauth" — Google Workspace (Internal OAuth-клиент в GCP-проекте организации клиента,
+# refresh token — `autostudio inbox oauth-google`); "microsoft_oauth" — Microsoft 365
+# (приложение Entra в тенанте клиента, IMAP.AccessAsApp). Пошагово — docs/packages/inbox.md.
+auth = "password"
+username_env = "INBOX_IMAP_USER"           # при OAuth — адрес ящика
+password_env = "INBOX_IMAP_PASSWORD"       # пароль ПРИЛОЖЕНИЯ, не основной (только для "password")
+# oauth_client_id_env = "INBOX_OAUTH_CLIENT_ID"
+# oauth_client_secret_env = "INBOX_OAUTH_CLIENT_SECRET"
+# oauth_refresh_token_env = "INBOX_OAUTH_REFRESH_TOKEN"   # Google
+# oauth_tenant_id_env = "INBOX_OAUTH_TENANT_ID"           # Microsoft 365
 folder = "INBOX"
 drafts_folder = "[Gmail]/Drafts"           # в Gmail; check --connect подскажет точное имя
 # Первый запуск заносит в таблицу письма за эти дни. Письма старше суток только
@@ -39,6 +48,20 @@ notify_on_urgency = "normal"               # сообщать о каждом л
 mask_pii_in_sheet = false
 alert_operator_on_injection = true
 sheet_tab = "Inbox"
+# Телефоны сверяются в E.164: номер без кода страны читается в регионе phone_region, а если
+# такого номера там нет — в запасных регионах (русскоязычные гости пишут «8 (916) 123-45-67»).
+phone_region = "GE"
+phone_fallback_regions = ["RU"]
+
+# Счета из PDF-вложений писем категории invoice: модель извлекает поля, код сверяет итог с
+# текстом PDF и строки с итогом. Не сошлось — строка «НЕ сверен» с расхождением. Сканы без
+# текстового слоя (OCR в v1 нет) — «не разобран, откройте PDF».
+[inbox.invoices]
+enabled = true
+categories = ["invoice"]
+max_pdf_kb = 2048
+max_pages = 10
+sheet_tab = "Invoices"
 
 [inbox.company]
 name = "Demo Tours"

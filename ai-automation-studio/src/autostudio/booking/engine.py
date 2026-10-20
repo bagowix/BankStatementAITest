@@ -25,6 +25,10 @@
   счёт. Счётчики — в памяти.
 - **Администратор записывает гостя «с улицы»** тем же сценарием: бот спрашивает имя и
   телефон гостя каждый раз и не сохраняет их в профиль администратора.
+- **Занятость из Google Calendar** берётся один раз перед обработкой сообщения
+  (`service.refresh_busy`, с кешем): дальше весь расчёт слотов — синхронный и чистый.
+- **Откуда пришёл покупатель** (метка deep link, реклама) адаптер кладёт в
+  `Incoming.source`; движок запоминает её как первое касание — для отчёта владельцу.
 """
 
 import asyncio
@@ -230,6 +234,8 @@ class Engine:
 
     async def _handle(self, message: Incoming) -> list[Outgoing]:
         now = self._clock()
+        if message.source is not None and not message.is_admin:
+            self._service.note_source(message.user, message.source, now)
         conversation = self._conversations.get(message.user, now) or Conversation(
             language=self._language_for(message), expires_at=now
         )
@@ -238,6 +244,7 @@ class Engine:
             if reply is not None:
                 self._release_answered(reply)
                 return reply
+        await self._service.refresh_busy(now)
         before = conversation.step
         outgoing, after = await self._route(message, conversation, now)
         if before == Step.PHONE and after.step != Step.PHONE:
@@ -974,11 +981,17 @@ class Engine:
         return Outgoing(to=ADMINS, text=body)
 
     async def _alert_operator(self, error: LLMError, now: dt.datetime) -> None:
-        logger.warning('модель недоступна, покупателю показано меню: %s', error)
+        if error.kind == 'content':
+            # Модель не справилась с этой репликой (отказ, ответ не по схеме): чинить оператору
+            # нечего, покупатель получил меню. Сигнал — только о недоступности и настройке.
+            logger.info('модель не разобрала реплику, покупателю показано меню: %s', error)
+            return
+        logger.warning('модель недоступна (%s), покупателю показано меню: %s', error.kind, error)
         if self._operator is None or (self._last_alert is not None and now - self._last_alert < _ALERT_EVERY):
             return
         self._last_alert = now
+        what = 'проверьте ключ, права и модель' if error.kind == 'config' else 'провайдер недоступен'
         try:
-            await self._operator.send(f'⚠️ {self._config.client.name} / booking: модель недоступна: {error}')
+            await self._operator.send(f'⚠️ {self._config.client.name} / booking: модель недоступна ({what}): {error}')
         except NotifyError as exc:
             logger.error('оператор не уведомлён о сбое модели: %s', exc)

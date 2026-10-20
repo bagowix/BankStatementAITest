@@ -1,4 +1,4 @@
-"""Команды оператора: `autostudio inbox check | run | dry-run | demo`."""
+"""Команды оператора: `autostudio inbox check | run | dry-run | demo | oauth-google`."""
 
 import asyncio
 import datetime as dt
@@ -9,31 +9,35 @@ from pathlib import Path
 from typing import Final
 
 import cyclopts
+import httpx
 from dishka import make_async_container
 
-from autostudio.clientconf import client_data_dir, load_client_config, require_env
+from autostudio.clientconf import client_data_dir, load_client_config, load_sibling_env
 from autostudio.clock import Clock, system_now
 from autostudio.errors import ConfigError
-from autostudio.inbox.config import InboxConfig
+from autostudio.inbox.config import ImapAuth, InboxConfig, InboxSection
 from autostudio.inbox.demo import run_demo
 from autostudio.inbox.errors import InboxError, MailboxError
-from autostudio.inbox.imap import ImapMailBox
+from autostudio.inbox.oauth import GOOGLE_HINT, MICROSOFT_HINT, TIMEOUT, run_google_consent
 from autostudio.inbox.pipeline import DryRow, InboxDeps, RunResult, dry_run, run_once
-from autostudio.inbox.providers import InboxProvider, build_llm
+from autostudio.inbox.providers import InboxProvider, build_llm, build_mailbox
 from autostudio.llm import LLMClient
 from autostudio.providers import CoreProvider, OperatorAlerts
-from autostudio.runlog import Heartbeat, supervised_run
+from autostudio.runlog import Heartbeat, RunSkipped, supervised_run
 from autostudio.settings import LLMProvider, Settings
 
 app = cyclopts.App(name='inbox', help='Разбор входящей почты: категории, таблица, черновики, горячие лиды.')
 
-# Подсказки по провайдерам почты: ветвимся по адресу сервера, а не по клиенту.
+# Подсказки по провайдерам почты: ветвимся по адресу сервера и способу входа, а не по клиенту.
+_GMAIL: Final = ('gmail', 'googlemail')
+_MICROSOFT: Final = ('outlook', 'office365', 'hotmail')
 _HINTS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
     (
-        ('gmail', 'googlemail'),
-        'Gmail / Google Workspace: включите двухэтапную проверку и создайте пароль приложения '
-        '(myaccount.google.com/apppasswords), IMAP должен быть включён в настройках Gmail. '
-        'Если администратор Workspace запретил пароли приложений — см. docs/packages/inbox.md, «Альтернативы».',
+        _GMAIL,
+        'Gmail: личный @gmail.com — двухэтапная проверка и пароль приложения '
+        '(myaccount.google.com/apppasswords), IMAP включён в настройках Gmail. Google Workspace: вход по '
+        'паролю в IMAP отключён с 01.05.2025 — auth = "google_oauth" (Internal OAuth-клиент в GCP-проекте '
+        'организации клиента и `autostudio inbox oauth-google`), см. docs/packages/inbox.md.',
     ),
     (
         ('yandex',),
@@ -49,33 +53,66 @@ _HINTS: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
         'Mail.ru: создайте «пароль для внешнего приложения» в настройках безопасности.',
     ),
     (
-        ('outlook', 'office365', 'hotmail'),
-        'Outlook / Microsoft 365: Microsoft отключила вход по паролю для IMAP — v1 это не поддерживает. '
-        'Настройте автопересылку на отдельный ящик Gmail или Zoho и подключите его.',
+        _MICROSOFT,
+        'Microsoft 365: вход в IMAP по паролю отключён — auth = "microsoft_oauth": приложение Entra в тенанте '
+        'клиента с разрешением IMAP.AccessAsApp, New-ServicePrincipal и Add-MailboxPermission на ящик '
+        '(пошагово — docs/packages/inbox.md).',
     ),
 )
 _DEFAULT_HINT: Final = 'Проверьте, что IMAP включён, а в .env — логин и пароль приложения (не основной пароль).'
-_UNSUPPORTED_HOSTS: Final = ('outlook', 'office365', 'hotmail')
+_AUTH_LABELS: Final[dict[ImapAuth, str]] = {
+    'password': 'пароль приложения (LOGIN)',
+    'google_oauth': 'OAuth Google Workspace (XOAUTH2, refresh token)',
+    'microsoft_oauth': 'OAuth Microsoft 365 (XOAUTH2, приложение тенанта клиента)',
+}
 _ENV_HINT: Final = (
-    'переменные берутся из окружения процесса: загрузите .env клиента — '
-    '`uv run --env-file clients/<id>/.env autostudio inbox …` (в Docker это делает env_file)'
+    'положите её в .env рядом с конфигом клиента (clients/<id>/.env подхватывается сам) '
+    'или в окружение процесса (в Docker это делает env_file)'
 )
 _FAKE_WARNING: Final = '⚠ модель-заглушка (ключевые слова): для боевой работы задайте AUTOSTUDIO_LLM_PROVIDER и ключ'
 
 
-def provider_hint(host: str) -> str:
-    """Подсказка по настройке IMAP для сервера почты."""
+def provider_hint(host: str, auth: ImapAuth = 'password') -> str:
+    """Подсказка по настройке входа для сервера почты и способа входа."""
     low = host.lower()
+    if auth == 'google_oauth':
+        return f'Google OAuth: {GOOGLE_HINT}'
+    if auth == 'microsoft_oauth':
+        return f'Microsoft 365 OAuth: {MICROSOFT_HINT}'
     for needles, hint in _HINTS:
         if any(needle in low for needle in needles):
             return hint
     return _DEFAULT_HINT
 
 
+def auth_problems(section: InboxSection) -> tuple[list[str], list[str]]:
+    """Несовместимость способа входа и сервера: ошибки и предупреждения.
+
+    Args:
+        section: Секция `[inbox]`.
+
+    Returns:
+        Проблемы (запуск невозможен) и предупреждения (скорее всего, опечатка).
+    """
+    low = section.imap_host.lower()
+    microsoft = any(needle in low for needle in _MICROSOFT)
+    problems: list[str] = []
+    warnings: list[str] = []
+    if microsoft and section.auth == 'password':
+        problems.append(provider_hint(section.imap_host))
+    if section.auth == 'microsoft_oauth' and not microsoft:
+        warnings.append(
+            f'auth = "microsoft_oauth", но сервер {section.imap_host}: у Exchange Online это outlook.office365.com'
+        )
+    if section.auth == 'google_oauth' and not any(needle in low for needle in _GMAIL):
+        warnings.append(f'auth = "google_oauth", но сервер {section.imap_host}: у Gmail и Workspace это imap.gmail.com')
+    return problems, warnings
+
+
 def _env_problems(config: InboxConfig) -> list[str]:
     problems: list[str] = []
     section = config.inbox
-    for var in (section.username_env, section.password_env):
+    for var in section.auth_env:
         if not os.environ.get(var):
             problems.append(f'переменная {var} не задана — {_ENV_HINT}')
     if config.sink.backend == 'google' and not os.environ.get(config.sink.credentials_env):
@@ -123,19 +160,15 @@ def _channel_report(config: InboxConfig, settings: Settings | None) -> tuple[lis
 
 async def _check_connection(config: InboxConfig) -> tuple[list[str], list[str]]:
     section = config.inbox
-    box = ImapMailBox(
-        host=section.imap_host,
-        port=section.imap_port,
-        user=require_env(section.username_env, os.environ),
-        password=require_env(section.password_env, os.environ),
-        timeout=section.timeout_seconds,
-    )
     try:
-        async with box:
-            folders = await box.folders()
-            state = await box.select(section.folder)
+        with httpx.Client(timeout=TIMEOUT) as google_http:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as http:
+                box = build_mailbox(section, os.environ, http, google_http)
+                async with box:
+                    folders = await box.folders()
+                    state = await box.select(section.folder)
     except MailboxError as exc:
-        raise ConfigError(f'{exc}\nподсказка: {provider_hint(section.imap_host)}') from None
+        raise ConfigError(f'{exc}\nподсказка: {provider_hint(section.imap_host, section.auth)}') from None
     names = {folder.name for folder in folders}
     lines = [
         f'✓ вход в {section.imap_host} выполнен, папок: {len(folders)}',
@@ -168,12 +201,21 @@ def check(config: Path, *, connect: bool = False, skip_env: bool = False) -> Non
         connect: Войти по IMAP, перечислить папки и проверить папку черновиков (только чтение).
         skip_env: Проверить только файл конфига, без переменных окружения.
     """
+    loaded = load_sibling_env(config)
     cfg = load_client_config(config, InboxConfig)
     section = cfg.inbox
+    invoice_ids = section.invoice_category_ids
+    invoices = (
+        f'из PDF во вкладку «{section.invoices.sheet_tab}» для категорий {", ".join(invoice_ids)} '
+        f'(до {section.invoices.max_pdf_kb} КБ и {section.invoices.max_pages} стр., без OCR)'
+        if invoice_ids
+        else 'не извлекаются'
+    )
     lines = [
         f'✓ конфиг {config}: клиент {cfg.client.id} ({cfg.client.name}), пояс {cfg.client.timezone}, '
         f'язык {cfg.client.language}',
         f'  ящик: {section.imap_host}:{section.imap_port}, папка {section.folder}, черновики {section.drafts_folder}',
+        f'  вход: {_AUTH_LABELS[section.auth]}',
         '  категории: '
         + ', '.join(
             f'{c.id}{" 🔔" if c.notify else ""}{" ✍" if c.draft_reply else ""}{f" →{c.move_to}" if c.move_to else ""}'
@@ -181,10 +223,13 @@ def check(config: Path, *, connect: bool = False, skip_env: bool = False) -> Non
         ),
         f'  факты для черновиков: {len(section.company.facts)}, язык ответа: {section.company.reply_language}',
         f'  таблица: {cfg.sink.backend}, вкладка «{section.sheet_tab}», маскирование: {section.mask_pii_in_sheet}',
+        f'  счета: {invoices}',
+        f'  телефоны: регион {section.phone_region}, запасные: {", ".join(section.phone_fallback_regions) or "—"}',
     ]
-    problems: list[str] = []
-    if any(host in section.imap_host.lower() for host in _UNSUPPORTED_HOSTS):
-        problems.append(provider_hint(section.imap_host))
+    if loaded:
+        lines.append(f'  .env рядом с конфигом: загружено переменных {len(loaded)}')
+    problems, auth_warnings = auth_problems(section)
+    lines += [f'  ⚠ {warning}' for warning in auth_warnings]
     if not section.company.facts and any(c.draft_reply for c in section.categories):
         lines.append('  ⚠ фактов о компании нет: черновики будут только «спасибо, коллега свяжется»')
     settings: Settings | None = None
@@ -215,8 +260,6 @@ def check(config: Path, *, connect: bool = False, skip_env: bool = False) -> Non
 
 def format_result(result: RunResult) -> str:
     """Сводка запуска для консоли и журнала cron."""
-    if result.locked:
-        return 'inbox: предыдущий запуск ещё идёт — пропуск'
     categories = ', '.join(f'{name}: {count}' for name, count in sorted(result.by_category.items())) or '—'
     lines = [
         f'inbox: новых {result.processed} (скачано {result.fetched}, уже было {result.skipped}), '
@@ -225,6 +268,11 @@ def format_result(result: RunResult) -> str:
         f'  черновиков {result.drafts}, лидов {result.leads}, уведомлений {result.notified}, '
         f'инъекций {result.injections}, вызовов модели {result.llm_calls}, строк в таблицу {result.sheet_rows}',
     ]
+    if result.invoices_verified or result.invoices_unverified or result.invoice_rows:
+        lines.append(
+            f'  счета: сверено {result.invoices_verified}, на ручную проверку {result.invoices_unverified}, '
+            f'строк во вкладку счетов {result.invoice_rows}'
+        )
     if result.aborted:
         lines.append(f'  ✗ остановлено: {result.aborted}')
     lines += [f'  ✗ {error}' for error in result.errors]
@@ -263,14 +311,23 @@ async def _serve(config: InboxConfig, settings: Settings, every_minutes: int | N
         operator = await container.get(OperatorAlerts)
         clock = await container.get(Clock)
 
+        skipped: list[RunSkipped] = []
+
         async def job() -> RunResult:
-            result = await run_once(config, deps, clock())
+            try:
+                result = await run_once(config, deps, clock())
+            except RunSkipped as exc:
+                # Пропуск — не успех и не сбой: supervised_run пишет его отдельно и оператора не тревожит.
+                skipped.append(exc)
+                print(f'inbox: {exc} — пропуск', flush=True)
+                raise
             print(format_result(result), flush=True)
             if not result.ok:
                 raise InboxError(result.aborted or '; '.join(result.errors))
             return result
 
         while True:
+            skipped.clear()
             outcome = await supervised_run(
                 package='inbox',
                 job=job,
@@ -281,7 +338,7 @@ async def _serve(config: InboxConfig, settings: Settings, every_minutes: int | N
                 now=clock,
             )
             if every_minutes is None:
-                if outcome is None:
+                if outcome is None and not skipped:
                     raise InboxError('запуск завершился ошибкой — подробности выше, оператор уведомлён')
                 return
             await asyncio.sleep(every_minutes * 60)
@@ -299,6 +356,7 @@ def run(config: Path, *, every_minutes: int | None = None) -> None:
     """
     if every_minutes is not None and every_minutes < 1:
         raise ConfigError('--every-minutes: не меньше 1')
+    load_sibling_env(config)
     cfg = load_client_config(config, InboxConfig)
     settings = Settings.from_env(os.environ)
     require_model(settings, os.environ)
@@ -356,21 +414,14 @@ def dry_run_command(config: Path, *, limit: int = 20) -> None:
     """
     if not 1 <= limit <= 200:
         raise ConfigError('--limit: от 1 до 200')
+    load_sibling_env(config)
     cfg = load_client_config(config, InboxConfig)
     settings = Settings.from_env(os.environ)
     stub = settings.llm_provider is LLMProvider.FAKE
     if stub:
         print(_FAKE_WARNING)
-    section = cfg.inbox
-    box = ImapMailBox(
-        host=section.imap_host,
-        port=section.imap_port,
-        user=require_env(section.username_env, os.environ),
-        password=require_env(section.password_env, os.environ),
-        timeout=section.timeout_seconds,
-    )
     llm = build_llm(settings)
-    rows = asyncio.run(_dry(cfg, box, llm, limit))
+    rows = asyncio.run(_dry(cfg, llm, limit))
     print(format_dry_rows(rows, cfg.client.zone, model_label='stub' if stub else 'AI'))
     by_rules = sum(row.source == 'prefilter' for row in rows)
     errors = sum(row.source == 'error' for row in rows)
@@ -385,9 +436,12 @@ def _progress(done: int, total: int) -> None:
     print(f'\r  разобрано {done}/{total}…', end='\n' if done == total else '', file=sys.stderr, flush=True)
 
 
-async def _dry(config: InboxConfig, box: ImapMailBox, llm: LLMClient, limit: int) -> list[DryRow]:
+async def _dry(config: InboxConfig, llm: LLMClient, limit: int) -> list[DryRow]:
     try:
-        return await dry_run(config, box, llm, system_now(), limit, progress=_progress)
+        with httpx.Client(timeout=TIMEOUT) as google_http:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as http:
+                box = build_mailbox(config.inbox, os.environ, http, google_http)
+                return await dry_run(config, box, llm, system_now(), limit, progress=_progress)
     finally:
         await llm.aclose()
 
@@ -400,3 +454,35 @@ def demo(*, out: Path = Path('var/demo/inbox')) -> None:
         out: Каталог для таблицы (CSV), черновиков (.eml) и состояния демо.
     """
     print(asyncio.run(run_demo(out)))
+
+
+@app.command(name='oauth-google')
+def oauth_google(*, client_secrets: Path, config: Path | None = None, port: int = 0, no_browser: bool = False) -> None:
+    """Разовое согласие Google Workspace: выдаёт refresh token для IMAP (XOAUTH2).
+
+    Запускать на компьютере с браузером (не на сервере): откроется окно входа Google, войдите
+    в ящик КЛИЕНТА. OAuth-клиент «Desktop app» создаётся в GCP-проекте организации клиента
+    как Internal-приложение — не в проекте оператора (почему — docs/packages/inbox.md).
+
+    Args:
+        client_secrets: JSON OAuth-клиента «Desktop app» (Google Cloud Console → Credentials).
+        config: Конфиг клиента — взять из него имена переменных (по умолчанию INBOX_OAUTH_*).
+        port: Порт петлевого адреса localhost; 0 — любой свободный.
+        no_browser: Не открывать браузер, а только напечатать ссылку.
+    """
+    section = load_client_config(config, InboxConfig).inbox if config is not None else None
+    consent = run_google_consent(client_secrets, port=port, open_browser=not no_browser)
+    names = (
+        (section.oauth_client_id_env, section.oauth_client_secret_env, section.oauth_refresh_token_env)
+        if section is not None
+        else ('INBOX_OAUTH_CLIENT_ID', 'INBOX_OAUTH_CLIENT_SECRET', 'INBOX_OAUTH_REFRESH_TOKEN')
+    )
+    values = (consent.client_id, consent.client_secret, consent.refresh_token)
+    # Токен печатается один раз и больше нигде не хранится: ни в файле, ни в логе.
+    print('✓ согласие получено. Добавьте эти строки в clients/<id>/.env клиента (и в менеджер паролей):\n')
+    print('\n'.join(f'{name}={value}' for name, value in zip(names, values, strict=True)))
+    print(
+        '\nв конфиге клиента: [inbox] auth = "google_oauth", imap_host = "imap.gmail.com".\n'
+        'Проверка: autostudio inbox check clients/<id>/inbox.toml --connect\n'
+        'Очистите историю терминала: refresh token даёт полный доступ к ящику.'
+    )

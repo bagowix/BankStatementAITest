@@ -8,15 +8,18 @@
 `admin_chat_ids` (общий чат сотрудников): расписание с именами и телефонами не должно
 попасть в семейный или публичный чат, куда кто-то добавил бота, даже если команду
 набрал владелец.
+
+Deep link `t.me/<bot>?start=instagram` приходит как `/start instagram`: метка уходит в
+`Incoming.source`, а движок запоминает её — владелец видит в отчёте, какой канал приводит
+записи. Запуск (long polling или вебхук) — в `server.py`.
 """
 
 import asyncio
-import datetime as dt
 import logging
 from collections.abc import Sequence
 from typing import Final
 
-from aiogram import Bot, Dispatcher, Router
+from aiogram import Bot, Router
 from aiogram.exceptions import (
     TelegramAPIError,
     TelegramBadRequest,
@@ -38,24 +41,23 @@ from aiogram.types import (
 )
 
 from autostudio.booking.admin import ADMIN_COMMANDS, AdminDesk
+from autostudio.booking.alarm import OperatorAlarm
 from autostudio.booking.callbacks import ADMIN_CANCEL, split
 from autostudio.booking.config import BookingConfig
 from autostudio.booking.engine import Engine
-from autostudio.booking.messages import DeliveryError, Incoming, Outgoing, RecipientGoneError, Sender, deliver
-from autostudio.booking.reminders import ReminderLoop
+from autostudio.booking.messages import DeliveryError, Incoming, Outgoing, RecipientGoneError, Sender
+from autostudio.booking.relay import Relay
 from autostudio.booking.texts import Texts
 from autostudio.clock import Clock, system_now
-from autostudio.errors import NotifyError
 from autostudio.notify import Notifier, clip
 
 logger = logging.getLogger(__name__)
 
 KEY_PREFIX: Final = 'tg:'
 _RETRY_AFTER_MAX_S: Final = 30
-# Один и тот же сбой (баг, недоступный администратор) — не чаще раза в час: поток
-# поддельных нажатий не должен превращаться в поток сообщений оператору.
-ALERT_EVERY: Final = dt.timedelta(hours=1)
 _COMMANDS: Final = (('start', 'cmd_start'), ('book', 'cmd_book'), ('my', 'cmd_my'), ('cancel', 'cmd_cancel'))
+# Апдейты, которые бот обрабатывает; остальные Telegram даже не присылает.
+ALLOWED_UPDATES: Final = ['message', 'callback_query']
 
 type Markup = InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove
 
@@ -139,6 +141,7 @@ class BookingBot:
             передаётся: в боевом режиме уведомления с именами и телефонами не пишутся в логи).
         operator: Канал оператора для сигнала о сбое или None.
         clock: Часы (ограничение частоты сигналов оператору).
+        alarm: Сигналы оператору (по умолчанию — свои, поверх `operator`).
     """
 
     def __init__(
@@ -151,16 +154,15 @@ class BookingBot:
         notifier: Notifier | None = None,
         operator: Notifier | None = None,
         clock: Clock = system_now,
+        alarm: OperatorAlarm | None = None,
     ) -> None:
         self._config = config
-        self._engine = engine
-        self._sender = sender
         self._texts = texts
-        self._notifier = notifier
-        self._operator = operator
-        self._clock = clock
         self._admin_ids = frozenset(config.booking.admin_chat_ids)
-        self._alerted: dict[str, dt.datetime] = {}
+        self._alarm = alarm or OperatorAlarm(operator, f'{config.client.name} / booking', clock=clock)
+        self._relay = Relay(
+            engine=engine, sender=sender, texts=texts, admins=self.admin_keys, notifier=notifier, alarm=self._alarm
+        )
 
     @property
     def admin_keys(self) -> list[str]:
@@ -198,6 +200,7 @@ class BookingBot:
             # Карточку контакта можно переслать чужую: «свой номер» — только когда Telegram
             # говорит, что карточка принадлежит отправителю.
             phone_verified=contact is not None and contact.user_id == user.id,
+            source=deep_link_payload(text) if message.chat.type == 'private' else None,
         )
 
     def incoming_from_callback(self, query: CallbackQuery) -> Incoming | None:
@@ -216,39 +219,7 @@ class BookingBot:
 
     async def process(self, incoming: Incoming) -> None:
         """Прогоняет событие через движок и доставляет ответы; сбой не оставляет покупателя без ответа."""
-        try:
-            replies = await self._engine.handle(incoming)
-        except Exception as exc:
-            # Граница адаптера: любой сбой (в том числе баг) — извинение покупателю и сигнал
-            # оператору, а не молчание бота. Трассировка — в лог.
-            logger.exception('сбой обработки сообщения от %s', incoming.user)
-            language = self._texts.resolve_language(incoming.language)
-            replies = [Outgoing(text=self._texts.get(language, 'error'))]
-            kind = type(exc).__name__
-            await self._alert(kind, f'⚠️ {self._config.client.name} / booking: сбой обработки сообщения: {kind}')
-        failed = await deliver(self._sender, incoming.user, replies, admins=self.admin_keys, notifier=self._notifier)
-        unreachable = sorted(set(failed) & set(self.admin_keys))
-        if unreachable:
-            # Владелец, не нажавший /start или заблокировавший бота, не узнает о записях —
-            # об этом должен узнать оператор, а не только лог.
-            await self._alert(
-                'admin_unreachable',
-                f'⚠️ {self._config.client.name} / booking: администратор {", ".join(unreachable)} не получает '
-                'сообщения бота (не нажал /start или заблокировал бота)',
-            )
-
-    async def _alert(self, kind: str, text: str) -> None:
-        if self._operator is None:
-            return
-        now = self._clock()
-        last = self._alerted.get(kind)
-        if last is not None and now - last < ALERT_EVERY:
-            return
-        self._alerted[kind] = now
-        try:
-            await self._operator.send(text)
-        except NotifyError as exc:
-            logger.error('оператор не уведомлён: %s', exc)
+        await self._relay.process(incoming)
 
     async def on_message(self, message: Message) -> None:
         """Обработчик сообщений aiogram."""
@@ -285,6 +256,19 @@ class BookingBot:
         return [BotCommand(command=name, description=self._texts.get(language, key)) for name, key in _COMMANDS]
 
 
+def deep_link_payload(text: str | None) -> str | None:
+    """Метка из `/start <payload>` (deep link `t.me/<bot>?start=<payload>`) как есть, или None.
+
+    Проверку формата делает движок (`domain.clean_source`): адаптер только достаёт аргумент.
+    """
+    if not text or not text.startswith('/'):
+        return None
+    command, rest = AdminDesk.parse_command(text)
+    if command != 'start' or not rest:
+        return None
+    return rest.split()[0]
+
+
 async def set_commands(bot: Bot, booking_bot: BookingBot, languages: Sequence[str]) -> None:
     """Публикует меню команд: по языку клиента Telegram и по умолчанию."""
     try:
@@ -293,28 +277,3 @@ async def set_commands(bot: Bot, booking_bot: BookingBot, languages: Sequence[st
             await bot.set_my_commands(booking_bot.commands(language), language_code=language)
     except TelegramAPIError as exc:
         logger.warning('меню команд не опубликовано: %s', _describe(exc))
-
-
-async def run_polling(bot: Bot, booking_bot: BookingBot, loop: ReminderLoop, languages: Sequence[str]) -> None:
-    """Боевой режим: long polling плюс цикл напоминаний до SIGINT/SIGTERM.
-
-    Args:
-        bot: Бот aiogram (сессию закрывает провайдер).
-        booking_bot: Склейка с движком.
-        loop: Цикл напоминаний.
-        languages: Языки покупателей (для меню команд).
-    """
-    dispatcher = Dispatcher()
-    dispatcher.include_router(booking_bot.router())
-    # Вебхук и long polling взаимоисключающи: если кто-то включал вебхук, getUpdates упадёт.
-    await bot.delete_webhook(drop_pending_updates=False)
-    await set_commands(bot, booking_bot, languages)
-    stop = asyncio.Event()
-    background = asyncio.create_task(loop.run(stop))
-    try:
-        await dispatcher.start_polling(
-            bot, handle_signals=True, close_bot_session=False, allowed_updates=['message', 'callback_query']
-        )
-    finally:
-        stop.set()
-        await background

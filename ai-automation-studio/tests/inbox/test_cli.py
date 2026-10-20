@@ -104,10 +104,11 @@ def test__check__sheet_and_notify_env_missing__reported(env, tmp_path, capsys):
     assert 'GOOGLE_APPLICATION_CREDENTIALS' in out and 'AUTOSTUDIO_NOTIFY_BOT_TOKEN' in out and 'HOOK_URL' in out
 
 
-def test__check__outlook_host__unsupported_with_workaround(env, tmp_path, capsys):
+def test__check__outlook_host_with_password__problem_points_to_microsoft_oauth(env, tmp_path, capsys):
     with pytest.raises(ConfigError):
         cli.check(_config(tmp_path, host='outlook.office365.com'), skip_env=True)
-    assert 'автопересылку' in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert 'auth = "microsoft_oauth"' in out and 'IMAP.AccessAsApp' in out
 
 
 def test__check__no_facts__warning(tmp_path, capsys):
@@ -157,7 +158,7 @@ def test__check__connect__login_rejected__provider_hint(server, tmp_path):
         ('imap.yandex.ru', 'Пароли приложений'),
         ('imap.zoho.eu', 'Application-Specific'),
         ('imap.mail.ru', 'внешнего приложения'),
-        ('outlook.office365.com', 'не поддерживает'),
+        ('outlook.office365.com', 'microsoft_oauth'),
         ('mail.example.com', 'IMAP включён'),
     ],
 )
@@ -238,10 +239,12 @@ async def _record(seen: dict[str, object], out: Path) -> str:
     return 'ok'
 
 
-def test__format_result__locked_aborted_errors():
-    assert 'пропуск' in cli.format_result(RunResult(folder='INBOX', locked=True))
+def test__format_result__aborted_errors_and_invoices():
     text = cli.format_result(RunResult(folder='INBOX', aborted='3 подряд', errors=['таблица']))
     assert '✗ остановлено: 3 подряд' in text and '✗ таблица' in text and 'категории: —' in text
+    assert 'счета' not in text
+    text = cli.format_result(RunResult(folder='INBOX', invoices_verified=2, invoices_unverified=1, invoice_rows=3))
+    assert 'счета: сверено 2, на ручную проверку 1, строк во вкладку счетов 3' in text
 
 
 def test__run__model_provider_not_set__refuses_to_run_on_stub(env, tmp_path):
@@ -282,7 +285,7 @@ def test__check__missing_env__hint_how_to_load_client_env(monkeypatch, capsys):
     monkeypatch.setenv('AUTOSTUDIO_LLM_PROVIDER', 'fake')
     with pytest.raises(ConfigError):
         cli.check(EXAMPLE)
-    assert 'uv run --env-file clients/<id>/.env' in capsys.readouterr().out
+    assert 'clients/<id>/.env подхватывается сам' in capsys.readouterr().out
 
 
 def test__check__connect__server_reason_shown_not_only_password_hint(server, tmp_path):

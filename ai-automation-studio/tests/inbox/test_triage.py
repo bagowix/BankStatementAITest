@@ -23,6 +23,8 @@ from autostudio.inbox.triage import (
     triage_email,
     unsupported_numbers,
     validate_triage,
+    VerifiedPhone,
+    normalize_phone,
     verify_budget,
     verify_phone,
     write_draft,
@@ -70,17 +72,38 @@ def test__validate__hallucinated_phone__dropped():
     assert 'phone' in result.corrected
 
 
-def test__validate__phone_rewritten_by_model__literal_from_email_kept():
+def test__validate__phone_rewritten_by_model__literal_from_email_kept_and_e164():
     result = validate_triage(_raw(phone='995599123456'), _email(), SECTION, [])
-    assert result.phone == '+995 599 12 34 56'
+    assert result.phone == '+995 599 12 34 56' and result.phone_e164 == '+995599123456'
     assert result.corrected == []
 
 
 def test__verify_phone__trunk_prefix_and_too_short__handled():
     texts = ['Телефон: 8 (916) 123-45-67, заказ 12345']
-    assert verify_phone('+7 916 123 45 67', texts) == '8 (916) 123-45-67'
+    assert verify_phone('+7 916 123 45 67', texts) == VerifiedPhone('8 (916) 123-45-67', '+79161234567')
     assert verify_phone('12345', texts) is None
     assert verify_phone(None, texts) is None
+    assert verify_phone('   ', texts) is None
+
+
+def test__verify_phone__model_copied_ru_trunk_format__found_via_fallback_region_only():
+    texts = ['Телефон для связи: 8 (916) 123-45-67']
+    assert verify_phone('8 (916) 123-45-67', texts, ['GE', 'RU']) == VerifiedPhone('8 (916) 123-45-67', '+79161234567')
+    # Без запасного региона такого номера в Грузии нет — телефон не подтверждается (а не угадывается).
+    assert verify_phone('8 (916) 123-45-67', texts, ['GE']) is None
+
+
+def test__verify_phone__wrong_country_code_completed_by_model__dropped():
+    # Регрессия: сравнение цифр «хвостом» принимало +44 599 12 34 56 за 599 12 34 56.
+    assert verify_phone('+44 599 12 34 56', ['Call 599 12 34 56']) is None
+    assert verify_phone('+7 599 12 34 56', ['Call +995 599 12 34 56']) is None
+
+
+def test__normalize_phone__regions_in_order__e164_or_none():
+    assert normalize_phone('599 12 34 56', ['GE']) == '+995599123456'
+    assert normalize_phone('8 916 123 45 67', ['GE', 'RU']) == '+79161234567'
+    assert normalize_phone('not a phone', ['GE']) is None
+    assert normalize_phone('123', ['GE']) is None
 
 
 def test__validate__email_only_if_literal_and_not_business_address():
@@ -288,8 +311,9 @@ def test__verify_phone__dates_booking_numbers_amounts__not_a_phone(body, propose
 
 
 def test__verify_phone__country_code_written_or_not__same_number():
-    assert verify_phone('+995 599 12 34 56', ['Call 599 12 34 56']) == '599 12 34 56'
-    assert verify_phone('599123456', ['WhatsApp: +995 599 12 34 56']) == '+995 599 12 34 56'
+    assert verify_phone('+995 599 12 34 56', ['Call 599 12 34 56']) == VerifiedPhone('599 12 34 56', '+995599123456')
+    found = verify_phone('599123456', ['WhatsApp: +995 599 12 34 56'])
+    assert found is not None and found.literal == '+995 599 12 34 56'
 
 
 @pytest.mark.parametrize(

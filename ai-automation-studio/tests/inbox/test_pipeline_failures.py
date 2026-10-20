@@ -5,7 +5,7 @@ import email
 
 import msgspec
 
-from autostudio.errors import LLMError, NotifyError
+from autostudio.errors import LLMError, NotifyError, kind_for_status
 from autostudio.inbox.heuristics import make_fake_llm, triage_heuristic
 from autostudio.inbox.imap import FakeFolder
 from autostudio.inbox.pipeline import MAX_ATTEMPTS, OUTAGE_GRACE, dry_run, model_outage, run_once
@@ -31,13 +31,28 @@ def _refusing(marker: str, error: LLMError) -> FakeLLM:
     return llm
 
 
-def test__model_outage__codes_and_connection_vs_content():
-    assert model_outage(LLMError('OpenAI 429: quota', status_code=429))
-    assert model_outage(LLMError('Anthropic 529: overloaded', status_code=529))
-    assert model_outage(LLMError('OpenAI недоступен: ConnectError'))
+def test__model_outage__by_error_kind_not_by_message_text():
+    assert model_outage(LLMError('OpenAI 429: quota', status_code=429, kind=kind_for_status(429)))
+    assert model_outage(LLMError('Anthropic 529: overloaded', status_code=529, kind=kind_for_status(529)))
+    assert model_outage(LLMError('OpenAI 401: bad key', status_code=401, kind=kind_for_status(401)))
+    assert model_outage(LLMError('что угодно', kind='outage'))
     assert not model_outage(LLMError('модель отказалась отвечать на этот ввод'))
-    assert not model_outage(LLMError('ответ модели не прошёл схему Triage'))
-    assert not model_outage(LLMError('OpenAI 400: bad input', status_code=400))
+    assert not model_outage(LLMError('OpenAI 400: bad input', status_code=400, kind=kind_for_status(400)))
+    # Регрессия: раньше слово «недоступен» в тексте делало отказ поломкой провайдера.
+    assert not model_outage(LLMError('товар недоступен в схеме ответа', kind='content'))
+
+
+async def test__run__wrong_key_or_model__emails_wait_operator_told_to_check_key(tmp_path):
+    def rejected(system: str, prompt: str) -> Triage:
+        raise LLMError('OpenAI 404: model not found', status_code=404, kind=kind_for_status(404))
+
+    h = Harness(tmp_path, llm=FakeLLM({Triage: rejected}))
+    h.box.add(make_email(**LEAD))
+    for attempt in range(MAX_ATTEMPTS + 1):
+        result = await run_once(h.config, h.deps, _later(attempt))
+        assert not result.ok and result.given_up == 0 and result.aborted is None
+        assert 'model' in result.errors[0] and 'проверьте ключ и AUTOSTUDIO_LLM_MODEL' in result.errors[1]
+    assert h.sheet() == [] and not any('Opening hours' in call.prompt for call in h.llm.calls)
 
 
 async def test__run__three_model_refusals_in_a_row__no_breaker_lead_processed_refusals_given_up(tmp_path):
@@ -78,7 +93,9 @@ async def test__run__model_refuses_everything_on_fresh_deploy__postponed_not_giv
 def _rejecting_everything(status_code: int = 400) -> FakeLLM:
     def rejected(system: str, prompt: str) -> Triage:
         raise LLMError(
-            "OpenAI 400: Unsupported value: 'reasoning.effort' does not support 'minimal'", status_code=status_code
+            "OpenAI 400: Unsupported value: 'reasoning.effort' does not support 'minimal'",
+            status_code=status_code,
+            kind=kind_for_status(status_code),
         )
 
     llm = make_fake_llm()
@@ -126,7 +143,7 @@ async def test__run__lone_refused_email_in_quiet_inbox__probe_answers_email_give
 async def test__run__probe_hits_rate_limit__refusals_wait_error_names_outage(tmp_path):
     def picky(system: str, prompt: str) -> Triage:
         if 'Opening hours' in prompt:
-            raise LLMError('OpenAI 429: rate limit', status_code=429)
+            raise LLMError('OpenAI 429: rate limit', status_code=429, kind='outage')
         raise LLMError('модель отказалась отвечать на этот ввод')
 
     h = Harness(tmp_path, llm=FakeLLM({Triage: picky}))
@@ -147,7 +164,7 @@ async def test__run__refusal_and_success_in_same_run__no_probe_needed(tmp_path):
 
 
 async def test__run__stuck_emails_at_head__fresh_email_processed_first_next_run(tmp_path):
-    h = Harness(tmp_path, llm=_refusing('Poison', LLMError('OpenAI 500: boom', status_code=500)))
+    h = Harness(tmp_path, llm=_refusing('Poison', LLMError('OpenAI 500: boom', status_code=500, kind='outage')))
     for index in range(3):
         h.box.add(make_email(subject=f'Poison {index}', message_id=f'<p{index}@x.example>', body='Price?'))
     first = await run_once(h.config, h.deps, NOW)
@@ -173,7 +190,7 @@ async def test__run__notifier_down__postponed_reported_then_row_with_triage_afte
     assert second.given_up == 1
     row = h.sheet()[1]
     assert row[2:5] == ['Tour price', 'lead', 'normal']
-    assert row[8] == "'+995 599 12 34 56" and row[13] == 'yes'
+    assert row[8] == '+995 599 12 34 56' and row[13] == 'yes'
     assert 'alert to you was not delivered' in row[14]
     assert 'inbox.lead_found' in h.event_kinds() and 'inbox.failed' in h.event_kinds()
     assert len(h.llm.calls) == calls and len(h.box.appended) == 1
@@ -205,7 +222,7 @@ async def test__run__notify_fails_for_one_email_while_channel_works__given_up_wi
         assert result.ok and result.processed == 1
     assert result.given_up == 1 and len(owner.sent) == MAX_ATTEMPTS
     fragile = next(row for row in h.sheet()[1:] if row[2] == 'Fragile price question')
-    assert fragile[3] == 'lead' and fragile[8] == "'+995 599 11 22 33" and fragile[13] == 'yes'
+    assert fragile[3] == 'lead' and fragile[8] == '+995 599 11 22 33' and fragile[13] == 'yes'
     assert 'alert to you was not delivered' in fragile[14]
 
 
@@ -326,7 +343,7 @@ async def test__run__rate_limit_on_draft_after_model_answered__waits_not_counted
     llm = make_fake_llm()
 
     def limited(system: str, prompt: str) -> str:
-        raise LLMError('OpenAI 429: rate limit', status_code=429)
+        raise LLMError('OpenAI 429: rate limit', status_code=429, kind='outage')
 
     llm.set_writer(limited)
     h = Harness(tmp_path, llm=llm)
@@ -419,7 +436,7 @@ async def test__run__refusal_while_model_also_down__refusal_waits_too(tmp_path):
     def flaky(system: str, prompt: str) -> Triage:
         if 'Refuse' in prompt:
             raise LLMError('модель отказалась отвечать на этот ввод')
-        raise LLMError('OpenAI 503: overloaded', status_code=503)
+        raise LLMError('OpenAI 503: overloaded', status_code=503, kind='outage')
 
     h = Harness(tmp_path, llm=FakeLLM({Triage: flaky}))
     h.store.mark_healthy('model', NOW)

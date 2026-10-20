@@ -163,6 +163,21 @@ _EN: Final[dict[str, str]] = {
     'action_created': 'created',
     'action_cancelled': 'cancelled',
     'action_rescheduled': 'rescheduled',
+    'channel_telegram': 'Telegram',
+    'channel_whatsapp': 'WhatsApp',
+    'channel_console': 'console',
+    'channel_other': 'other',
+    'calendar_booking': 'Booking #{id} · {staff}',
+    # WhatsApp: подписи списков и кнопок (лимиты Meta: кнопка списка — 20 знаков, раздел — 24)
+    'wa_list_button': 'Choose',
+    'wa_section': 'Options',
+    'wa_more': 'More…',
+    'wa_choose': 'Please choose:',
+    'wa_use_my_number': 'Use this number',
+    'wa_opt_in': 'By confirming, you agree to get a reminder about this visit from {business} here in WhatsApp. '
+    'Reply STOP to opt out.',
+    'wa_opted_out': "Done — {business} won't send you reminders here. Reply START to turn them back on.",
+    'wa_opted_in': 'Reminders from {business} are on again.',
 }
 
 _RU: Final[dict[str, str]] = {
@@ -309,11 +324,26 @@ _RU: Final[dict[str, str]] = {
     'action_created': 'создана',
     'action_cancelled': 'отменена',
     'action_rescheduled': 'перенесена',
+    'channel_telegram': 'Telegram',
+    'channel_whatsapp': 'WhatsApp',
+    'channel_console': 'консоль',
+    'channel_other': 'другое',
+    'calendar_booking': 'Запись №{id} · {staff}',
+    'wa_list_button': 'Выбрать',
+    'wa_section': 'Варианты',
+    'wa_more': 'Ещё…',
+    'wa_choose': 'Выберите, пожалуйста:',
+    'wa_use_my_number': 'Этот номер',
+    'wa_opt_in': 'Подтверждая запись, вы соглашаетесь получить напоминание о визите от {business} здесь, в WhatsApp. '
+    'Чтобы отписаться, ответьте STOP.',
+    'wa_opted_out': 'Готово — {business} не будет присылать вам напоминания. Чтобы включить снова, ответьте START.',
+    'wa_opted_in': 'Напоминания от {business} снова включены.',
 }
 
 DEFAULT_TEXTS: Final[Mapping[str, Mapping[str, str]]] = {'en': _EN, 'ru': _RU}
 
-# Заголовки вкладок таблицы владельца: на языке владельца, не переопределяются.
+# Заголовки вкладок таблицы владельца: на языке владельца, не переопределяются. Цена и
+# длительность — отдельные числовые колонки (валюта рядом): таблица их суммирует.
 BOOKINGS_HEADER: Final[Mapping[str, list[str]]] = {
     'en': [
         'Logged at',
@@ -326,7 +356,9 @@ BOOKINGS_HEADER: Final[Mapping[str, list[str]]] = {
         'Customer',
         'Phone',
         'Price',
+        'Currency',
         'Source',
+        'Channel',
     ],
     'ru': [
         'Когда',
@@ -339,12 +371,26 @@ BOOKINGS_HEADER: Final[Mapping[str, list[str]]] = {
         'Клиент',
         'Телефон',
         'Цена',
+        'Валюта',
+        'Как записался',
         'Канал',
     ],
 }
 SCHEDULE_HEADER: Final[Mapping[str, list[str]]] = {
-    'en': ['Date', 'Start', 'End', 'Staff', 'Service', 'Customer', 'Phone', 'Booking'],
-    'ru': ['Дата', 'Начало', 'Конец', 'Специалист', 'Услуга', 'Клиент', 'Телефон', 'Запись'],
+    'en': ['Date', 'Start', 'End', 'Minutes', 'Staff', 'Service', 'Price', 'Currency', 'Customer', 'Phone', 'Booking'],
+    'ru': [
+        'Дата',
+        'Начало',
+        'Конец',
+        'Минут',
+        'Специалист',
+        'Услуга',
+        'Цена',
+        'Валюта',
+        'Клиент',
+        'Телефон',
+        'Запись',
+    ],
 }
 
 _WEEKDAYS_SHORT: Final[Mapping[str, tuple[str, ...]]] = {

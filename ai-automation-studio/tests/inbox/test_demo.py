@@ -9,21 +9,31 @@ from autostudio.inbox.demo import run_demo
 
 async def test__run_demo__full_offline_scenario__idempotent_second_run(tmp_path):
     summary = await run_demo(tmp_path)
-    assert 'Run 1: 10 processed, 0 failed; 2 sorted by rules without AI' in summary
+    assert 'Run 1: 12 processed, 0 failed; 2 sorted by rules without AI' in summary
     assert 'Run 2 (same mailbox, 15 min later): 0 processed, 0 model calls, 0 drafts' in summary
     assert 'BLOCKED: injection, operator alerted' in summary
     assert 'phone +1 415 555 0134' in summary and 'was dropped' in summary
-    assert 'booking_request 3' in summary and 'lead 3' in summary
+    assert 'booking_request 3' in summary and 'lead 3' in summary and 'invoice 3' in summary
+    assert 'Invoices from PDF attachments: 1 verified, 2 need a manual check' in summary
     drafts = sorted((tmp_path / 'drafts').glob('*.eml'))
     assert len(drafts) == 6
     with (tmp_path / 'Inbox.csv').open(encoding='utf-8', newline='') as fh:
         rows = list(csv.reader(fh))
-    assert len(rows) == 11
+    assert len(rows) == 13
     injected = next(row for row in rows if row[2].startswith('Group booking for 20'))
     assert injected[13] == 'no' and 'suspicious' in injected[14]
+    # Телефон «8 (916) 123-45-67» из письма на русском сохранён: запасной регион RU в конфиге.
+    assert next(row for row in rows if row[1].startswith('Дмитрий'))[8] == '8 (916) 123-45-67'
+    with (tmp_path / 'Invoices.csv').open(encoding='utf-8', newline='') as fh:
+        invoices = {row['File']: row for row in csv.DictReader(fh)}
+    assert invoices['KT-2026-117.pdf']['Status'] == 'verified' and invoices['KT-2026-117.pdf']['Total'] == '1416.00'
+    assert invoices['WC-0931.pdf']['Total'] == '⚠ 1000.00' and invoices['WC-0931.pdf']['Difference'] == '100.00'
+    assert invoices['INV-2026-0412.pdf']['Status'] == 'not read — open the PDF'
+    wine = next(row for row in rows if row[2].startswith('Invoice WC-0931'))
+    assert 'invoice NOT verified' in wine[14]
 
     again = await run_demo(tmp_path)
-    assert 'Run 1: 10 processed' in again
+    assert 'Run 1: 12 processed' in again
     assert len(list((tmp_path / 'drafts').glob('*.eml'))) == 6
 
 
@@ -58,7 +68,7 @@ async def test__run_demo__legacy_demo_dir_without_marker__accepted(tmp_path):
     await run_demo(tmp_path)
     (tmp_path / '.autostudio-demo').unlink()
     summary = await run_demo(tmp_path)
-    assert 'Run 1: 10 processed' in summary and (tmp_path / '.autostudio-demo').exists()
+    assert 'Run 1: 12 processed' in summary and (tmp_path / '.autostudio-demo').exists()
 
 
 async def test__run_demo__out_is_a_file__config_error(tmp_path):

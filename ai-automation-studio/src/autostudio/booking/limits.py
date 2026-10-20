@@ -1,4 +1,4 @@
-"""Ограничение частоты по ключу: скользящее окно в памяти процесса.
+"""Ограничение частоты: скользящее окно по ключу и темп рассылки напоминаний.
 
 Бот публичный: любой может написать ему сотню сообщений подряд. Каждое свободное
 сообщение — вызов модели (деньги оператора), а каждая просьба позвать человека —
@@ -6,8 +6,11 @@
 начинается заново, и это не страшно — ограничение защищает от потока, а не ведёт учёт.
 """
 
+import asyncio
 import datetime as dt
+import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Final
 
@@ -162,3 +165,52 @@ class HandoffGate:
 
     def __len__(self) -> int:
         return len(self._sent)
+
+
+class SendThrottle:
+    """Темп рассылки: не больше `per_second` сообщений в секунду всего и одно в `chat_interval` в чат.
+
+    Telegram просит не больше ~30 сообщений в секунду при рассылке и около одного в секунду в
+    один чат, иначе отвечает 429 и на время замолкает для всех — в том числе для живых
+    покупателей, которым бот отвечает в эту же секунду. Утренние напоминания салона — как раз
+    такая рассылка, поэтому они идут с запасом: 25 в секунду, одно в секунду в чат.
+
+    Args:
+        per_second: Сообщений в секунду на всю рассылку.
+        chat_interval: Пауза между сообщениями в один чат, секунды.
+        monotonic: Часы для пауз (в тестах — свои).
+        sleep: Ожидание (в тестах — без настоящего сна).
+    """
+
+    def __init__(
+        self,
+        *,
+        per_second: float = 25.0,
+        chat_interval: float = 1.0,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        if per_second <= 0 or chat_interval < 0:
+            raise ValueError('per_second > 0, chat_interval >= 0')
+        self._spacing = 1.0 / per_second
+        self._chat_interval = chat_interval
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._next_any = 0.0
+        self._next_chat: dict[str, float] = {}
+
+    async def wait(self, chat: str) -> None:
+        """Ждёт, пока можно отправить следующее сообщение в этот чат, и занимает это место.
+
+        Args:
+            chat: Ключ чата.
+        """
+        now = self._monotonic()
+        ready = max(now, self._next_any, self._next_chat.get(chat, 0.0))
+        if ready > now:
+            await self._sleep(ready - now)
+        self._next_any = ready + self._spacing
+        self._next_chat[chat] = ready + self._chat_interval
+        if len(self._next_chat) > _PRUNE_ABOVE:
+            for key in [key for key, moment in self._next_chat.items() if moment <= ready]:
+                del self._next_chat[key]
