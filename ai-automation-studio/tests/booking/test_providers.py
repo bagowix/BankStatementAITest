@@ -4,8 +4,8 @@ from dishka import Provider, Scope, make_async_container, provide
 
 from autostudio.booking.config import BookingConfig
 from autostudio.booking.engine import Engine
-from autostudio.booking.messages import Sender
-from autostudio.booking.providers import BookingProvider, TelegramProvider
+from autostudio.booking.messages import RoutingSender, Sender
+from autostudio.booking.providers import BookingProvider, ChannelProvider
 from autostudio.booking.reminders import ReminderLoop
 from autostudio.booking.store import BookingStore
 from autostudio.booking.telegram import BookingBot, TelegramSender
@@ -18,7 +18,7 @@ from tests.booking.helpers import Recorder
 
 
 def container(tmp_path, config: BookingConfig, *, telegram: bool = False):
-    providers = [CoreProvider(), BookingProvider(), *([TelegramProvider()] if telegram else [])]
+    providers = [CoreProvider(), BookingProvider(), *([ChannelProvider()] if telegram else [])]
     settings = Settings(data_dir=tmp_path / 'data')
     return make_async_container(*providers, context={Settings: settings, BookingConfig: config})
 
@@ -40,7 +40,8 @@ async def test__telegram_provider__valid_token__bot_sender_loop_built(tmp_path, 
     monkeypatch.setenv('BOOKING_BOT_TOKEN', '123456:' + 'A' * 35)
     built = container(tmp_path, config, telegram=True)
     bot = await built.get(Bot)
-    assert isinstance(await built.get(Sender), TelegramSender)
+    assert isinstance(await built.get(Sender), RoutingSender)
+    assert isinstance(await built.get(TelegramSender), TelegramSender)
     assert isinstance(await built.get(BookingBot), BookingBot)
     assert isinstance(await built.get(ReminderLoop), ReminderLoop)
     await built.close()
@@ -89,8 +90,15 @@ async def test__booking_provider__real_provider__resilient_llm_alerts_operator_a
     )
     llm = await built.get(LLMClient)
     assert isinstance(llm, ResilientLLM)
-    await llm._on_fallback(LLMError('OpenAI 429: quota'))  # хук, который ядро зовёт при деградации
-    assert recorder.texts == ['⚠️ Test Barbers / booking: модель недоступна, бот на правилах: OpenAI 429: quota']
+    # Хук, который ядро зовёт при деградации: недоступность — сигнал оператору, а модель, не
+    # справившаяся с одной репликой (`content`), — нет.
+    await llm._on_fallback(LLMError('OpenAI 429: quota', status_code=429, kind='outage'))
+    await llm._on_fallback(LLMError('OpenAI 401: key', status_code=401, kind='config'))
+    await llm._on_fallback(LLMError('ответ не по схеме'))
+    assert recorder.texts == [
+        '⚠️ Test Barbers / booking: модель недоступна (провайдер недоступен), бот на правилах: OpenAI 429: quota',
+        '⚠️ Test Barbers / booking: модель недоступна (проверьте ключ, права и модель), бот на правилах: OpenAI 401: key',
+    ]
     await built.close()
 
 
@@ -99,7 +107,7 @@ async def test__booking_provider__no_operator__degradation_hook_silent(tmp_path,
     settings = Settings(llm_provider=LLMProvider.OPENAI, llm_model='gpt-5.4-mini', data_dir=tmp_path / 'data')
     built = make_async_container(CoreProvider(), BookingProvider(), context={Settings: settings, BookingConfig: config})
     llm = await built.get(LLMClient)
-    await llm._on_fallback(LLMError('down'))
+    await llm._on_fallback(LLMError('down', kind='outage'))
     await built.close()
 
 
@@ -130,9 +138,9 @@ async def test__telegram_provider__console_notify__owner_alert_not_printed(tmp_p
     config = msgspec.structs.replace(make_config(), notify=NotifyConfig(console=True))
     built = container(tmp_path, config, telegram=True)
     booking_bot = await built.get(BookingBot)
-    assert booking_bot._notifier is None
+    assert booking_bot.notifier is None
     alert = Outgoing(to=ADMINS, text='Customer: Anna, +995 555 12 34 56')
-    await deliver(Recorder(), 'tg:1', [alert], admins=booking_bot.admin_keys, notifier=booking_bot._notifier)
+    await deliver(Recorder(), 'tg:1', [alert], admins=booking_bot.admin_keys, notifier=booking_bot.notifier)
     assert '+995' not in capsys.readouterr().out
     await built.close()
 
@@ -168,3 +176,47 @@ def test__csv_dir_problem__writable_file_in_way_or_no_rights__reported(tmp_path,
     assert 'не каталог' in providers.csv_dir_problem(blocker / 'out')
     monkeypatch.setattr(providers.os, 'access', lambda path, mode: False)
     assert 'нет прав на запись' in providers.csv_dir_problem(tmp_path / 'out')
+
+
+async def test__booking_provider__calendar_configured__google_calendar_and_service_wired(tmp_path, monkeypatch):
+    from autostudio.booking.gcal import GoogleCalendar
+    from autostudio.booking.providers import CalendarLink, CalendarParts
+    from autostudio.booking.service import BookingService
+    from tests.booking.helpers import make_config
+
+    config = make_config(calendar={'calendar_id': 'salon@x'})
+    monkeypatch.delenv('GOOGLE_APPLICATION_CREDENTIALS', raising=False)
+    built = container(tmp_path, config)
+    with pytest.raises(ConfigError, match='GOOGLE_APPLICATION_CREDENTIALS'):
+        await built.get(CalendarLink)
+    await built.close()
+    monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS', str(tmp_path / 'key.json'))
+    built = container(tmp_path, config)
+    assert isinstance((await built.get(CalendarLink)).api, GoogleCalendar)
+    calendar = await built.get(CalendarParts)
+    assert calendar.availability is not None and calendar.sync is not None
+    assert isinstance(await built.get(BookingService), BookingService)
+    await built.close()
+    plain = container(tmp_path, make_config())
+    parts = await plain.get(CalendarParts)
+    assert parts.availability is None and parts.sync is None
+    await plain.close()
+
+
+async def test__channel_provider__whatsapp__routing_sender_and_endpoint(tmp_path, monkeypatch):
+    from autostudio.booking.providers import WhatsAppEndpoint
+    from autostudio.booking.whatsapp import WhatsAppBot
+    from tests.booking.helpers import make_config
+
+    monkeypatch.setenv('BOOKING_BOT_TOKEN', '123456:' + 'A' * 35)
+    for name in ('WHATSAPP_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_VERIFY_TOKEN'):
+        monkeypatch.setenv(name, f'{name.lower()}-value')
+    built = container(tmp_path, make_config(whatsapp={'phone_number_id': '106540352242922'}), telegram=True)
+    sender = await built.get(Sender)
+    assert isinstance(sender, RoutingSender) and set(sender._routes) == {'tg', 'wa'}
+    assert isinstance((await built.get(WhatsAppEndpoint)).bot, WhatsAppBot)
+    await built.close()
+    plain = container(tmp_path, make_config(), telegram=True)
+    assert (await plain.get(WhatsAppEndpoint)).bot is None
+    assert set((await plain.get(Sender))._routes) == {'tg'}
+    await plain.close()

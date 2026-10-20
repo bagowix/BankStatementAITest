@@ -49,8 +49,8 @@ class Relay:
         self._alarm = alarm
 
     @property
-    def admins(self) -> list[str]:
-        return list(self._admins)
+    def notifier(self) -> Notifier | None:
+        return self._notifier
 
     async def process(self, incoming: Incoming, *, shape: Shape | None = None) -> list[str]:
         """Обрабатывает событие и доставляет ответы.

@@ -1,0 +1,52 @@
+# Образец профиля оператора для `autostudio office` (счета, книга поступлений, договоры).
+#
+# Скопируйте в operator.toml в корне репозитория и впишите реквизиты своего ИП:
+#     cp operator.example.toml operator.toml
+# operator.toml в .gitignore: репозиторий зеркалируется в публичный, а IBAN и адрес ИП
+# туда попадать не должны. Здесь — только вымышленные данные.
+#
+# Другой путь к файлу: флаг --operator или переменная AUTOSTUDIO_OPERATOR.
+# Проверка при каждом запуске: IBAN (контрольная сумма ISO 13616), форма SWIFT/BIC,
+# 9–11 цифр ID, e-mail. Образцовый IBAN ниже намеренно не проходит проверку — счёт с
+# чужими или выдуманными реквизитами не выпустится.
+
+# Наименование для счетов — как в выписке из реестра ИП.
+legal_name = "Individual Entrepreneur Jane Example"
+# Для счетов на русском (необязательно).
+legal_name_ru = "ИП Джейн Пример"
+# Имя человека для договоров ({{NAME}}). Пусто — берётся legal_name без «Individual Entrepreneur».
+owner_name = "Jane Example"
+# Идентификационный номер ИП.
+id_number = "000000000"
+# Юридический адрес ИП.
+address = "Georgia, Batumi, Example Street 1, Apartment 1"
+
+# Счёт ИП. В счёте клиенту печатаются получатель, IBAN, банк, SWIFT и номер счёта как назначение платежа.
+bank_name = "JSC Example Bank"
+iban = "GE00XX0000000000000000"
+swift = "XXXXGE22"
+
+email = "jane@example.com"
+# Необязательные контакты: попадают в шапку счёта.
+phone = "+995 500 00 00 00"
+website = "https://example.com"
+# Telegram без @ — для договоров ({{TELEGRAM}}).
+telegram = "jane_example"
+
+# Префикс номера счёта: AS-2026-001, AS-2026-002, … (нумерация по календарному году).
+invoice_prefix = "AS-"
+# Валюта счёта по умолчанию: USD, EUR или GEL.
+default_currency = "USD"
+
+# Строка о налогах внизу счёта. Формулировку подтвердите у бухгалтера (docs/office.md).
+[tax_note]
+en = "Small Business status holder — VAT is not charged."
+ru = "Статус малого бизнеса — НДС не начисляется."
+
+# Остальные поля {{…}} шаблонов договоров docs/legal (одни для всех клиентов).
+# Имя, ID, адрес, e-mail, Telegram и банк берутся из полей выше.
+[contract_fields]
+SERVER_LOCATION = "Example Country (city)"
+HOSTING_PROVIDER = "Example Hosting GmbH"
+BACKUP_PROVIDER = "Example Storage Ltd"
+BACKUP_LOCATION = "Example Country"

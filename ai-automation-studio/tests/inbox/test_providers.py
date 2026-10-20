@@ -75,3 +75,58 @@ async def test__run__real_provider_spend_limit__email_waits_no_stub_draft(tmp_pa
     assert not result.ok and result.aborted is None and 'model' in result.errors[0]
     assert result.processed == 0 and result.drafts == 0 and h.box.appended == [] and h.owner.sent == []
     assert h.sheet() == []
+
+
+async def test__build_mailbox__password_oauth_google_and_microsoft__right_login_method(monkeypatch):
+    import httpx
+
+    from autostudio.inbox.google_oauth import GoogleRefreshTokenProvider
+    from autostudio.inbox.oauth import MicrosoftClientCredentialsProvider
+    from autostudio.inbox.providers import build_mailbox, build_token_provider
+
+    env = {
+        'INBOX_IMAP_USER': 'info@acme.example',
+        'INBOX_IMAP_PASSWORD': 'app-pass',
+        'INBOX_OAUTH_CLIENT_ID': 'cid',
+        'INBOX_OAUTH_CLIENT_SECRET': 'secret',
+        'INBOX_OAUTH_REFRESH_TOKEN': '1//refresh',
+        'INBOX_OAUTH_TENANT_ID': 'contoso.onmicrosoft.com',
+    }
+    async with httpx.AsyncClient() as http:
+        password = build_mailbox(make_config().inbox, env, http)
+        assert password.user == 'info@acme.example' and build_token_provider(make_config().inbox, env, http) is None
+        google = build_token_provider(make_config(auth='google_oauth').inbox, env, http)
+        assert isinstance(google, GoogleRefreshTokenProvider)
+        microsoft = build_token_provider(make_config(auth='microsoft_oauth').inbox, env, http)
+        assert isinstance(microsoft, MicrosoftClientCredentialsProvider)
+        box = build_mailbox(make_config(auth='microsoft_oauth').inbox, {**env, 'INBOX_IMAP_PASSWORD': ''}, http)
+        assert box.user == 'info@acme.example'  # пароль при OAuth не нужен и не читается
+
+
+async def test__build_mailbox__oauth_variable_missing__config_error_names_it():
+    import httpx
+    import pytest
+
+    from autostudio.errors import ConfigError
+    from autostudio.inbox.providers import build_mailbox
+
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(ConfigError, match='INBOX_OAUTH_REFRESH_TOKEN'):
+            build_mailbox(
+                make_config(auth='google_oauth').inbox,
+                {'INBOX_IMAP_USER': 'a@b.example', 'INBOX_OAUTH_CLIENT_ID': 'c', 'INBOX_OAUTH_CLIENT_SECRET': 's'},
+                http,
+            )
+
+
+async def test__inbox_provider__events_at_shared_events_path(monkeypatch, tmp_path):
+    from autostudio.clientconf import events_path
+
+    monkeypatch.setenv('INBOX_IMAP_USER', 'info@acme.example')
+    monkeypatch.setenv('INBOX_IMAP_PASSWORD', 'app-pass')
+    settings = Settings.from_env({'AUTOSTUDIO_DATA_DIR': str(tmp_path)})
+    config = make_config()
+    container = make_async_container(CoreProvider(), InboxProvider(), context={Settings: settings, InboxConfig: config})
+    await container.get(InboxDeps)
+    assert events_path(tmp_path, config.client).exists()
+    await container.close()

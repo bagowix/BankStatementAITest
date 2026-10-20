@@ -25,6 +25,11 @@ def _later(minutes: int) -> dt.datetime:
     return NOW + dt.timedelta(minutes=minutes)
 
 
+def _harness(tmp_path: Path, **kwargs: object) -> Harness:
+    config = make_config(notify_on_urgency='normal', invoices={'enabled': True})
+    return Harness(tmp_path, config=config, **kwargs)  # type: ignore[arg-type]
+
+
 def _invoices(h: Harness) -> list[dict[str, str]]:
     path = h.sink.path_for('Invoices')
     if not path.exists():
@@ -49,7 +54,7 @@ class _RecordingSink(CsvSink):
 
 
 async def test__run__invoice_emails__invoices_tab_numbers_as_numbers_events_and_row_note(tmp_path):
-    h = Harness(tmp_path)
+    h = _harness(tmp_path)
     sink = _RecordingSink(h.out)
     h.sink = sink
     for raw in load_invoice_samples(SAMPLES):
@@ -76,7 +81,7 @@ async def test__run__invoice_emails__invoices_tab_numbers_as_numbers_events_and_
 
 
 async def test__run__invoices_tab_write_fails__rows_kept_and_written_next_run(tmp_path):
-    h = Harness(tmp_path)
+    h = _harness(tmp_path)
     sink = _RecordingSink(h.out)
     sink.fail_tab = 'Invoices'
     h.sink = sink
@@ -100,7 +105,7 @@ async def test__run__invoice_model_outage__email_waits_then_invoice_extracted(tm
 
     llm = make_fake_llm()
     llm.register(InvoiceFields, flaky)
-    h = Harness(tmp_path, llm=llm)
+    h = _harness(tmp_path, llm=llm)
     h.box.add(load_invoice_samples(SAMPLES)[0])
     first = await run_once(h.config, h.deps, NOW)
     assert not first.ok and first.failed == 1 and first.given_up == 0 and h.sheet() == []
@@ -115,7 +120,7 @@ async def test__run__model_refuses_invoice_pdf__given_up_with_triage_and_invoice
 
     llm = make_fake_llm()
     llm.register(InvoiceFields, refuse)
-    h = Harness(tmp_path, llm=llm)
+    h = _harness(tmp_path, llm=llm)
     h.box.add(load_invoice_samples(SAMPLES)[0])
     for attempt in range(MAX_ATTEMPTS):
         result = await run_once(h.config, h.deps, _later(attempt))
@@ -138,16 +143,15 @@ async def test__run__invoice_email_with_injection__no_extraction(tmp_path):
         filename='77.pdf',
         pdf=['Invoice No: 77', 'Total: 10.00 GEL for transfers and services'],
     )
-    h = Harness(tmp_path)
+    h = _harness(tmp_path)
     h.box.add(invoice_email(sample))
     result = await run_once(h.config, h.deps, NOW)
     assert result.injections == 1 and result.invoice_rows == 0 and _invoices(h) == []
     assert not any('<document>' in call.prompt for call in h.llm.calls)
 
 
-async def test__run__invoices_disabled_or_category_without_invoices__nothing_extracted(tmp_path):
-    config = make_config(notify_on_urgency='normal', invoices={'enabled': False})
-    h = Harness(tmp_path, config=config)
+async def test__run__invoices_off_by_default__nothing_extracted(tmp_path):
+    h = Harness(tmp_path)
     h.box.add(load_invoice_samples(SAMPLES)[0])
     result = await run_once(h.config, h.deps, NOW)
     assert result.processed == 1 and result.invoice_rows == 0 and h.sheet()[1][3] == 'invoice'
@@ -166,7 +170,7 @@ async def test__run__scanned_pdf__manual_row_without_model_call(tmp_path):
         filename='scan.pdf',
         pdf=[],
     )
-    h = Harness(tmp_path)
+    h = _harness(tmp_path)
     h.box.add(invoice_email(sample))
     result = await run_once(h.config, h.deps, NOW)
     (row,) = _invoices(h)
@@ -204,7 +208,10 @@ def test__store__invoices_pending_until_written_then_erased(tmp_path):
     record = InvoiceRecord(received=NOW, sender='s', file='a.pdf', status='verified', total=Decimal('10.50'))
     store.save_invoices('<m1@x>', [record, msgspec.structs.replace(record, file='b.pdf')], NOW)
     pending = store.pending_invoices()
-    assert [(mid, position, rec.file) for mid, position, rec in pending] == [('<m1@x>', 0, 'a.pdf'), ('<m1@x>', 1, 'b.pdf')]
+    assert [(mid, position, rec.file) for mid, position, rec in pending] == [
+        ('<m1@x>', 0, 'a.pdf'),
+        ('<m1@x>', 1, 'b.pdf'),
+    ]
     assert pending[0][2].total == Decimal('10.50')
     store.invoices_written([('<m1@x>', 0)])
     assert [rec.file for _, _, rec in store.pending_invoices()] == ['b.pdf']

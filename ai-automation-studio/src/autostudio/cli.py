@@ -25,6 +25,8 @@ app = cyclopts.App(
 
 for _info in PACKAGES.values():
     app.command(_info.cli, name=_info.name, help=_info.title)
+# Офис оператора — не пакет для клиента (нет демо и метрик), но подключается так же лениво.
+app.command('autostudio.office.cli:app', name='office', help='Бумаги оператора: счета, налог 1%, договоры')
 
 
 def _parse_month(value: str) -> dt.date:

@@ -93,6 +93,9 @@ class AdminDesk:
     @staticmethod
     def parse_command(text: str) -> tuple[str, str]:
         """`/today@DemoBot args` → (`today`, `args`): в группах Telegram добавляет имя бота."""
+        # Не `aiogram.filters.Command.extract_command`: разбор общий для консоли и WhatsApp, а движок не
+        # знает про Telegram. На случаях из тестов результаты совпадают, кроме регистра «/Today»
+        # (var/review_booking/compare_libraries.py).
         head, _, rest = text.strip().partition(' ')
         return head.removeprefix('/').split('@', 1)[0].lower(), rest.strip()
 

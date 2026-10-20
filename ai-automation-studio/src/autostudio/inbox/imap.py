@@ -340,6 +340,9 @@ class ImapMailBox:
             # Причина сервера нужна оператору: «слишком много подключений» или «IMAP выключен»
             # лечатся не сменой пароля. Логин, пароль и токен из текста вычищаются.
             reason = self._scrub(str(exc))
+            if self._tokens is not None:
+                # Токен не принят: следующий вход возьмёт свежий, а не тот же из памяти.
+                self._tokens.invalidate()
             raise MailboxError(
                 f'IMAP {self._host}: вход не выполнен: {reason}{self._login_hint(reason, responder)}'
             ) from None
@@ -357,8 +360,6 @@ class ImapMailBox:
     def _login_hint(self, reason: str, responder: XOAuth2Responder | None) -> str:
         if responder is None or self._tokens is None:
             return ' — проверьте логин и пароль приложения (не основной пароль)' if _AUTH_FAILED.search(reason) else ''
-        # Токен не принят: следующий вход возьмёт свежий, а не тот же из памяти.
-        self._tokens.invalidate()
         detail = describe_token_error(responder.error)
         server = f' ({detail})' if detail else ''
         return f'{server} — {self._tokens.label} OAuth: {self._tokens.hint}'

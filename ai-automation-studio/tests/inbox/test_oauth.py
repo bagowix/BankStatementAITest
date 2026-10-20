@@ -49,7 +49,10 @@ def test__xoauth2_responder__payload_once_then_empty_answer_to_error_continuatio
 @pytest.mark.parametrize(
     ('raw', 'expected'),
     [
-        ('{"status":"400","schemes":"Bearer","scope":"https://mail.google.com/"}', 'status=400, scope=https://mail.google.com/'),
+        (
+            '{"status":"400","schemes":"Bearer","scope":"https://mail.google.com/"}',
+            'status=400, scope=https://mail.google.com/',
+        ),
         ('{"status":"401"}', 'status=401'),
         ('not json at all', ''),
         ('[1, 2]', ''),
@@ -122,7 +125,9 @@ async def test__microsoft__token_refused__reason_and_hint_without_secret(code, h
 
 @respx.mock
 async def test__microsoft__non_json_error_and_reply_without_token__clear_errors():
-    respx.post(MS_URL).mock(side_effect=[httpx.Response(502, text='<html>bad gateway</html>'), httpx.Response(200, json={})])
+    respx.post(MS_URL).mock(
+        side_effect=[httpx.Response(502, text='<html>bad gateway</html>'), httpx.Response(200, json={})]
+    )
     async with httpx.AsyncClient() as http:
         provider = _ms(http)
         with pytest.raises(MailboxError, match='HTTP 502'):

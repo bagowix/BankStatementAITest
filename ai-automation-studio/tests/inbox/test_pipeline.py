@@ -570,3 +570,26 @@ async def test__dry_run__unsure_model__low_confidence_note(tmp_path):
     h.box.add(make_email(**LEAD))
     rows = await dry_run(h.config, h.box, h.llm, NOW, limit=1)
     assert rows[0].notes == ['low-confidence']
+
+
+def test__hot_lead_message__local_phone_format__e164_added_for_one_tap_call():
+    from autostudio.inbox.mail import parse_email
+    from autostudio.inbox.triage import TriageResult
+
+    config = make_config()
+    parsed = parse_email(make_email(), now=NOW)
+    base = {'category': 'lead', 'confidence': 1, 'summary': 'Call me.', 'urgency': 'normal'}
+    local = TriageResult(**base, phone='8 (916) 123-45-67', phone_e164='+79161234567')  # type: ignore[arg-type]
+    text = hot_lead_message('ru', parsed, local, config.inbox.category('lead'), drafted=True)
+    assert 'Телефон: 8 (916) 123-45-67 (+79161234567)' in text
+    plain = TriageResult(**base, phone='+995 599 12 34 56', phone_e164='+995599123456')  # type: ignore[arg-type]
+    text = hot_lead_message('en', parsed, plain, config.inbox.category('lead'), drafted=True)
+    assert 'Phone: +995 599 12 34 56\n' in text  # тот же номер — без повтора
+
+
+async def test__dry_run__invoice_email__would_check_invoice_but_reads_no_pdf(tmp_path):
+    h = Harness(tmp_path, config=make_config(invoices={'enabled': True}))
+    h.box.add((FIXTURES / '04-invoice-attachment.eml').read_bytes())
+    rows = await dry_run(h.config, h.box, h.llm, NOW, limit=1)
+    assert rows[0].category == 'invoice' and 'invoice-check' in rows[0].would
+    assert not any('<document>' in call.prompt for call in h.llm.calls)

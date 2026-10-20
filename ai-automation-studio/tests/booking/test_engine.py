@@ -295,15 +295,15 @@ async def test__free_text__no_service__picker_then_preferences_used(app):
     assert (await app.press(USER, 'Haircut ·'))[0].text == 'Haircut: who would you like to see?'
 
 
-def stub_llm(intent: BookingIntent | None = None, error: bool = False) -> FakeLLM:
+def stub_llm(intent: BookingIntent | None = None, error: bool = False, kind: str = 'outage') -> FakeLLM:
     def extract_intent(system: str, prompt: str) -> BookingIntent:
         if error:
-            raise LLMError('quota exceeded')
+            raise LLMError('quota exceeded', status_code=429, kind=kind)
         return intent
 
     def extract_faq(system: str, prompt: str) -> FaqAnswer:
         if error:
-            raise LLMError('quota exceeded')
+            raise LLMError('quota exceeded', status_code=429, kind=kind)
         return answer_faq(system, prompt)
 
     return FakeLLM({BookingIntent: extract_intent, FaqAnswer: extract_faq})
@@ -523,6 +523,19 @@ async def test__llm__down__menu_and_operator_alert_hourly(tmp_path, config):
     replies = await app.text(USER, 'cards?')
     assert replies[0].text.startswith('Good question!')  # без модели — к человеку
     assert len(app.operator.texts) == 2
+
+
+async def test__llm__content_error__menu_without_operator_alert(tmp_path, config):
+    app = App(tmp_path, config, stub_llm(error=True, kind='content'))
+    replies = await app.text(USER, 'hello?')
+    assert replies[0].text.startswith("Sorry, I didn't quite get that")
+    assert app.operator.texts == []
+
+
+async def test__llm__config_error__operator_told_to_check_key(tmp_path, config):
+    app = App(tmp_path, config, stub_llm(error=True, kind='config'))
+    await app.text(USER, 'hello?')
+    assert len(app.operator.texts) == 1 and 'проверьте ключ' in app.operator.texts[0]
 
 
 async def test__llm__down_and_operator_unreachable__customer_still_answered(tmp_path, config):
@@ -968,3 +981,19 @@ async def test__question__gift_card_not_in_faq__handoff_not_card_answer(app):
     assert replies[0].text.startswith('Good question!')
     assert any(r.to == ADMINS and 'gift card' in r.text for r in replies)
     assert app.events_of('booking.question_answered') == []
+
+
+async def test__deep_link__source_noted_booking_carries_came_from_and_channel(app):
+    await app.text(USER, '/start instagram', source='instagram')
+    await app.text(USER, '/start <script>', source='<script>')  # мусор не попадает в отчёт
+    assert [event.payload['source'] for event in app.events_of('booking.link_opened')] == ['instagram']
+    app.store.save_customer(Customer(key=USER, name='Anna', phone='+995555000111', language='en'), START)
+    ref = SlotRef(source='buttons', service_id='haircut', staff_id='giorgi', start=local(WED, 12))
+    await app.send(USER, data=cb.slot_data(cb.CONFIRM, ref))
+    [created] = app.events_of('booking.created')
+    assert created.payload['came_from'] == 'instagram' and created.payload['channel'] == 'telegram'
+
+
+async def test__deep_link__admin_or_walk_in__no_source(app):
+    await app.text(ADMIN, '/start site', source='site', is_admin=True)
+    assert app.events_of('booking.link_opened') == []

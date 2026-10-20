@@ -74,7 +74,7 @@ class FakeImapServer:
         answer = authobject(GMAIL_ERROR)
         self.auth_payloads.append(answer if answer is not None else b'*')
         if answer != b'':
-            raise imaplib.IMAP4.error('AUTHENTICATE command error: BAD [b\'Invalid SASL argument.\']')
+            raise imaplib.IMAP4.error("AUTHENTICATE command error: BAD [b'Invalid SASL argument.']")
         raise imaplib.IMAP4.error('[AUTHENTICATIONFAILED] Invalid credentials (Failure)')
 
     def select(self, mailbox: str = 'INBOX', readonly: bool = False) -> ImapReply:

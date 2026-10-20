@@ -240,9 +240,13 @@ def _text_messages(body: str) -> list[WaMessage]:
 
 def _buttons_message(body: str, options: Sequence[Option]) -> WaMessage:
     titles = _unique([fit(option.title, BUTTON_TITLE_MAX) for option in options], BUTTON_TITLE_MAX)
-    buttons = [WaButton(reply=WaReply(id=option.id, title=title)) for option, title in zip(options, titles, strict=True)]
+    buttons = [
+        WaButton(reply=WaReply(id=option.id, title=title)) for option, title in zip(options, titles, strict=True)
+    ]
     interactive = WaInteractive(type='button', body=WaBody(text=body), action=WaAction(buttons=buttons))
-    return WaMessage(messaging_product='whatsapp', recipient_type='individual', type='interactive', interactive=interactive)
+    return WaMessage(
+        messaging_product='whatsapp', recipient_type='individual', type='interactive', interactive=interactive
+    )
 
 
 def _list_message(body: str, options: Sequence[Option], labels: Labels) -> WaMessage:
@@ -261,7 +265,9 @@ def _list_message(body: str, options: Sequence[Option], labels: Labels) -> WaMes
         sections=[WaSection(title=fit(labels.section, SECTION_TITLE_MAX), rows=rows)],
     )
     interactive = WaInteractive(type='list', body=WaBody(text=fit(body, LIST_BODY_MAX)), action=action)
-    return WaMessage(messaging_product='whatsapp', recipient_type='individual', type='interactive', interactive=interactive)
+    return WaMessage(
+        messaging_product='whatsapp', recipient_type='individual', type='interactive', interactive=interactive
+    )
 
 
 def page_of(options: Sequence[Option], offset: int, labels: Labels) -> tuple[list[Option], bool]:
@@ -320,7 +326,9 @@ def template_message(name: str, language: str, parameters: Sequence[str]) -> WaM
     Returns:
         Сообщение без адресата.
     """
-    body = WaComponent(type='body', parameters=[WaParameter(text=fit(value, INTERACTIVE_BODY_MAX)) for value in parameters])
+    body = WaComponent(
+        type='body', parameters=[WaParameter(text=fit(value, INTERACTIVE_BODY_MAX)) for value in parameters]
+    )
     template = WaTemplate(name=name, language=WaLanguage(code=language), components=[body])
     return WaMessage(messaging_product='whatsapp', recipient_type='individual', type='template', template=template)
 

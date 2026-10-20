@@ -165,6 +165,11 @@ class BookingBot:
         )
 
     @property
+    def notifier(self) -> Notifier | None:
+        """Дополнительный канал владельца `[notify]` (в боевом режиме — никогда не консоль)."""
+        return self._relay.notifier
+
+    @property
     def admin_keys(self) -> list[str]:
         return [chat_key(chat_id) for chat_id in self._config.booking.admin_chat_ids]
 

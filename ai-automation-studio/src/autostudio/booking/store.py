@@ -775,7 +775,8 @@ class BookingStore:
         """
         with self._write() as conn:
             conn.execute(
-                'UPDATE calendar_sync SET attempts = attempts + 1, next_try_at = ? WHERE booking_id = ? AND version = ?',
+                'UPDATE calendar_sync SET attempts = attempts + 1, next_try_at = ? '
+                'WHERE booking_id = ? AND version = ?',
                 (_ts(next_try_at), booking_id, version),
             )
 

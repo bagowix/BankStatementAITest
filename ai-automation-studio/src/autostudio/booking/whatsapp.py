@@ -219,7 +219,9 @@ class WhatsAppSender:
         await self._post(contact, payload, kind='service', purpose='reply')
         return True
 
-    def _remember_pages(self, chat: str, message: Outgoing, language: str, phone_button: bool, now: dt.datetime) -> None:
+    def _remember_pages(
+        self, chat: str, message: Outgoing, language: str, phone_button: bool, now: dt.datetime
+    ) -> None:
         options: list[Option] = options_of(message, phone_button=phone_button, labels=self._labels(language))
         if not page_of(options, 0, self._labels(language))[1]:
             return
@@ -397,7 +399,11 @@ class WhatsAppBot:
         now = self._clock()
         sent_at = min(message.sent_at or now, now)
         contact = self._store.touch_contact(
-            CHANNEL, user_id=message.user_id, phone=message.phone, at=sent_at, new_key=f'{KEY_PREFIX}{secrets.token_hex(8)}'
+            CHANNEL,
+            user_id=message.user_id,
+            phone=message.phone,
+            at=sent_at,
+            new_key=f'{KEY_PREFIX}{secrets.token_hex(8)}',
         )
         key = contact.key
         word = message.text.strip().lower() if message.reply_id is None else ''

@@ -95,3 +95,43 @@ def test__handoff_gate__many_keys__stale_ones_pruned():
     assert len(gate) == 1001
     gate.decide('tg:fresh', 'hello', T0 + 2 * 60 * MIN)
     assert len(gate) == 1
+
+
+async def test__send_throttle__per_chat_second_and_global_rate():
+    from autostudio.booking.limits import SendThrottle
+
+    now = [100.0]
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(round(seconds, 3))
+        now[0] += seconds
+
+    throttle = SendThrottle(per_second=25, chat_interval=1.0, monotonic=lambda: now[0], sleep=sleep)
+    await throttle.wait('tg:1')
+    await throttle.wait('tg:2')  # другой чат: только общий темп, 1/25 секунды
+    await throttle.wait('tg:1')  # тот же чат: секунда после первого
+    assert slept == [0.04, 0.96]
+    now[0] += 5
+    await throttle.wait('tg:1')
+    assert slept == [0.04, 0.96]
+
+
+async def test__send_throttle__many_chats__old_entries_pruned_and_bad_args_refused():
+    import pytest
+
+    from autostudio.booking import limits
+    from autostudio.booking.limits import SendThrottle
+
+    now = [0.0]
+
+    async def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    throttle = SendThrottle(per_second=10_000, chat_interval=0.0, monotonic=lambda: now[0], sleep=sleep)
+    for index in range(limits._PRUNE_ABOVE + 5):
+        await throttle.wait(f'tg:{index}')
+        now[0] += 1
+    assert len(throttle._next_chat) < limits._PRUNE_ABOVE
+    with pytest.raises(ValueError):
+        SendThrottle(per_second=0)

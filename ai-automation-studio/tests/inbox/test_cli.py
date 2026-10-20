@@ -1,11 +1,15 @@
 import asyncio
 from pathlib import Path
 
+import httpx
+import msgspec
 import pytest
+import respx
 
 from autostudio.errors import ConfigError
 from autostudio.events import EventLog
 from autostudio.inbox import cli, imap
+from autostudio.inbox.config import InboxSection
 from autostudio.inbox.errors import InboxError
 from autostudio.inbox.pipeline import RunResult
 from tests.inbox.fake_imap import FakeImapServer
@@ -13,6 +17,8 @@ from tests.inbox.helpers import NOW, make_email
 
 EXAMPLE = Path(__file__).resolve().parents[2] / 'examples' / 'inbox' / 'client.toml'
 FIXTURES = EXAMPLE.parent / 'emails'
+TENANT = 'contoso.onmicrosoft.com'
+MS_ENV = (('INBOX_OAUTH_TENANT_ID', TENANT), ('INBOX_OAUTH_CLIENT_ID', 'app'), ('INBOX_OAUTH_CLIENT_SECRET', 's'))
 
 CONFIG = """
 [client]
@@ -337,3 +343,135 @@ def test__run__copy_folder_missing__run_failed_operator_signal_and_error_exit(se
     log = EventLog(tmp_path / 'data' / 'acme-tours' / 'events.sqlite')
     kinds = [event.kind for event in log.between(NOW.replace(year=2000), NOW.replace(year=2100))]
     assert kinds == ['system.run_failed']
+
+
+def test__check__sibling_env_next_to_config__loaded_before_settings(monkeypatch, tmp_path, capsys):
+    for name in ('INBOX_IMAP_USER', 'INBOX_IMAP_PASSWORD', 'AUTOSTUDIO_LLM_PROVIDER', 'AUTOSTUDIO_OPERATOR_CHAT_ID'):
+        monkeypatch.delenv(name, raising=False)
+    path = _config(tmp_path)
+    (tmp_path / '.env').write_text(
+        'INBOX_IMAP_USER=info@acme.example\nINBOX_IMAP_PASSWORD=app-pass\nAUTOSTUDIO_LLM_PROVIDER=fake\n',
+        encoding='utf-8',
+    )
+    cli.check(path)
+    out = capsys.readouterr().out
+    assert '.env рядом с конфигом: загружено переменных 3' in out and 'модель: fake' in out
+    assert '✓ конфиг в порядке' in out
+
+
+def test__check__google_oauth_without_variables__all_oauth_names_listed(env, tmp_path, capsys):
+    path = tmp_path / 'g.toml'
+    path.write_text(
+        CONFIG.format(out=tmp_path, host='imap.gmail.com').replace('[inbox]\n', '[inbox]\nauth = "google_oauth"\n'),
+        encoding='utf-8',
+    )
+    for name in ('INBOX_OAUTH_CLIENT_ID', 'INBOX_OAUTH_CLIENT_SECRET', 'INBOX_OAUTH_REFRESH_TOKEN'):
+        env.delenv(name, raising=False)
+    with pytest.raises(ConfigError, match='проблем 3'):
+        cli.check(path)
+    out = capsys.readouterr().out
+    assert 'вход: OAuth Google Workspace' in out and 'INBOX_OAUTH_REFRESH_TOKEN' in out
+
+
+def test__check__oauth_method_on_unexpected_host__warning_not_error(env, tmp_path, capsys):
+    path = tmp_path / 'w.toml'
+    path.write_text(
+        CONFIG.format(out=tmp_path, host='imap.gmail.com').replace('[inbox]\n', '[inbox]\nauth = "microsoft_oauth"\n'),
+        encoding='utf-8',
+    )
+    cli.check(path, skip_env=True)
+    assert 'у Exchange Online это outlook.office365.com' in capsys.readouterr().out
+    _, warnings = cli.auth_problems(
+        msgspec.convert({'imap_host': 'imap.yandex.ru', 'auth': 'google_oauth', 'company': {'name': 'A'}}, InboxSection)
+    )
+    assert 'imap.gmail.com' in warnings[0]
+
+
+def _microsoft_config(tmp_path: Path) -> Path:
+    path = tmp_path / 'm365.toml'
+    path.write_text(
+        CONFIG.format(out=tmp_path, host='outlook.office365.com').replace(
+            '[inbox]\n', '[inbox]\nauth = "microsoft_oauth"\n'
+        ),
+        encoding='utf-8',
+    )
+    return path
+
+
+@respx.mock
+def test__check__connect_microsoft_oauth__token_then_xoauth2_login(env, server, tmp_path, capsys):
+    server.token = 'eyJ.ms-token'
+    route = respx.post(f'https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/token').mock(
+        return_value=httpx.Response(200, json={'access_token': 'eyJ.ms-token', 'expires_in': 3599})
+    )
+    for name, value in MS_ENV:
+        env.setenv(name, value)
+    cli.check(_microsoft_config(tmp_path), connect=True)
+    out = capsys.readouterr().out
+    assert '✓ вход в outlook.office365.com' in out and route.call_count == 1
+    assert ('AUTHENTICATE', ('XOAUTH2',)) in server.commands and not any(c == 'LOGIN' for c, _ in server.commands)
+
+
+@respx.mock
+def test__check__connect_microsoft_oauth_rejected_by_imap__exchange_checklist_hint(env, server, tmp_path):
+    server.token = 'something-else'
+    respx.post(f'https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/token').mock(
+        return_value=httpx.Response(200, json={'access_token': 'eyJ.ms-token', 'expires_in': 3599})
+    )
+    for name, value in MS_ENV:
+        env.setenv(name, value)
+    with pytest.raises(ConfigError) as caught:
+        cli.check(_microsoft_config(tmp_path), connect=True)
+    message = str(caught.value)
+    assert 'Add-MailboxPermission' in message and 'eyJ.ms-token' not in message
+
+
+def test__run__previous_run_holds_lock__skipped_not_failed_exit_ok(server, tmp_path, capsys):
+    import datetime as dt
+
+    from autostudio.inbox.store import InboxStore
+
+    store = InboxStore(tmp_path / 'data' / 'acme-tours' / 'inbox.sqlite')
+    assert store.acquire_lock(dt.datetime.now(dt.UTC), dt.timedelta(hours=1))
+    cli.run(_config(tmp_path))
+    assert 'предыдущий запуск ещё идёт — пропуск' in capsys.readouterr().out
+    log = EventLog(tmp_path / 'data' / 'acme-tours' / 'events.sqlite')
+    kinds = [event.kind for event in log.between(NOW.replace(year=2000), NOW.replace(year=2100))]
+    assert kinds == ['system.run_skipped'] and server.commands == []
+
+
+def test__oauth_google__prints_env_lines_once_with_names_from_config(tmp_path, monkeypatch, capsys):
+    from autostudio.inbox.oauth import GoogleConsent
+
+    calls: list[tuple[Path, int, bool]] = []
+
+    def consent(path: Path, *, port: int, open_browser: bool) -> GoogleConsent:
+        calls.append((path, port, open_browser))
+        return GoogleConsent(client_id='cid', client_secret='csecret', refresh_token='1//rt')
+
+    monkeypatch.setattr(cli, 'run_google_consent', consent)
+    cli.oauth_google(client_secrets=tmp_path / 'cs.json', no_browser=True)
+    out = capsys.readouterr().out
+    assert 'INBOX_OAUTH_CLIENT_ID=cid\nINBOX_OAUTH_CLIENT_SECRET=csecret\nINBOX_OAUTH_REFRESH_TOKEN=1//rt' in out
+    assert out.count('1//rt') == 1 and 'auth = "google_oauth"' in out
+    assert calls == [(tmp_path / 'cs.json', 0, False)]
+    path = tmp_path / 'c.toml'
+    path.write_text(
+        CONFIG.format(out=tmp_path, host='imap.gmail.com').replace(
+            '[inbox]\n', '[inbox]\noauth_refresh_token_env = "ACME_GOOGLE_RT"\n'
+        ),
+        encoding='utf-8',
+    )
+    cli.oauth_google(client_secrets=tmp_path / 'cs.json', config=path)
+    assert 'ACME_GOOGLE_RT=1//rt' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ('auth', 'needle'), [('google_oauth', 'https://mail.google.com/'), ('microsoft_oauth', 'IMAP.AccessAsApp')]
+)
+def test__provider_hint__oauth_methods__provider_checklist(auth, needle):
+    assert needle in cli.provider_hint('imap.example.com', auth)
+
+
+def test__app__oauth_google_command_registered():
+    assert 'oauth-google' in set(cli.app)

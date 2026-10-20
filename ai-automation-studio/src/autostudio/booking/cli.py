@@ -4,8 +4,12 @@
 
 Команды, которые ходят в сеть (`check --online`, `run`, `chat`), глушат INFO-лог httpx:
 он пишет полный URL каждого запроса, а в URL Bot API — токен бота (свой и общий бот
-оператора), в URL вебхука `[notify]` — его секрет. Без этого токены оказались бы в логах
-контейнера клиента.
+оператора), в URL вебхука `[notify]` — его секрет. Корневой `main()` делает это для всего
+процесса (`autostudio.cli.quiet_http_loggers`); пакет повторяет это на время своей команды,
+потому что её вызывают и в обход `main()` (тесты, встраивание), и возвращает уровни назад.
+
+`check`, `run`, `chat` и `agenda` сначала подхватывают `clients/<id>/.env` рядом с конфигом
+(`load_sibling_env`): вне Docker секреты клиента не надо экспортировать руками.
 """
 
 import asyncio
@@ -30,13 +34,24 @@ from autostudio.booking.console import repl
 from autostudio.booking.demo import run_demo
 from autostudio.booking.domain import day_bounds, local_today, next_free_slots, working_intervals
 from autostudio.booking.engine import Engine
-from autostudio.booking.providers import STORE_FILE, BookingProvider, TelegramProvider, csv_dir_problem, resolve_sink
+from autostudio.booking.gcal import CalendarApi, CalendarError, GoogleCalendar, service_account_email
+from autostudio.booking.providers import (
+    STORE_FILE,
+    BookingProvider,
+    ChannelProvider,
+    WhatsAppEndpoint,
+    csv_dir_problem,
+    resolve_sink,
+)
 from autostudio.booking.reminders import ReminderLoop
+from autostudio.booking.server import TELEGRAM_PATH, WHATSAPP_PATH, serve
 from autostudio.booking.service import BookingService
 from autostudio.booking.store import BookingStore
-from autostudio.booking.telegram import BookingBot, run_polling
+from autostudio.booking.telegram import BookingBot
 from autostudio.booking.texts import Texts
-from autostudio.clientconf import NotifyConfig, SinkConfig, client_data_dir, require_env
+from autostudio.booking.whatsapp import GRAPH_API
+from autostudio.cli import quiet_http_loggers
+from autostudio.clientconf import NotifyConfig, SinkConfig, client_data_dir, load_sibling_env, require_env
 from autostudio.clock import system_now
 from autostudio.errors import ConfigError
 from autostudio.providers import CoreProvider
@@ -45,10 +60,13 @@ from autostudio.settings import Settings
 logger = logging.getLogger(__name__)
 
 app = cyclopts.App(
-    name='booking', help='Бот записи в Telegram: проверка конфига, запуск, консольный чат, расписание, демо.'
+    name='booking',
+    help='Бот записи (Telegram, WhatsApp, Google Calendar): проверка, запуск, консольный чат, расписание, демо.',
 )
 
 _TOKEN_SHAPE: Final = re.compile(r'^\d{5,}:[A-Za-z0-9_-]{30,}$')
+# Секрет вебхука Telegram: 1–256 символов A-Z, a-z, 0-9, `_` и `-` (Bot API, setWebhook).
+_WEBHOOK_SECRET: Final = re.compile(r'^[A-Za-z0-9_-]{1,256}$')
 _PREVIEW_SLOTS: Final = 3
 # Переменные ключей моделей (как в `Settings.from_env`): при `--offline` их отсутствие не ошибка.
 _MODEL_KEY_VARS: Final = ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY')
@@ -56,21 +74,21 @@ _OFFLINE_KEY: Final = 'offline-check'  # заглушка вместо ключ�
 _TELEGRAM_API: Final = 'https://api.telegram.org'
 _PROBE_TIMEOUT_S: Final = 15.0
 _DRAIN_TIMEOUT_S: Final = 30.0
-# Логгеры транспорта, в записи которых попадает адрес или заголовки запроса (httpx — на INFO,
-# httpcore и hpack — на DEBUG). Пакет не полагается на то, что их заглушит корневой `main()`:
-# команду могут вызвать и в обход него (тесты, встраивание), а уровни здесь возвращаются.
+# Логгеры, уровни которых команда возвращает после себя (ядро может глушить и другие — те
+# остаются на WARNING, это безопасная сторона).
 TRANSPORT_LOGGERS: Final = ('httpx', 'httpcore', 'hpack')
 
 
 @contextlib.contextmanager
 def quiet_transport_logs() -> Generator[None]:
-    """Поднимает логгеры транспорта (`TRANSPORT_LOGGERS`) до WARNING на время команды и возвращает как было.
+    """Глушит HTTP-логгеры ядром (`quiet_http_loggers`) на время команды и возвращает уровни.
 
     Уровень логгера, а не фильтр обработчика: запись с URL даже не создаётся, при любом
     `AUTOSTUDIO_LOG_LEVEL` (и DEBUG тоже). Уровень, заданный выше WARNING, не понижается.
     """
     loggers = [logging.getLogger(name) for name in TRANSPORT_LOGGERS]
     saved = [item.level for item in loggers]
+    quiet_http_loggers()
     for item, level in zip(loggers, saved, strict=True):
         item.setLevel(max(level, logging.WARNING))
     try:
@@ -80,8 +98,8 @@ def quiet_transport_logs() -> Generator[None]:
             item.setLevel(level)
 
 
-def _container(settings: Settings, config: BookingConfig, *, telegram: bool) -> AsyncContainer:
-    providers = [CoreProvider(), BookingProvider(), *([TelegramProvider()] if telegram else [])]
+def _container(settings: Settings, config: BookingConfig, *, channels: bool) -> AsyncContainer:
+    providers = [CoreProvider(), BookingProvider(), *([ChannelProvider()] if channels else [])]
     return make_async_container(*providers, context={Settings: settings, BookingConfig: config})
 
 
@@ -131,6 +149,26 @@ def check_environment(config: BookingConfig, environ: dict[str, str]) -> list[st
         require_env(config.notify.telegram_token_env, environ)
     if config.notify.webhook_url_env:
         require_env(config.notify.webhook_url_env, environ)
+    section = config.booking
+    if section.telegram.mode == 'webhook':
+        secret = require_env(section.telegram.webhook_secret_env, environ)
+        if not _WEBHOOK_SECRET.match(secret):
+            raise ConfigError(f'{section.telegram.webhook_secret_env}: 1–256 символов A-Z, a-z, 0-9, _ и -')
+        lines.append(f'Telegram: вебхук {section.server.base_url}{TELEGRAM_PATH}, секрет задан')
+    if section.calendar is not None:
+        key = Path(require_env(section.calendar.credentials_env, environ))
+        if not key.is_file():
+            raise ConfigError(f'{section.calendar.credentials_env}: файл ключа сервисного аккаунта не найден')
+        email = service_account_email(key) or '(e-mail не прочитан из ключа)'
+        lines.append(f'Google Calendar: ключ на месте; клиент делится календарями с {email} (право «Изменять события»)')
+    if section.whatsapp is not None:
+        wa = section.whatsapp
+        for name in (wa.token_env, wa.app_secret_env, wa.verify_token_env):
+            require_env(name, environ)
+        where = (
+            f'{section.server.base_url}{WHATSAPP_PATH}' if section.server.base_url else f'<https-домен>{WHATSAPP_PATH}'
+        )
+        lines.append(f'WhatsApp: токен, App Secret и verify token заданы; Callback URL в кабинете Meta — {where}')
     return lines
 
 
@@ -159,8 +197,9 @@ def describe(config: BookingConfig, settings: Settings, now: dt.datetime) -> lis
         f'администраторов: {len(section.admin_chat_ids)}',
         f'модель: {settings.llm_provider.value} ({settings.llm_model})',
         f'таблица: {sink.backend}' + (f' → {sink.csv_dir}' if sink.backend == 'csv' else ''),
+        *_channel_lines(config),
         f'активных записей на горизонте: {len(bookings)}',
-        'ближайшие свободные слоты:',
+        'ближайшие свободные слоты (без занятости из календаря):' if section.calendar else 'ближайшие свободные слоты:',
     ]
     for service in section.services:
         slots = next_free_slots(config, service.id, bookings, now, limit=_PREVIEW_SLOTS)
@@ -180,7 +219,47 @@ def describe(config: BookingConfig, settings: Settings, now: dt.datetime) -> lis
         warnings.append('contact_phone не задан: покупателю некуда позвонить, если бот не помог')
     if settings.llm_provider.value == 'fake':
         warnings.append('модель fake: свободный текст разбирается простыми правилами (тариф Basic)')
+    warnings += _channel_warnings(config)
     return lines + [f'внимание: {item}' for item in warnings]
+
+
+def _channel_lines(config: BookingConfig) -> list[str]:
+    section = config.booking
+    lines = [f'Telegram: {"вебхук" if section.telegram.mode == "webhook" else "long polling"}']
+    if section.calendar is not None:
+        calendar = section.calendar
+        mapped = {member.id: calendar.calendar_for(member.id) for member in section.staff}
+        lines.append(
+            f'Google Calendar: календарей {len(calendar.calendars)}, кеш {calendar.cache_ttl_s} с, '
+            f'события записей: {"пишутся" if calendar.write_events else "не пишутся"}; '
+            + ', '.join(f'{staff} → {cal or "нет"}' for staff, cal in mapped.items())
+        )
+    if section.whatsapp is not None:
+        wa = section.whatsapp
+        template = wa.reminder_template or 'не задан'
+        lines.append(
+            f'WhatsApp: номер {wa.phone_number_id}, Graph API {wa.graph_version}, шаблон напоминания {template}'
+        )
+    return lines
+
+
+def _channel_warnings(config: BookingConfig) -> list[str]:
+    section = config.booking
+    warnings: list[str] = []
+    if section.calendar is not None:
+        idle = [member.id for member in section.staff if section.calendar.calendar_for(member.id) is None]
+        if idle:
+            warnings.append(f'у мастеров {", ".join(idle)} нет календаря: их занятость — только по базе бота')
+    if section.whatsapp is not None:
+        if section.whatsapp.reminder_template is None:
+            warnings.append(
+                'WhatsApp без reminder_template: напоминание уйдёт только тем, кто писал боту за последние 24 часа'
+            )
+        if section.server.base_url is None:
+            warnings.append(
+                '[booking.server] public_url не задан: Callback URL для Meta составьте из своего HTTPS-домена'
+            )
+    return warnings
 
 
 def _schedule_warnings(config: BookingConfig) -> list[str]:
@@ -240,7 +319,11 @@ async def probe_telegram(http: httpx.AsyncClient, token: str, admin_chat_ids: Se
         me = msgspec.json.decode(response.content, type=_GetMe)
         if not me.ok or me.result is None:
             raise ConfigError(f'Telegram не принял токен: {me.description or response.status_code}')
-        lines = [f'Telegram: бот @{me.result.username} отвечает']
+        username = me.result.username
+        lines = [
+            f'Telegram: бот @{username} отвечает',
+            f'ссылки с меткой источника (видны в отчёте): https://t.me/{username}?start=site, ?start=instagram, …',
+        ]
         missing: list[str] = []
         for chat_id in admin_chat_ids:
             answer = await http.get(f'{base}/getChat', params={'chat_id': chat_id})
@@ -260,9 +343,90 @@ async def probe_telegram(http: httpx.AsyncClient, token: str, admin_chat_ids: Se
     return lines
 
 
-async def _probe(token: str, admin_chat_ids: Sequence[int]) -> list[str]:
+class _PhoneNumber(msgspec.Struct):
+    display_phone_number: str = ''
+    verified_name: str = ''
+    quality_rating: str = ''
+
+
+async def probe_whatsapp(http: httpx.AsyncClient, config: BookingConfig, token: str) -> list[str]:
+    """Спрашивает Graph API, виден ли номер WhatsApp с этим токеном.
+
+    Args:
+        http: httpx-клиент.
+        config: Конфиг клиента (секция `[booking.whatsapp]`).
+        token: Токен system user.
+
+    Returns:
+        Строки отчёта (пусто, если WhatsApp не настроен).
+
+    Raises:
+        ConfigError: Токен не подходит, номер не найден или Graph API недоступен.
+    """
+    section = config.booking.whatsapp
+    if section is None:
+        return []
+    url = f'{GRAPH_API}/{section.graph_version}/{section.phone_number_id}'
+    params = {'fields': 'display_phone_number,verified_name,quality_rating'}
+    try:
+        response = await http.get(url, params=params, headers={'Authorization': f'Bearer {token}'})
+    except httpx.HTTPError as exc:
+        raise ConfigError(f'WhatsApp Graph API недоступен: {type(exc).__name__}') from None
+    if response.is_error:
+        raise ConfigError(
+            f'WhatsApp: номер {section.phone_number_id} не виден с этим токеном (HTTP {response.status_code}) — '
+            'проверьте токен system user и что номер в WABA клиента'
+        )
+    try:
+        number = msgspec.json.decode(response.content, type=_PhoneNumber)
+    except msgspec.DecodeError:
+        raise ConfigError('WhatsApp ответил не JSON — проверьте сеть и прокси') from None
+    quality = number.quality_rating or '—'
+    return [f'WhatsApp: номер {number.display_phone_number} ({number.verified_name}), качество {quality}']
+
+
+async def probe_calendar(api: CalendarApi, config: BookingConfig, now: dt.datetime) -> list[str]:
+    """Проверяет, читаются ли календари клиента (freeBusy на сутки вперёд).
+
+    Args:
+        api: Календарь.
+        config: Конфиг клиента.
+        now: Текущий момент.
+
+    Returns:
+        Строки отчёта (пусто без `[booking.calendar]`).
+
+    Raises:
+        ConfigError: Google недоступен, ключ не подходит или календарь не расшарен.
+    """
+    section = config.booking.calendar
+    if section is None:
+        return []
+    try:
+        answer = await api.free_busy(section.calendars, now, now + dt.timedelta(days=1))
+    except CalendarError as exc:
+        raise ConfigError(f'Google Calendar: {exc}') from None
+    if answer.errors:
+        problems = ', '.join(f'{calendar} ({reason})' for calendar, reason in sorted(answer.errors.items()))
+        raise ConfigError(
+            f'календари не читаются: {problems}. notFound — календарь не расшарен на сервисный аккаунт '
+            '(«Настройки и общий доступ» → «Поделиться» → e-mail сервисного аккаунта, «Изменять события»)'
+        )
+    return [f'Google Calendar: календари читаются ({len(section.calendars)})']
+
+
+async def _probe(config: BookingConfig, environ: dict[str, str], now: dt.datetime) -> list[str]:
+    token = require_env(config.booking.bot_token_env, environ)
     async with httpx.AsyncClient(timeout=httpx.Timeout(_PROBE_TIMEOUT_S)) as http:
-        return await probe_telegram(http, token, admin_chat_ids)
+        lines = await probe_telegram(http, token, config.booking.admin_chat_ids)
+        if config.booking.whatsapp is not None:
+            lines += await probe_whatsapp(http, config, require_env(config.booking.whatsapp.token_env, environ))
+        if config.booking.calendar is not None:
+            from autostudio.booking.gauth import ServiceAccountTokens
+
+            key = Path(require_env(config.booking.calendar.credentials_env, environ))
+            lines += await probe_calendar(GoogleCalendar(http, ServiceAccountTokens(key)), config, now)
+    return lines
 
 
 def _check_settings(*, offline: bool) -> Settings:
@@ -290,6 +454,7 @@ def check(config: Path, *, offline: bool = False, online: bool = False) -> None:
 
 
 def _check(config: Path, *, offline: bool, online: bool) -> None:
+    load_sibling_env(config)
     settings = _check_settings(offline=offline)
     loaded = load_booking_config(config)
     require_owner_channel(loaded)
@@ -300,8 +465,7 @@ def _check(config: Path, *, offline: bool, online: bool) -> None:
         for line in check_environment(loaded, dict(os.environ)):
             print(line)
     if online:
-        token = require_env(loaded.booking.bot_token_env, os.environ)
-        for line in asyncio.run(_probe(token, loaded.booking.admin_chat_ids)):
+        for line in asyncio.run(_probe(loaded, dict(os.environ), system_now())):
             print(line)
     for line in describe(loaded, settings, system_now()):
         print(line)
@@ -316,17 +480,47 @@ async def _drain(container: AsyncContainer) -> None:
         logger.error('таблица владельца не дописана за %.0f с при остановке', _DRAIN_TIMEOUT_S)
 
 
+def server_port(config: BookingConfig, environ: dict[str, str]) -> int:
+    """Порт сервера вебхуков: переменная `[booking.server] port_env`, если задана, иначе конфиг.
+
+    Raises:
+        ConfigError: В переменной не номер порта.
+    """
+    server = config.booking.server
+    raw = environ.get(server.port_env, '').strip()
+    if not raw:
+        return server.port
+    if not raw.isascii() or not raw.isdigit() or not 1 <= int(raw) <= 65535:
+        raise ConfigError(f'{server.port_env}={raw!r}: ожидается номер порта 1–65535')
+    return int(raw)
+
+
 async def _run(config_path: Path) -> None:
+    load_sibling_env(config_path)
     settings = Settings.from_env(os.environ)
     config = load_booking_config(config_path)
     require_owner_channel(config)
-    container = _container(settings, config, telegram=True)
+    environ = dict(os.environ)
+    section = config.booking
+    secret = require_env(section.telegram.webhook_secret_env, environ) if section.telegram.mode == 'webhook' else None
+    port = server_port(config, environ)
+    container = _container(settings, config, channels=True)
     try:
         bot = await container.get(Bot)
         booking_bot = await container.get(BookingBot)
         loop = await container.get(ReminderLoop)
-        print(f'{config.client.name}: бот записи запущен (Ctrl+C — остановка)')
-        await run_polling(bot, booking_bot, loop, config.booking.languages)
+        whatsapp = (await container.get(WhatsAppEndpoint)).bot
+        channels = 'Telegram' + (' и WhatsApp' if whatsapp is not None else '')
+        print(f'{config.client.name}: бот записи запущен ({channels}; Ctrl+C — остановка)')
+        await serve(
+            config=config,
+            bot=bot,
+            booking_bot=booking_bot,
+            loop=loop,
+            whatsapp=whatsapp,
+            telegram_secret=secret,
+            port=port,
+        )
         await _drain(container)
     finally:
         await container.close()
@@ -334,7 +528,7 @@ async def _run(config_path: Path) -> None:
 
 @app.command
 def run(config: Path) -> None:
-    """Боевой запуск: long polling Telegram и цикл напоминаний; Ctrl+C или SIGTERM — штатная остановка.
+    """Боевой запуск: Telegram (polling или вебхук), WhatsApp, напоминания; Ctrl+C или SIGTERM — остановка.
 
     Args:
         config: Конфиг клиента (TOML).
@@ -345,13 +539,17 @@ def run(config: Path) -> None:
 
 
 async def _chat(config_path: Path, *, admin: bool, language: str | None, data_dir: Path) -> int:
+    load_sibling_env(config_path)
     base = Settings.from_env(os.environ)
     settings = msgspec.structs.replace(base, data_dir=data_dir)
     loaded = load_booking_config(config_path)
-    # Песочница: свои SQLite и CSV (`out` — относительно каталога песочницы), без таблицы и
-    # уведомлений клиента — тест не попадёт в боевые данные.
-    sandbox = msgspec.structs.replace(loaded, sink=SinkConfig(csv_dir=Path('out')), notify=NotifyConfig(console=False))
-    container = _container(settings, sandbox, telegram=False)
+    # Песочница: свои SQLite и CSV (`out` — относительно каталога песочницы), без таблицы,
+    # уведомлений и календаря клиента — тест не попадёт в боевые данные и в календарь мастера.
+    booking = msgspec.structs.replace(loaded.booking, calendar=None, whatsapp=None)
+    sandbox = msgspec.structs.replace(
+        loaded, sink=SinkConfig(csv_dir=Path('out')), notify=NotifyConfig(console=False), booking=booking
+    )
+    container = _container(settings, sandbox, channels=False)
     try:
         engine = await container.get(Engine)
         handled = await repl(engine, admin=admin, language=language)
@@ -387,6 +585,7 @@ def agenda(config: Path, *, day: str | None = None, days: int = 1) -> None:
         day: Первый день ГГГГ-ММ-ДД; по умолчанию сегодня.
         days: Сколько дней показать.
     """
+    load_sibling_env(config)
     settings = Settings.from_env(os.environ)
     loaded = load_booking_config(config)
     try:

@@ -23,3 +23,6 @@ clients/*
 *-credentials.json
 .idea/
 .DS_Store
+# Реквизиты ИП оператора и его бухгалтерия: репозиторий зеркалируется в публичный.
+operator.toml
+var/office/

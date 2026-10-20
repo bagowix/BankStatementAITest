@@ -5,9 +5,12 @@ from pathlib import Path
 import msgspec
 
 from autostudio.booking.admin import AdminDesk
+from autostudio.booking.alarm import OperatorAlarm
+from autostudio.booking.calsync import CalendarAvailability, CalendarSync
 from autostudio.booking.config import BookingConfig
 from autostudio.booking.domain import Customer, Slot
 from autostudio.booking.engine import Engine
+from autostudio.booking.gcal import CalendarApi
 from autostudio.booking.heuristics import booking_fake_llm
 from autostudio.booking.messages import Button, Incoming, Outgoing
 from autostudio.booking.service import BookingService
@@ -117,9 +120,11 @@ class Recorder:
 
 
 class App:
-    """Всё приложение без канала: движок, база, журнал, таблица в CSV."""
+    """Всё приложение без канала: движок, база, журнал, таблица в CSV (и календарь, если передан)."""
 
-    def __init__(self, tmp_path: Path, config: BookingConfig, llm: FakeLLM | None = None) -> None:
+    def __init__(
+        self, tmp_path: Path, config: BookingConfig, llm: FakeLLM | None = None, calendar: CalendarApi | None = None
+    ) -> None:
         self.config = config
         self.clock = FrozenClock(START)
         self.store = BookingStore(tmp_path / 'booking.sqlite')
@@ -127,12 +132,32 @@ class App:
         self.sink = CsvSink(tmp_path / 'out')
         self.texts = Texts(config.booking, config.client.zone)
         self.views = Views(config, self.texts)
+        self.operator = Recorder()
+        self.alarm = OperatorAlarm(self.operator, f'{config.client.name} / booking', clock=self.clock)
+        self.availability: CalendarAvailability | None = None
+        self.calendar_sync: CalendarSync | None = None
+        if calendar is not None:
+            self.availability = CalendarAvailability(config=config, api=calendar, alarm=self.alarm, clock=self.clock)
+            self.calendar_sync = CalendarSync(
+                config=config,
+                store=self.store,
+                api=calendar,
+                texts=self.texts,
+                alarm=self.alarm,
+                clock=self.clock,
+                availability=self.availability,
+            )
         self.service = BookingService(
-            config=config, store=self.store, events=self.events, sink=self.sink, texts=self.texts
+            config=config,
+            store=self.store,
+            events=self.events,
+            sink=self.sink,
+            texts=self.texts,
+            availability=self.availability,
+            calendar_sync=self.calendar_sync,
         )
         self.admin = AdminDesk(config=config, texts=self.texts, service=self.service)
         self.llm = llm or booking_fake_llm()
-        self.operator = Recorder()
         self.engine = Engine(
             config=config,
             views=self.views,

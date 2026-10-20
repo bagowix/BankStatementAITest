@@ -184,7 +184,9 @@ class BookingProvider(Provider):
             if notifier is None or error.kind == 'content':
                 return
             what = 'проверьте ключ, права и модель' if error.kind == 'config' else 'провайдер недоступен'
-            await notifier.send(f'⚠️ {config.client.name} / booking: модель недоступна ({what}), бот на правилах: {error}')
+            await notifier.send(
+                f'⚠️ {config.client.name} / booking: модель недоступна ({what}), бот на правилах: {error}'
+            )
 
         client = make_llm(settings, booking_fake_llm(), on_fallback=degraded)
         yield client

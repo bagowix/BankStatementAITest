@@ -88,8 +88,9 @@ async def test__refresh_schedule__twice__tab_replaced(app):
     rows = await refresh_schedule(app.store, app.sink, app.clock(), config=app.config, texts=app.texts)
     assert rows == 2
     content = app.sink.path_for('Schedule').read_text(encoding='utf-8').splitlines()
-    assert content[0] == 'Date,Start,End,Staff,Service,Customer,Phone,Booking'
-    assert content[1].startswith('2026-10-21,12:00,12:30,Nika,Beard trim,Bob')
+    assert content[0] == 'Date,Start,End,Minutes,Staff,Service,Price,Currency,Customer,Phone,Booking'
+    # Длительность и цена — числами: таблица их суммирует.
+    assert content[1].startswith('2026-10-21,12:00,12:30,30,Nika,Beard trim,25.50,GEL,Bob')
     assert await refresh_schedule(app.store, app.sink, app.clock(), config=app.config, texts=app.texts) == 2
     assert len(app.sink.path_for('Schedule').read_text(encoding='utf-8').splitlines()) == 3
 
@@ -215,3 +216,57 @@ async def test__send_due_reminders__reschedule_during_pass__no_stale_time_new_ti
     assert await send(app, sender) == 1
     chat, message = sender.sent[-1]
     assert chat == 'tg:2' and 'Thu 22 Oct, 19:00' in message.text
+
+
+async def test__reminder_message__carries_template_parameters(app):
+    from autostudio.booking.messages import Reminder
+    from autostudio.booking.reminders import reminder_message
+
+    booking = app.book_directly('tg:1', 'haircut', 'giorgi', local(WED, 17), name='Anna')
+    message = reminder_message(booking, app.config, app.texts, app.clock())
+    assert message.reminder == Reminder(service='Haircut', when='Wed 21 Oct, 17:00', language='en')
+    late = reminder_message(booking, app.config, app.texts, local(WED, 16))
+    assert late.reminder == message.reminder and not late.buttons
+
+
+async def test__send_due_reminders__throttled_per_customer(app):
+    from autostudio.booking.limits import SendThrottle
+
+    app.book_directly('tg:1', 'haircut', 'giorgi', local(WED, 12), name='Anna')
+    app.book_directly('tg:1', 'beard', 'nika', local(WED, 13), name='Anna')
+    waited: list[str] = []
+
+    class Spy(SendThrottle):
+        async def wait(self, chat: str) -> None:
+            waited.append(chat)
+
+    recorder = Recorder()
+    sent = await send_due_reminders(
+        app.store,
+        recorder,
+        local(WED, 11, 30),
+        config=app.config,
+        texts=app.texts,
+        events=app.events,
+        throttle=Spy(),
+    )
+    assert sent == 2 and waited == ['tg:1', 'tg:1']
+
+
+async def test__reminder_loop__calendar_sync__retried_each_tick(app):
+    calls: list[str] = []
+
+    class Sync:
+        async def run_due(self) -> int:
+            calls.append('run')
+            if len(calls) > 1:
+                from autostudio.errors import AutoStudioError
+
+                raise AutoStudioError('down')
+            return 0
+
+    loop = make_loop(app, Recorder())
+    loop._calendar_sync = Sync()
+    await loop.tick()
+    await loop.tick()  # сбой синхронизации — в лог, напоминания идут дальше
+    assert calls == ['run', 'run']

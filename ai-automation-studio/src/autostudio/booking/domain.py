@@ -686,6 +686,8 @@ def clean_source(raw: str | None) -> str | None:
     """
     if raw is None:
         return None
+    # Правило то же, что у aiogram.utils.deep_linking (сверено на случаях из тестов), но своё: у aiogram
+    # нет проверки входящей метки, а метки WhatsApp проходят через ту же функцию.
     label = raw.strip().lower()
     return label if _SOURCE.match(label) else None
 

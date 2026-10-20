@@ -306,3 +306,95 @@ def test__due_reminders__walk_in_entered_by_admin__no_reminder(store):
     )  # fmt: skip
     assert store.get(booking.id).source == 'admin'
     assert store.due_reminders(local(WED, 15, 5), [120]) == []
+
+
+def test__store__old_database_without_source__migrated_on_open(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    path = tmp_path / 'old.sqlite'
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute(
+            'CREATE TABLE customers (key TEXT PRIMARY KEY, name TEXT, phone TEXT, language TEXT, updated_at TEXT NOT NULL)'
+        )
+        conn.execute("INSERT INTO customers VALUES ('tg:1', 'Anna', NULL, 'en', '2026-10-01T00:00:00+00:00')")
+    store = BookingStore(path)
+    assert store.customer('tg:1') == Customer(key='tg:1', name='Anna', language='en')
+    BookingStore(path)  # повторное открытие — без второго ALTER
+    store.save_customer(Customer(key='tg:1', source='instagram'), START)
+    assert store.customer('tg:1').source == 'instagram'
+
+
+def test__save_customer__source__first_touch_kept(tmp_path):
+    store = BookingStore(tmp_path / 'b.sqlite')
+    store.save_customer(Customer(key='tg:1', source='instagram'), START)
+    store.save_customer(Customer(key='tg:1', source='site', name='Anna'), START)
+    assert store.customer('tg:1') == Customer(key='tg:1', name='Anna', source='instagram')
+
+
+def test__touch_contact__bsuid_or_phone__stable_key_address_completed(tmp_path):
+    store = BookingStore(tmp_path / 'b.sqlite')
+    first = store.touch_contact('whatsapp', user_id=None, phone='995599000111', at=START, new_key='wa:a')
+    later = START + dt.timedelta(hours=1)
+    # Тот же человек, теперь с BSUID: ключ прежний, BSUID дописан.
+    second = store.touch_contact('whatsapp', user_id='GE.1', phone='995599000111', at=later, new_key='wa:b')
+    assert (first.key, second.key, second.user_id, second.last_inbound_at) == ('wa:a', 'wa:a', 'GE.1', later)
+    # С username без телефона — по BSUID; телефон не стирается, время окна не откатывается назад.
+    third = store.touch_contact('whatsapp', user_id='GE.1', phone=None, at=START, new_key='wa:c')
+    assert (third.key, third.phone, third.last_inbound_at) == ('wa:a', '995599000111', later)
+    other = store.touch_contact('whatsapp', user_id='GE.2', phone=None, at=START, new_key='wa:d')
+    assert other.key == 'wa:d' and store.contact('wa:none') is None
+    with pytest.raises(BookingError):
+        store.touch_contact('whatsapp', user_id=None, phone=None, at=START, new_key='wa:e')
+
+
+def test__consent__opt_in_out_in__latest_wins(tmp_path):
+    store = BookingStore(tmp_path / 'b.sqlite')
+    store.touch_contact('whatsapp', user_id='GE.1', phone=None, at=START, new_key='wa:a')
+    assert not store.contact('wa:a').subscribed
+    store.set_consent('wa:a', subscribed=True, now=START)
+    assert store.contact('wa:a').subscribed
+    store.set_consent('wa:a', subscribed=False, now=START + dt.timedelta(minutes=1))
+    assert not store.contact('wa:a').subscribed
+    store.set_consent('wa:a', subscribed=True, now=START + dt.timedelta(minutes=2))
+    assert store.contact('wa:a').subscribed
+
+
+def test__calendar_marks__create_cancel_reschedule__pending_with_versions(tmp_path):
+    store = BookingStore(tmp_path / 'b.sqlite')
+    slot = Slot(
+        service_id='haircut',
+        staff_id='giorgi',
+        start=START + dt.timedelta(days=1),
+        end=START + dt.timedelta(days=1, minutes=45),
+    )
+    customer = Customer(key='tg:1', name='Anna', phone='+995555000111')
+    booking = store.create(
+        slot, customer=customer, source='buttons', language='en', now=START, buffer=dt.timedelta(0), calendar_id='g@x'
+    )
+    [task] = store.calendar_due(START, 10)
+    assert (task.calendar_id, task.event_id, task.version, task.attempts) == ('g@x', None, 1, 0)
+    store.calendar_failed(booking.id, 1, START + dt.timedelta(minutes=2))
+    assert store.calendar_due(START, 10) == []
+    [retry] = store.calendar_due(START + dt.timedelta(minutes=2), 10)
+    assert retry.attempts == 1
+    store.calendar_done(booking.id, 1, 'evt1')
+    assert store.calendar_pending() == 0
+    moved = Slot(
+        service_id='haircut',
+        staff_id='giorgi',
+        start=slot.start + dt.timedelta(hours=2),
+        end=slot.end + dt.timedelta(hours=2),
+    )
+    store.reschedule(booking.id, moved, now=START, by_admin=True)
+    [after] = store.calendar_due(START, 10)
+    assert (after.event_id, after.version, after.booking.start) == ('evt1', 2, moved.start)
+    store.calendar_done(booking.id, 1, 'evt1')  # устаревшая версия не снимает отметку
+    assert store.calendar_pending() == 1
+    store.cancel(booking.id, now=START, by_admin=True)
+    [cancelled] = store.calendar_due(START, 10)
+    assert cancelled.version == 3 and not cancelled.booking.active
+    # Запись без календаря отметок не получает и отменяется как раньше.
+    plain = store.create(moved, customer=customer, source='buttons', language='en', now=START, buffer=dt.timedelta(0))
+    store.cancel(plain.id, now=START, by_admin=True)
+    assert [task.booking.id for task in store.calendar_due(START, 10)] == [booking.id]

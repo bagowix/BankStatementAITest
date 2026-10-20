@@ -14,9 +14,16 @@
    и видит, что ответ доставлен.
 5. Попытка prompt-инъекции ничего не отменяет.
 6. Утром Emma нажимает время, которое уже заняла Anna, — и получает альтернативы.
-7. Anna отменяет запись; владелец смотрит расписание на сегодня.
-8. Часы идут — напоминания уходят ровно один раз, в том числе после «перезапуска»;
+7. Nino пишет в WhatsApp (подписанный вебхук): список свободного времени, «Этот номер»,
+   подтверждение с текстом согласия на напоминание; владелец получает уведомление в Telegram.
+8. Anna отменяет запись; владелец смотрит расписание на сегодня.
+9. Часы идут — напоминания уходят ровно один раз, в том числе после «перезапуска»;
    вкладка `Schedule` обновляется тем же циклом, что и в боевом режиме.
+10. Напоминание Nino — вне 24-часового окна WhatsApp, поэтому шаблоном.
+
+Google Calendar — заглушка (`FakeCalendar`): у Гиорги в его календаре личное дело в среду
+15:00–16:00, и это время бот не предлагает; запись Anna появляется в календаре событием
+«Haircut — Anna» и исчезает после отмены.
 """
 
 import asyncio
@@ -26,19 +33,25 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
+import httpx
 import msgspec
 from dishka import Provider, Scope, make_async_container, provide
 
-from autostudio.booking.config import BookingConfig, load_booking_config
+from autostudio.booking.alarm import OperatorAlarm
+from autostudio.booking.config import BookingConfig, CalendarSection, WhatsAppSection, load_booking_config
+from autostudio.booking.demo_whatsapp import DEMO_APP_SECRET, DEMO_PHONE_NUMBER_ID, GraphRecorder, WhatsAppCustomer
 from autostudio.booking.domain import day_bounds, local_today
 from autostudio.booking.engine import Engine
-from autostudio.booking.messages import Incoming, Outgoing, deliver
+from autostudio.booking.gcal import FakeCalendar
+from autostudio.booking.messages import Incoming, Outgoing, RoutingSender, deliver
 from autostudio.booking.metrics import METRICS, highlights
-from autostudio.booking.providers import STORE_FILE, BookingProvider
+from autostudio.booking.providers import STORE_FILE, BookingProvider, CalendarLink
+from autostudio.booking.relay import Relay
 from autostudio.booking.reminders import ReminderLoop
 from autostudio.booking.service import BOOKINGS_TAB, SCHEDULE_TAB, BookingService
 from autostudio.booking.store import BookingStore
 from autostudio.booking.texts import Texts
+from autostudio.booking.whatsapp import WhatsAppBot, WhatsAppSender
 from autostudio.clientconf import NotifyConfig, SinkConfig, client_data_dir
 from autostudio.clock import Clock, FrozenClock
 from autostudio.errors import ConfigError
@@ -54,6 +67,10 @@ EXAMPLE: Final = Path('examples/booking/client.toml')
 START: Final = dt.datetime(2026, 10, 20, 8, 30, tzinfo=dt.UTC)
 TRANSCRIPT: Final = 'transcript.md'
 REPORT: Final = 'report.md'
+GIORGI_CALENDAR: Final = 'giorgi@demo-barbers.example'
+SALON_CALENDAR: Final = 'demo-barbers@group.calendar.google.com'
+# Личное дело Гиорги в его Google Calendar: среда, 21 октября, 15:00–16:00 по Тбилиси.
+GIORGI_BUSY: Final = (dt.datetime(2026, 10, 21, 11, 0, tzinfo=dt.UTC), dt.datetime(2026, 10, 21, 12, 0, tzinfo=dt.UTC))
 
 
 class Persona(msgspec.Struct, frozen=True, kw_only=True):
@@ -92,10 +109,11 @@ class RecordingSender:
 class _DemoOverrides(Provider):
     scope = Scope.APP
 
-    def __init__(self, clock: FrozenClock, sink: CsvSink) -> None:
+    def __init__(self, clock: FrozenClock, sink: CsvSink, calendar: FakeCalendar) -> None:
         super().__init__()
         self._clock = clock
         self._sink = sink
+        self._calendar = calendar
 
     @provide
     def clock(self) -> Clock:
@@ -104,6 +122,23 @@ class _DemoOverrides(Provider):
     @provide
     def sink(self) -> TableSink:
         return self._sink
+
+    @provide
+    def calendar(self) -> CalendarLink:
+        return CalendarLink(self._calendar)
+
+
+def _demo_config(base: BookingConfig, out_dir: Path) -> BookingConfig:
+    # Образец клиента — без календаря и WhatsApp (они закомментированы): демо включает оба
+    # с заглушками, чтобы показать весь путь без сети и ключей.
+    calendar = CalendarSection(calendar_id=SALON_CALENDAR, staff={'giorgi': GIORGI_CALENDAR})
+    whatsapp = WhatsAppSection(
+        phone_number_id=DEMO_PHONE_NUMBER_ID, reminder_template='booking_reminder', template_languages={'en': 'en_US'}
+    )
+    booking = msgspec.structs.replace(base.booking, calendar=calendar, whatsapp=whatsapp)
+    return msgspec.structs.replace(
+        base, sink=SinkConfig(csv_dir=out_dir), notify=NotifyConfig(console=False), booking=booking
+    )
 
 
 def find_example() -> Path:
@@ -145,6 +180,9 @@ class _Script:
 
     def note(self, text: str) -> None:
         self.lines += [f'> {text}', '']
+
+    def whatsapp(self, line: str) -> None:
+        self.lines += [line, '']
 
     def bot(self, chat: str, message: Outgoing) -> None:
         who = f'Bot → {self._names.get(chat, chat)}'
@@ -218,57 +256,98 @@ async def run_demo(out_dir: Path) -> str:
     data_dir = out_dir / 'data'
     await asyncio.to_thread(_prepare, out_dir, data_dir)
 
-    base = load_booking_config(find_example())
-    config = msgspec.structs.replace(base, sink=SinkConfig(csv_dir=out_dir), notify=NotifyConfig(console=False))
+    config = _demo_config(load_booking_config(find_example()), out_dir)
     settings = Settings(data_dir=data_dir)
     clock = FrozenClock(START)
     sink = CsvSink(out_dir)
     notifier = RecordingNotifier()
+    calendar = FakeCalendar({GIORGI_CALENDAR: [GIORGI_BUSY]})
     container = make_async_container(
         CoreProvider(),
         BookingProvider(),
-        _DemoOverrides(clock, sink),
+        _DemoOverrides(clock, sink, calendar),
         context={Settings: settings, BookingConfig: config},
     )
+    graph = GraphRecorder()
     try:
         engine = await container.get(Engine)
         texts = await container.get(Texts)
         store = await container.get(BookingStore)
         events = await container.get(EventLog)
         heartbeat = await container.get(Heartbeat)
+        service = await container.get(BookingService)
+        alarm = await container.get(OperatorAlarm)
         sender = RecordingSender()
         admins = [f'tg:{chat_id}' for chat_id in config.booking.admin_chat_ids]
         script = _Script(engine, clock, texts, sender=sender, notifier=notifier, admins=admins)
-        await _scenario(script, clock, config, store)
-
-        def loop_for(target: BookingStore) -> ReminderLoop:
-            return ReminderLoop(
+        graph.listener = script.whatsapp
+        async with httpx.AsyncClient(transport=graph.transport()) as http:
+            wa_sender = WhatsAppSender(
+                http=http,
                 config=config,
-                store=target,
-                sender=sender,
-                sink=sink,
-                events=events,
+                token='demo-token',  # noqa: S106 - заглушка демо, запрос не покидает процесс
+                store=store,
                 texts=texts,
-                heartbeat=heartbeat,
-                operator=None,
+                events=events,
+                alarm=alarm,
+                clock=clock,
+                retry_delay=0,
+            )
+            routing = RoutingSender({'tg': sender, 'wa': wa_sender})
+            relay = Relay(engine=engine, sender=routing, texts=texts, admins=admins, notifier=notifier, alarm=alarm)
+            wa_bot = WhatsAppBot(
+                config=config,
+                relay=relay,
+                wa_sender=wa_sender,
+                store=store,
+                texts=texts,
+                app_secret=DEMO_APP_SECRET,
+                verify_token='demo-verify',  # noqa: S106 - заглушка демо
+                alarm=alarm,
                 clock=clock,
             )
+            nino = WhatsAppCustomer(
+                wa_bot, graph, clock, name='Nino', phone='995599000111', bsuid='GE.1029384756', log=script.whatsapp
+            )
+            await _scenario(script, clock, config, store)
+            await _calendar_and_whatsapp(script, clock, calendar, service, nino)
+            await _cancel_and_agenda(script, clock)
 
-        clock.set(dt.datetime(2026, 10, 21, 7, 0, tzinfo=dt.UTC))
-        script.section('8. Reminders go out once — even after a restart')
-        loop = loop_for(store)
-        first = await loop.tick()
-        again = await loop.tick()
-        # «Перезапуск»: новый процесс — новое хранилище на том же файле и новый цикл.
-        restarted = loop_for(BookingStore(client_data_dir(data_dir, config.client) / STORE_FILE))
-        after_restart = await restarted.tick()
-        script.note(f'11:00 — sent: {first}; repeat pass: {again}; after a restart: {after_restart}.')
-        clock.set(dt.datetime(2026, 10, 21, 11, 5, tzinfo=dt.UTC))
-        script.section('9. Two hours before the evening visit')
-        later = await restarted.tick()
-        rows = len(store.upcoming(*day_bounds(local_today(config, clock()), config.client.zone)))
-        # Строки во вкладку Bookings пишутся в фоне — дожидаемся их до чтения файлов.
-        await (await container.get(BookingService)).drain()
+            def loop_for(target: BookingStore) -> ReminderLoop:
+                return ReminderLoop(
+                    config=config,
+                    store=target,
+                    sender=routing,
+                    sink=sink,
+                    events=events,
+                    texts=texts,
+                    heartbeat=heartbeat,
+                    operator=None,
+                    clock=clock,
+                )
+
+            clock.set(dt.datetime(2026, 10, 21, 7, 0, tzinfo=dt.UTC))
+            script.section('9. Reminders go out once — even after a restart')
+            loop = loop_for(store)
+            first = await loop.tick()
+            again = await loop.tick()
+            # «Перезапуск»: новый процесс — новое хранилище на том же файле и новый цикл.
+            restarted = loop_for(BookingStore(client_data_dir(data_dir, config.client) / STORE_FILE))
+            after_restart = await restarted.tick()
+            script.note(f'11:00 — sent: {first}; repeat pass: {again}; after a restart: {after_restart}.')
+            clock.set(dt.datetime(2026, 10, 21, 11, 5, tzinfo=dt.UTC))
+            script.section('Two hours before the evening visit')
+            later = await restarted.tick()
+            rows = len(store.upcoming(*day_bounds(local_today(config, clock()), config.client.zone)))
+            clock.set(dt.datetime(2026, 10, 22, 13, 0, tzinfo=dt.UTC))
+            script.section('10. WhatsApp reminder outside the 24-hour window — by approved template')
+            wa_reminders = await restarted.tick()
+            script.note(
+                f'Nino last wrote on Wednesday morning: the free-form window is over, so the reminder went as '
+                f'the approved template ({wa_reminders} sent).'
+            )
+            # Строки во вкладку Bookings и события календаря пишутся в фоне — дожидаемся их до чтения файлов.
+            await service.drain()
 
         start, end = month_bounds(START.date(), config.client.zone)
         month_events = events.between(start, end)
@@ -295,6 +374,9 @@ async def run_demo(out_dir: Path) -> str:
     created = len(created_events)
     after_hours = sum(1 for event in created_events if event.payload.get('after_hours') == 'yes')
     from_text = sum(1 for event in created_events if event.payload.get('source') == 'ai')
+    wa_sent = [event for event in month_events if event.kind == 'booking.whatsapp_message']
+    templates = sum(1 for event in wa_sent if event.payload.get('kind') == 'template')
+    events_now = sum(len(events) for events in calendar.events.values())
     return '\n'.join(
         [
             f'{config.client.name}: офлайн-демо бота записи',
@@ -304,6 +386,9 @@ async def run_demo(out_dir: Path) -> str:
             f'  напоминаний: {first + later} (повторный проход: {again}, после перезапуска: {after_restart})',
             f'  записей, пока салон был закрыт: {after_hours} из {created}',
             f'  уведомлений владельцу: {len(notifier.sent)}; записей в расписании на сегодня: {rows}',
+            f'  Google Calendar (заглушка): событий записей сейчас {events_now}, вызовов API: {len(calendar.calls)}',
+            f'  WhatsApp: сообщений {len(wa_sent)} (шаблоном: {templates}); поддельных вебхуков отброшено: '
+            f'{nino.rejected}',
             f'  файлы: {out_dir / TRANSCRIPT}, {out_dir / f"{BOOKINGS_TAB}.csv"}, '
             f'{out_dir / f"{SCHEDULE_TAB}.csv"}, {out_dir / REPORT}',
         ]
@@ -365,8 +450,29 @@ async def _scenario(script: _Script, clock: FrozenClock, config: BookingConfig, 
     await script.say(emma, '599 123 456')
     await script.tap(emma, '✅')
 
+
+async def _calendar_and_whatsapp(
+    script: _Script, clock: FrozenClock, calendar: FakeCalendar, service: BookingService, nino: WhatsAppCustomer
+) -> None:
+    await service.drain()
+    events = [draft.summary for drafts in calendar.events.values() for draft in drafts.values()]
+    script.note(
+        'Google Calendar: Giorgi’s personal appointment (Wed 15:00–16:00) was never offered; '
+        f'bookings are now calendar events without guests: {", ".join(events)}.'
+    )
     clock.advance(dt.timedelta(minutes=10))
-    script.section('7. Anna cancels; the owner checks today’s schedule')
+    script.section('7. Nino books in WhatsApp — the same bot, a signed webhook')
+    await nino.say('Can I get a beard trim on Friday after 5?')
+    for label in ('Fri 23 Oct 17:00', 'Use', 'Use this number', '✅'):
+        await nino.tap(label)
+    script.note('Unsigned or forged webhooks are rejected before the JSON is even parsed.')
+
+
+async def _cancel_and_agenda(script: _Script, clock: FrozenClock) -> None:
+    anna = Persona(key='tg:1001', name='Anna', language='en', handle='@anna_k')
+    owner = Persona(key='tg:111111111', name='Owner', language='en', is_admin=True)
+    clock.advance(dt.timedelta(minutes=10))
+    script.section('8. Anna cancels; the owner checks today’s schedule')
     await script.say(anna, '/my')
     await script.tap(anna, 'Wed 21 Oct, 12:00')
     await script.tap(anna, '❌')

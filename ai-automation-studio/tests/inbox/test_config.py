@@ -157,3 +157,85 @@ def test__example_config__labels_lead_flags_and_russian_texts():
     assert config.inbox.company.sign_off_for('ru').startswith('С уважением')
     assert config.inbox.company.facts_for('ru')[0].startswith('Однодневные')
     assert str(config.sink.csv_dir).startswith('/data/')
+
+
+@pytest.mark.parametrize(
+    ('auth', 'expected'),
+    [
+        ('password', ['INBOX_IMAP_USER', 'INBOX_IMAP_PASSWORD']),
+        (
+            'google_oauth',
+            ['INBOX_IMAP_USER', 'INBOX_OAUTH_CLIENT_ID', 'INBOX_OAUTH_CLIENT_SECRET', 'INBOX_OAUTH_REFRESH_TOKEN'],
+        ),
+        (
+            'microsoft_oauth',
+            ['INBOX_IMAP_USER', 'INBOX_OAUTH_TENANT_ID', 'INBOX_OAUTH_CLIENT_ID', 'INBOX_OAUTH_CLIENT_SECRET'],
+        ),
+    ],
+)
+def test__auth_env__per_login_method__required_variables(auth, expected):
+    assert make_config(auth=auth).inbox.auth_env == expected
+
+
+@pytest.mark.parametrize(
+    ('overrides', 'match'),
+    [
+        ({'oauth_client_id_env': 'BAD NAME'}, 'oauth_client_id_env'),
+        ({'password_env': '1PASSWORD'}, 'password_env'),
+        ({'phone_region': 'XX'}, 'phone_region'),
+        ({'phone_fallback_regions': ['RU', 'Russia']}, 'phone_region'),
+        ({'invoices': {'max_pdf_kb': 10}}, 'max_pdf_kb'),
+        ({'invoices': {'max_pages': 0}}, 'max_pages'),
+        ({'invoices': {'max_text_chars': 10}}, 'max_text_chars'),
+        ({'invoices': {'sheet_tab': ' '}}, 'invoices.sheet_tab'),
+        ({'invoices': {'categories': ['bills']}}, 'bills'),
+        ({'invoices': {'enabled': True, 'sheet_tab': 'Inbox'}}, 'совпадает'),
+    ],
+)
+def test__inbox_section__bad_auth_phone_or_invoice_values__config_error(overrides, match):
+    with pytest.raises(ConfigError, match=match):
+        make_config(**overrides)
+
+
+def test__phone_regions__defaults_ge_then_ru_without_duplicates():
+    assert make_config().inbox.phone_regions == ['GE', 'RU']
+    assert make_config(phone_region='RU', phone_fallback_regions=['RU', 'KZ']).inbox.phone_regions == ['RU', 'KZ']
+
+
+def test__invoice_categories__off_by_default_explicit_and_missing_invoice_category():
+    # Выключено по умолчанию: обновление не добавляет клиенту Basic вызовы модели и вкладку.
+    assert make_config().inbox.invoice_category_ids == []
+    assert make_config(invoices={'enabled': True}).inbox.invoice_category_ids == ['invoice']
+    on = {'enabled': True, 'categories': ['support']}
+    assert make_config(invoices=on).inbox.invoice_category_ids == ['support']
+    cats = [
+        {'id': 'lead', 'description': 'x'},
+        {'id': 'marketing', 'description': 'y'},
+        {'id': 'other', 'description': 'z'},
+    ]
+    assert make_config(categories=cats, invoices={'enabled': True}).inbox.invoice_category_ids == []
+
+
+def test__example_config__oauth_ready_fields_and_invoices_section():
+    config = load_client_config(EXAMPLE, InboxConfig)
+    assert config.inbox.auth == 'password' and config.inbox.phone_regions == ['GE', 'RU']
+    assert config.inbox.invoices.sheet_tab == 'Invoices' and config.inbox.invoice_category_ids == ['invoice']
+
+
+def test__config_file__unknown_auth_method__config_error_names_field(tmp_path):
+    text = EXAMPLE.read_text(encoding='utf-8').replace('auth = "password"', 'auth = "basic"')
+    path = tmp_path / 'inbox.toml'
+    path.write_text(text, encoding='utf-8')
+    with pytest.raises(ConfigError, match=r'inbox\.auth'):
+        load_client_config(path, InboxConfig)
+
+
+def test__config_file__fractional_timeout__toml_decimal_converted_to_float(tmp_path):
+    # Ядро читает дробные числа TOML как Decimal (parse_float): поле-float должно это пережить.
+    text = EXAMPLE.read_text(encoding='utf-8').replace(
+        'max_body_chars = 8000', 'max_body_chars = 8000\ntimeout_seconds = 45.5'
+    )
+    path = tmp_path / 'inbox.toml'
+    path.write_text(text, encoding='utf-8')
+    timeout = load_client_config(path, InboxConfig).inbox.timeout_seconds
+    assert isinstance(timeout, float) and timeout == 45.5

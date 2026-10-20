@@ -219,3 +219,53 @@ def test__booking_config__owner_channel__admins_or_real_notify_channel():
     assert not msgspec.structs.replace(lonely, notify=NotifyConfig(console=True)).has_owner_channel
     assert msgspec.structs.replace(lonely, notify=NotifyConfig(webhook_url_env='HOOK')).has_owner_channel
     assert make_config(contact_phone='599 12 34 56').booking.contact_phone == '599 12 34 56'  # местный формат GE
+
+
+@pytest.mark.parametrize(
+    ('section', 'message'),
+    [
+        ({'calendar': {}}, 'нужен calendar_id'),
+        ({'calendar': {'calendar_id': 'a b@x'}}, 'не похоже на id календаря'),
+        ({'calendar': {'calendar_id': 's@x', 'cache_ttl_s': 5}}, 'cache_ttl_s'),
+        ({'calendar': {'calendar_id': 's@x', 'credentials_env': '/path/key.json'}}, 'имя переменной'),
+        ({'calendar': {'staff': {'ghost': 'g@x'}}}, 'неизвестный мастер ghost'),
+        ({'whatsapp': {'phone_number_id': '+995 555 12 34 56'}}, 'числовой ID номера'),
+        ({'whatsapp': {'phone_number_id': '123456789', 'graph_version': '25'}}, 'graph_version'),
+        ({'whatsapp': {'phone_number_id': '123456789', 'token_env': 'EAAB...'}}, 'имя переменной'),
+        ({'whatsapp': {'phone_number_id': '123456789', 'reminder_template': 'Reminder!'}}, 'имя шаблона'),
+        ({'whatsapp': {'phone_number_id': '123456789', 'template_languages': {'ka': 'ka'}}}, 'template_languages'),
+        ({'whatsapp': {'phone_number_id': '123456789', 'template_languages': {'en': 'English'}}}, 'template_languages'),
+        ({'telegram': {'mode': 'webhook'}}, 'public_url'),
+        ({'telegram': {'webhook_secret_env': 'x y'}}, 'имя переменной'),
+        ({'server': {'public_url': 'http://bot.example.test'}}, 'только https'),
+        ({'server': {'port': 70000}}, 'port'),
+        ({'server': {'port_env': '8080'}}, 'имя переменной'),
+    ],
+)
+def test__channel_sections__invalid__config_error(section, message):
+    with pytest.raises(ConfigError, match=message):
+        make_config(**section)
+
+
+def test__channel_sections__valid__defaults_and_lookups():
+    config = make_config(
+        calendar={'calendar_id': 'salon@x', 'staff': {'giorgi': 'giorgi@x'}},
+        whatsapp={
+            'phone_number_id': '123456789',
+            'reminder_template': 'booking_reminder',
+            'template_languages': {'en': 'en_US'},
+        },
+        telegram={'mode': 'webhook'},
+        server={'public_url': 'https://bot.example.test/'},
+    )
+    section = config.booking
+    assert section.calendar is not None and section.whatsapp is not None
+    assert section.calendar.calendar_for('giorgi') == 'giorgi@x' and section.calendar.calendar_for('nika') == 'salon@x'
+    assert section.calendar.calendars == ['giorgi@x', 'salon@x']
+    assert section.whatsapp.template_language('en') == 'en_US' and section.whatsapp.template_language('ru') == 'ru'
+    assert section.whatsapp.graph_version == 'v25.0'
+    assert section.server.base_url == 'https://bot.example.test' and section.needs_server
+    plain = make_config().booking
+    assert plain.telegram.mode == 'polling' and not plain.needs_server and plain.server.base_url is None
+    staff_only = make_config(calendar={'staff': {'nika': 'nika@x'}}).booking.calendar
+    assert staff_only is not None and staff_only.calendar_for('giorgi') is None

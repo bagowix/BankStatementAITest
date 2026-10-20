@@ -1,4 +1,5 @@
 import datetime as dt
+from decimal import Decimal
 
 import pytest
 
@@ -82,9 +83,9 @@ async def test__sheet_row__owner_language_and_removed_service__formatted(app: Ap
     booking = app.book_directly('tg:1', 'haircut', 'giorgi', local(WED, 12), name='Anna')
     row = app.service.sheet_row('action_created', booking, START)
     assert row == ['2026-10-20 12:30', 'created', booking.id, '2026-10-21', '12:00', 'Haircut', 'Giorgi', 'Anna',
-                   '+995 555 00 01 11', '40 GEL', 'buttons']  # fmt: skip
+                   '+995 555 00 01 11', Decimal('40'), 'GEL', 'buttons', 'Telegram']  # fmt: skip
     from msgspec.structs import replace
 
     gone = app.service.sheet_row('action_cancelled', replace(booking, service_id='removed'), START)
-    assert gone[5] == 'removed' and gone[9] == ''
+    assert gone[5] == 'removed' and gone[9] == '' and gone[10] == ''
     assert app.service.notice == dt.timedelta(minutes=120)

@@ -354,3 +354,47 @@ def test__free_slots__day_index_with_buffer_across_midnight__neighbour_day_respe
     following = next_free_slots(config, 'haircut', [late], local(TUE, 22), limit=5, staff_id='giorgi', start_day=WED)
     assert following[0].start == local(WED, 0, 45)
     assert WED in bookable_days(config, 'haircut', [late], START, staff_id='giorgi')
+
+
+def test__free_slots__external_busy__blocks_with_buffer_other_staff_free():
+    from autostudio.booking.domain import free_slots
+
+    buffered = make_config(buffer_min=15)
+    busy = {'giorgi': [(local(WED, 15), local(WED, 16))]}
+    starts = {
+        f'{slot.start:%H:%M}' for slot in free_slots(buffered, 'haircut', WED, [], START, staff_id='giorgi', busy=busy)
+    }
+    # 16:00 по Тбилиси = 12:00 UTC; пауза 15 минут закрывает и начало сразу после дела.
+    assert '12:00' not in starts and '12:15' in starts
+    other = free_slots(buffered, 'haircut', WED, [], START, staff_id='nika', busy=busy)
+    assert any(f'{slot.start:%H:%M}' == '11:00' for slot in other)  # 15:00 у Ники свободно
+
+
+def test__subtract_spans__holes_cut_inside_edges_and_outside():
+    from autostudio.booking.domain import subtract_spans
+
+    t = [START + dt.timedelta(hours=hour) for hour in range(10)]
+    assert subtract_spans([(t[1], t[5])], [(t[2], t[3])]) == [(t[1], t[2]), (t[3], t[5])]
+    assert subtract_spans([(t[1], t[5])], [(t[0], t[2]), (t[4], t[6])]) == [(t[2], t[4])]
+    assert subtract_spans([(t[1], t[2])], [(t[1], t[2])]) == []
+    assert subtract_spans([(t[3], t[4]), (t[1], t[2])], [(t[6], t[7]), (t[2], t[2])]) == [(t[1], t[2]), (t[3], t[4])]
+
+
+@pytest.mark.parametrize(
+    ('raw', 'expected'),
+    [
+        ('instagram', 'instagram'),
+        (' Site ', 'site'),
+        ('maps_2026-10', 'maps_2026-10'),
+        ('a' * 64, 'a' * 64),
+        ('a' * 65, None),
+        ('<b>x</b>', None),
+        ('инстаграм', None),
+        ('', None),
+        (None, None),
+    ],
+)
+def test__clean_source__deep_link_payload__telegram_rules(raw, expected):
+    from autostudio.booking.domain import clean_source
+
+    assert clean_source(raw) == expected

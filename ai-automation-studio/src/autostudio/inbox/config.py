@@ -186,7 +186,9 @@ class InvoiceSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
     что не сошлось, попадают в таблицу с пометкой «не проверено», а не как проверенные числа.
 
     Attributes:
-        enabled: Извлекать счета.
+        enabled: Извлекать счета. По умолчанию выключено, как черновики и сигналы: это функция
+            тарифов Standard и Premium, и обновление не должно молча добавить клиенту Basic
+            вызовы модели и новую вкладку.
         categories: Категории писем со счетами; None — категория `invoice`, если она есть.
         max_pdf_kb: PDF больше этого размера не разбирается (пометка «разобрать вручную»).
         max_pages: PDF длиннее не разбирается: счёт на 30 страниц — это уже не счёт, а отчёт.
@@ -194,7 +196,7 @@ class InvoiceSection(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
         sheet_tab: Вкладка таблицы со счетами.
     """
 
-    enabled: bool = True
+    enabled: bool = False
     categories: list[str] | None = None
     max_pdf_kb: int = 2048
     max_pages: int = 10

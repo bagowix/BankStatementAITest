@@ -115,3 +115,39 @@ answer = { en = "Cancel or reschedule free of charge up to 2 hours before your v
 # Переопределение любого текста бота (ключи — в src/autostudio/booking/texts.py):
 # [booking.texts.ru]
 # booked = "Записали! ✅\n{service}, {when}, мастер: {staff}.\nЗапись №{id}. До встречи!"
+
+# --- Google Calendar (Basic: «свободные слоты из Google Calendar») ---
+# Клиент открывает свой календарь (и календари мастеров) → «Настройки и общий доступ» →
+# «Поделиться с определёнными людьми» → e-mail сервисного аккаунта → «Изменять события».
+# Бот не предлагает время, занятое в календаре, и пишет туда записи событиями без гостей.
+# [booking.calendar]
+# credentials_env = "GOOGLE_APPLICATION_CREDENTIALS"   # тот же JSON-ключ, что у Google Sheets
+# calendar_id = "demo-barbers@group.calendar.google.com"  # календарь салона: для мастеров без своего
+# staff = { giorgi = "giorgi.barber@gmail.com" }          # личные календари мастеров (необязательно)
+# cache_ttl_s = 60        # сколько секунд помнить занятость (квота Google — 600 запросов/мин)
+# write_events = true     # false — только читать занятость, события не писать
+
+# --- WhatsApp Cloud API (Standard: второй канал записи) ---
+# Номер и WABA — в Business portfolio клиента; оператор — администратор или system user.
+# Нужен HTTPS-домен: Callback URL в кабинете Meta — https://<домен>/whatsapp/webhook.
+# [booking.whatsapp]
+# phone_number_id = "106540352242922"      # ID номера из WhatsApp Manager, не сам номер
+# graph_version = "v25.0"
+# token_env = "WHATSAPP_TOKEN"
+# app_secret_env = "WHATSAPP_APP_SECRET"
+# verify_token_env = "WHATSAPP_VERIFY_TOKEN"
+# reminder_template = "booking_reminder"   # одобренный шаблон Utility: {{1}} — услуга, {{2}} — время
+# template_languages = { en = "en_US", ru = "ru" }
+
+# --- Как бот получает апдейты Telegram ---
+# По умолчанию long polling (домен не нужен). Режим webhook — при своём HTTPS-домене.
+# [booking.telegram]
+# mode = "webhook"
+# webhook_secret_env = "BOOKING_TELEGRAM_WEBHOOK_SECRET"
+
+# --- HTTP-сервер вебхуков (WhatsApp и Telegram в режиме webhook) ---
+# Сам сервер слушает HTTP; HTTPS и сертификат даёт обратный прокси (Caddy, nginx).
+# [booking.server]
+# public_url = "https://bot.demo-barbers.ge"
+# port = 8080
+# port_env = "BOOKING_WEBHOOK_PORT"

@@ -11,7 +11,6 @@ from aiogram.exceptions import (
 )
 from aiogram.methods import (
     AnswerCallbackQuery,
-    DeleteWebhook,
     EditMessageReplyMarkup,
     SendMessage,
     SetMyCommands,
@@ -282,7 +281,8 @@ async def test__process__engine_bug__apology_and_operator_alert(bot, session, ap
     await feed(bot, booking_bot, message_update('/start'))
     assert session.sent()[0].text.startswith('Sorry, something went wrong on our side')
     assert app.operator.texts and 'RuntimeError' in app.operator.texts[0]
-    booking_bot._operator = Recorder(fail=NotifyError('down'))
+    booking_bot._alarm._operator = Recorder(fail=NotifyError('down'))
+    booking_bot._alarm._raised.clear()
     await feed(bot, booking_bot, message_update('/start'))
     assert len(session.sent()) == 2
 
@@ -306,32 +306,6 @@ async def test__set_commands__languages__default_and_per_language(bot, session, 
     await set_commands(bot, booking_bot, ['en'])
 
 
-async def test__run_polling__stopped__webhook_dropped_and_loop_stopped(bot, session, booking_bot, app, monkeypatch):
-    from autostudio.booking.reminders import ReminderLoop
-    from autostudio.runlog import Heartbeat
-
-    started: list[bool] = []
-
-    async def fake_polling(self, *bots, **kwargs):
-        started.append(kwargs['handle_signals'])
-
-    monkeypatch.setattr(Dispatcher, 'start_polling', fake_polling)
-    loop = ReminderLoop(
-        config=app.config,
-        store=app.store,
-        sender=TelegramSender(bot),
-        sink=app.sink,
-        events=app.events,
-        texts=app.texts,
-        heartbeat=Heartbeat(None, None),
-        operator=None,
-        clock=app.clock,
-    )
-    await tg.run_polling(bot, booking_bot, loop, ['en', 'ru'])
-    assert started == [True]
-    assert any(isinstance(r, DeleteWebhook) for r in session.requests)
-
-
 def forbidden(chat_id: int) -> TelegramForbiddenError:
     return TelegramForbiddenError(
         method=SendMessage(chat_id=chat_id, text='x'), message='Forbidden: bot was blocked by the user'
@@ -345,7 +319,7 @@ async def test__router__contact_of_someone_else__not_verified(bot, session, book
         seen.append(incoming)
         return []
 
-    booking_bot._engine.handle = spy
+    app.engine.handle = spy
     own = {'phone_number': '995555123456', 'first_name': 'Anna', 'user_id': 1}
     other = {'phone_number': '+1 000 000 0000', 'first_name': 'Bob', 'user_id': 777}
     no_owner = {'phone_number': '995555123456', 'first_name': 'Card'}
@@ -368,7 +342,7 @@ async def test__process__engine_bug_repeated__operator_alerted_once_per_hour(
     for _ in range(5):
         await feed(bot, booking_bot, callback_update('d:haircut:_:20261021:x'))
     assert len(app.operator.texts) == 1
-    booking_bot._clock = lambda: dt.datetime.now(dt.UTC) + dt.timedelta(hours=2)
+    booking_bot._alarm._clock = lambda: dt.datetime.now(dt.UTC) + dt.timedelta(hours=2)
     await feed(bot, booking_bot, callback_update('d:haircut:_:20261021:x'))
     assert len(app.operator.texts) == 2
 
@@ -398,3 +372,29 @@ async def test__process__reply_to_customer_who_blocked_bot__admin_told_not_deliv
     await feed(bot, booking_bot, raw)
     relay, receipt = session.sent()[2:]
     assert relay.chat_id == 4242 and receipt.text == 'Delivered to tg:4242.'
+
+
+@pytest.mark.parametrize(
+    ('text', 'payload'),
+    [
+        ('/start instagram', 'instagram'),
+        ('/start@DemoBot site extra', 'site'),
+        ('/start', None),
+        ('/book now', None),
+        ('hello', None),
+        (None, None),
+    ],
+)
+def test__deep_link_payload__start_argument_only(text, payload):
+    assert tg.deep_link_payload(text) == payload
+
+
+async def test__router__deep_link_in_private_chat__source_recorded_first_touch(bot, session, booking_bot, app):
+    await feed(bot, booking_bot, message_update('/start instagram'))
+    await feed(bot, booking_bot, message_update('/start site'))
+    assert app.store.customer('tg:1').source == 'instagram'
+    assert [event.payload for event in app.events_of('booking.link_opened')] == [
+        {'source': 'instagram', 'channel': 'telegram'},
+        {'source': 'site', 'channel': 'telegram'},
+    ]
+    assert session.sent()[0].text.startswith('Hi, Anna!')

@@ -92,7 +92,9 @@ class CalendarAvailability:
             spans: list[Span] = []
             for day in days:
                 cached = self._cache.get((calendar, day))
-                if cached is not None:
+                # Только свежий ответ: при сбое Google старый снимок не выдаётся за занятость — слоты
+                # считаются по базе, и оператор об этом знает (сигнал выше).
+                if cached is not None and now - cached[0] < self._ttl:
                     spans += cached[1]
             if not spans:
                 continue

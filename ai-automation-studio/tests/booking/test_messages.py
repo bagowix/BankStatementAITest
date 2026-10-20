@@ -1,4 +1,4 @@
-from autostudio.booking.messages import ADMINS, DeliveryError, Outgoing, Receipt, deliver, split_text
+from autostudio.booking.messages import ADMINS, Button, DeliveryError, Outgoing, Receipt, deliver, split_text
 from autostudio.errors import NotifyError
 from tests.booking.helpers import Recorder
 
@@ -68,3 +68,50 @@ def test__split_text__blocks_and_long_lines__under_limit_in_order():
     assert parts[0] == f'{"a" * 30}\n\n{"b" * 30}'
     assert parts[1].startswith('c' * 20) and parts[-1].endswith('…')
     assert split_text([]) == []
+
+
+async def test__routing_sender__by_key_prefix__unknown_channel_gone():
+    import pytest
+
+    from autostudio.booking.messages import RecipientGoneError, RoutingSender
+    from tests.booking.helpers import Recorder
+
+    telegram, whatsapp = Recorder(), Recorder()
+    routing = RoutingSender({'tg': telegram, 'wa': whatsapp})
+    await routing.send('tg:1', Outgoing(text='a'))
+    await routing.send('wa:3f9c', Outgoing(text='b'))
+    assert [chat for chat, _ in telegram.sent] == ['tg:1'] and [chat for chat, _ in whatsapp.sent] == ['wa:3f9c']
+    for chat in ('console:operator', 'no-prefix'):
+        with pytest.raises(RecipientGoneError):
+            await routing.send(chat, Outgoing(text='c'))
+
+
+def test__coalesce__notice_then_menu__one_message_when_it_fits():
+    from autostudio.booking.messages import ADMINS, Receipt, Reminder, coalesce
+
+    menu = Outgoing(text='Menu', buttons=[[Button('Book', 'b')]])
+    assert coalesce([Outgoing(text='Cancelled.'), menu], 1024) == [
+        Outgoing(text='Cancelled.\n\nMenu', buttons=[[Button('Book', 'b')]])
+    ]
+    # Разным адресатам, после кнопок, с квитанцией или напоминанием — не склеиваются.
+    to_admins = Outgoing(text='New booking', to=ADMINS)
+    receipt = Outgoing(text='x', to='tg:2', receipt=Receipt(delivered='ok', failed='no'))
+    reminder = Outgoing(text='⏰', reminder=Reminder(service='Haircut', when='now', language='en'))
+    kept = [menu, Outgoing(text='after buttons'), to_admins, receipt, reminder, Outgoing(text='last')]
+    assert coalesce(kept, 1024) == kept
+    assert coalesce([Outgoing(text='x' * 600), Outgoing(text='y' * 600)], 1024) == [
+        Outgoing(text='x' * 600),
+        Outgoing(text='y' * 600),
+    ]
+
+
+def test__channel_of__prefixes():
+    from autostudio.booking.messages import channel_of
+
+    assert [channel_of(key) for key in ('tg:1', 'wa:x', 'console:operator', 'sms:1', 'plain')] == [
+        'telegram',
+        'whatsapp',
+        'console',
+        'other',
+        'other',
+    ]
