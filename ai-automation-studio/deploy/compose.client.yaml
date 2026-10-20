@@ -1,0 +1,38 @@
+# Шаблон развёртывания одного клиента. Копируется в clients/<id>/compose.yaml
+# командой deploy/new-deployment.sh; включите только купленные пакеты (profiles).
+#
+#   docker compose -f clients/<id>/compose.yaml --profile booking up -d
+#
+name: autostudio-${CLIENT_ID:?CLIENT_ID не задан}
+
+x-common: &common
+  image: autostudio:latest
+  restart: unless-stopped
+  env_file: .env
+  volumes:
+    - ./:/config:ro
+    - data:/data
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  booking:
+    <<: *common
+    profiles: [booking]
+    command: ["booking", "run", "/config/booking.toml"]
+
+  prices:
+    <<: *common
+    profiles: [prices]
+    command: ["prices", "run", "/config/prices.toml", "--every-hours", "6"]
+
+  inbox:
+    <<: *common
+    profiles: [inbox]
+    command: ["inbox", "run", "/config/inbox.toml", "--every-minutes", "10"]
+
+volumes:
+  data:

@@ -5,10 +5,10 @@ __pycache__/
 .env.*
 !.env.example
 !**/.env.example
-.mypy_cache/
+.mypy_cache*/
 .ruff_cache/
 .pytest_cache/
-.coverage
+.coverage*
 coverage.xml
 htmlcov/
 dist/
