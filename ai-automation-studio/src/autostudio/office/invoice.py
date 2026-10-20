@@ -3,7 +3,9 @@
 Счёт — документ для налоговой и для банка клиента, поэтому формулировка услуг
 выбрана под режим малого бизнеса: «разработка, настройка, интеграция и
 сопровождение ПО», никогда не «консалтинг» (консалтинг из режима 1% исключён,
-бриф 6.2). Код отказывается выпускать счёт со словом «consulting» в позициях.
+бриф 6.2). Код отказывается выпускать счёт со словом «consulting» в любом тексте,
+который печатается от имени оператора: позиции, примечание, строки о налогах и оплате.
+Имя клиента не проверяется: клиент может называться «… Consulting LLC».
 """
 
 import datetime as dt
@@ -26,14 +28,20 @@ from autostudio.office.money import (
     invoice_currency,
     money,
     parse_amount,
+    shift_months,
 )
-from autostudio.office.operator import OperatorProfile
+from autostudio.office.operator import Issuer
 
 type Preset = Literal['setup', 'support']
 type InvoiceStatus = Literal['issued', 'paid', 'void']
 
 DEFAULT_DUE_DAYS: Final = 7
 MAX_DUE_DAYS: Final = 120
+# Счёт «на 1-е число» готовят в последние дни месяца; дальше в будущее — уже опечатка,
+# а номер расходуется навсегда.
+MAX_FUTURE_DAYS: Final = 7
+# Цена за единицу печатается до центов: иначе «Кол-во × Цена» в счёте не сходится с суммой строки.
+PRICE_PLACES: Final = 2
 # Формулировки по умолчанию — те, что в договоре (1.1) и в вопросе бухгалтеру (бриф 6.3).
 PRESET_WORDING: Final[dict[Language, dict[Preset, str]]] = {
     'en': {
@@ -132,6 +140,7 @@ class Invoice(msgspec.Struct, frozen=True, kw_only=True):
         client: Клиент.
         items: Позиции.
         notes: Примечание внизу счёта.
+        issuer: Реквизиты оператора на момент выпуска; None — у счетов, выпущенных до снимков.
     """
 
     number: str
@@ -142,6 +151,7 @@ class Invoice(msgspec.Struct, frozen=True, kw_only=True):
     client: ClientParty
     items: list[LineItem]
     notes: str = ''
+    issuer: Issuer | None = None
 
     @property
     def total(self) -> Decimal:
@@ -156,6 +166,7 @@ class InvoiceDraft(msgspec.Struct, frozen=True, kw_only=True):
         items: Позиции.
         currency: Валюта.
         issue_date: Дата счёта.
+        issuer: Реквизиты оператора — снимок попадёт в реестр вместе со счётом.
         due_days: Дней на оплату.
         language: Язык документа.
         notes: Примечание.
@@ -165,6 +176,7 @@ class InvoiceDraft(msgspec.Struct, frozen=True, kw_only=True):
     items: list[LineItem]
     currency: InvoiceCurrency
     issue_date: dt.date
+    issuer: Issuer
     due_days: int = DEFAULT_DUE_DAYS
     language: Language = 'en'
     notes: str = ''
@@ -180,6 +192,7 @@ class InvoiceDraft(msgspec.Struct, frozen=True, kw_only=True):
             client=self.client,
             items=list(self.items),
             notes=self.notes,
+            issuer=self.issuer,
         )
 
 
@@ -190,7 +203,8 @@ def validate_draft(draft: InvoiceDraft) -> None:
         draft: Черновик счёта.
 
     Raises:
-        ConfigError: Нет клиента или позиций, нулевой итог, неверный срок, страна или «консалтинг».
+        ConfigError: Нет клиента или позиций, нулевой итог, неверный срок, страна, цена с долями цента
+            или «консалтинг» в тексте оператора.
     """
     if not draft.client.name.strip():
         raise ConfigError('клиент: нужно наименование (--client-name или [client].name)')
@@ -203,18 +217,50 @@ def validate_draft(draft: InvoiceDraft) -> None:
     for item in draft.items:
         if not item.description.strip():
             raise ConfigError('позиция без описания')
-        if _CONSULTING.search(item.description):
-            raise ConfigError(
-                f'позиция {item.description!r}: слово «consulting/консультации» в счёте — риск выпасть из режима '
-                'малого бизнеса (консалтинг исключён, бриф 6.2). Пишите «software development, configuration, '
-                'integration and maintenance» / «разработка, настройка, интеграция и сопровождение ПО»'
-            )
         if item.quantity <= 0 or not item.quantity.is_finite():
             raise ConfigError(f'позиция {item.description!r}: количество должно быть больше нуля')
         if item.unit_price < 0 or not item.unit_price.is_finite():
             raise ConfigError(f'позиция {item.description!r}: цена не может быть отрицательной')
+        parse_amount(item.quantity, what=f'позиция {item.description!r}: количество')
+        parse_amount(item.unit_price, what=f'позиция {item.description!r}: цена', allow_zero=True, places=PRICE_PLACES)
+    printed = [
+        *((f'позиция {item.description!r}', item.description) for item in draft.items),
+        ('примечание (--notes)', draft.notes),
+        *(('tax_note / payment_note в operator.toml', text) for text in draft.issuer.printed_texts()),
+    ]
+    for where, text in printed:
+        if _CONSULTING.search(text):
+            raise ConfigError(
+                f'{where}: слово «consulting/консультации» в счёте — риск выпасть из режима малого бизнеса '
+                '(консалтинг исключён, бриф 6.2). Пишите «software development, configuration, integration and '
+                'maintenance» / «разработка, настройка, интеграция и сопровождение ПО»'
+            )
     if total_of(draft.items) <= 0:
         raise ConfigError('итог счёта — ноль: проверьте цены')
+
+
+def check_issue_date(issue_date: dt.date, today: dt.date, *, allow: bool = False) -> None:
+    """Дата счёта до выдачи номера: опечатка в годе открыла бы новую серию навсегда.
+
+    Args:
+        issue_date: Дата счёта.
+        today: Сегодня в Тбилиси.
+        allow: Оператор подтвердил необычную дату (`--allow-date`).
+
+    Raises:
+        ConfigError: Дата дальше `MAX_FUTURE_DAYS` в будущем или раньше прошлого календарного года.
+    """
+    if allow:
+        return
+    if issue_date > today + dt.timedelta(days=MAX_FUTURE_DAYS):
+        raise ConfigError(
+            f'дата счёта {issue_date.isoformat()} больше чем на {MAX_FUTURE_DAYS} дн. в будущем: номер расходуется '
+            'навсегда — проверьте --date (осознанно: --allow-date)'
+        )
+    if issue_date.year < today.year - 1:
+        raise ConfigError(
+            f'дата счёта {issue_date.isoformat()} раньше прошлого года — проверьте --date (осознанно: --allow-date)'
+        )
 
 
 def preset_item(
@@ -234,7 +280,7 @@ def preset_item(
     return LineItem(
         description=PRESET_WORDING[language][preset],
         quantity=quantity,
-        unit_price=parse_amount(price, what=f'--{preset}'),
+        unit_price=parse_amount(price, what=f'--{preset}', places=PRICE_PLACES),
     )
 
 
@@ -259,12 +305,32 @@ def parse_item(spec: str) -> LineItem:
         qty = Decimal(1)
     else:
         raise ConfigError(f'--item {spec!r}: ожидается "описание;количество;цена" или "описание;цена"')
-    return LineItem(description=description.strip(), quantity=qty, unit_price=parse_amount(price, what='--item: цена'))
+    return LineItem(
+        description=description.strip(),
+        quantity=qty,
+        unit_price=parse_amount(price, what='--item: цена', places=PRICE_PLACES),
+    )
 
 
-def period_suffix(month: dt.date, language: Language) -> str:
-    """« — November 2026» / « — ноябрь 2026» для позиции абонентской поддержки."""
-    return f' — {_MONTH_NAMES[language][month.month - 1]} {month.year}'
+def _month_name(month: dt.date, language: Language) -> str:
+    return f'{_MONTH_NAMES[language][month.month - 1]} {month.year}'
+
+
+def period_suffix(month: dt.date, language: Language, *, months: int = 1) -> str:
+    """« — November 2026» для одного месяца поддержки, « — November 2026 – January 2027» для нескольких.
+
+    Args:
+        month: Первый оплачиваемый месяц.
+        language: Язык счёта.
+        months: Сколько месяцев в позиции.
+
+    Returns:
+        Хвост описания позиции.
+    """
+    first = _month_name(month, language)
+    if months <= 1:
+        return f' — {first}'
+    return f' — {first} – {_month_name(shift_months(month, months - 1), language)}'
 
 
 class _RequestItem(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
@@ -309,18 +375,21 @@ class InvoiceRequest(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_f
                 LineItem(
                     description=description,
                     quantity=parse_amount(raw.quantity, what='items.quantity'),
-                    unit_price=parse_amount(raw.unit_price, what='items.unit_price', allow_zero=True),
+                    unit_price=parse_amount(
+                        raw.unit_price, what='items.unit_price', allow_zero=True, places=PRICE_PLACES
+                    ),
                 )
             )
         return items
 
-    def draft(self, *, default_currency: InvoiceCurrency, today: dt.date) -> InvoiceDraft:
+    def draft(self, *, default_currency: InvoiceCurrency, today: dt.date, issuer: Issuer) -> InvoiceDraft:
         """Черновик счёта с умолчаниями оператора."""
         return InvoiceDraft(
             client=self.client,
             items=self.line_items(self.language),
             currency=invoice_currency(self.currency) if self.currency else default_currency,
             issue_date=self.issue_date or today,
+            issuer=issuer,
             due_days=self.due_days,
             language=self.language,
             notes=self.notes,
@@ -365,6 +434,8 @@ _LABELS: Final[dict[Language, dict[str, str]]] = {
         'iban': 'IBAN',
         'bank': 'Bank',
         'swift': 'SWIFT/BIC',
+        'bank_address': 'Bank address',
+        'intermediary': 'Intermediary bank (USD)',
         'reference': 'Payment reference',
         'fees': 'Please pay the full amount; bank charges are paid by each party for its own bank.',
         'notes': 'Notes',
@@ -390,6 +461,8 @@ _LABELS: Final[dict[Language, dict[str, str]]] = {
         'iban': 'IBAN',
         'bank': 'Банк',
         'swift': 'SWIFT/BIC',
+        'bank_address': 'Адрес банка',
+        'intermediary': 'Банк-посредник (USD)',
         'reference': 'Назначение платежа',
         'fees': 'Комиссию своего банка каждая сторона оплачивает сама.',
         'notes': 'Примечание',
@@ -442,6 +515,9 @@ tr.total td { border-bottom: none; border-top: 2px solid #1b1f23; font-weight: 7
 """
 
 
+_MONO: Final = ' class="mono"'
+
+
 def _esc(text: str) -> str:
     return html.escape(text, quote=True)
 
@@ -455,14 +531,32 @@ def _quantity(value: Decimal, language: Language) -> str:
     return text.replace('.', ',') if language == 'ru' else text
 
 
-def render_html(invoice: Invoice, operator: OperatorProfile, *, status: InvoiceStatus = 'issued') -> str:
+def _payment_rows(issuer: Issuer, number: str, language: Language) -> list[tuple[str, str, bool]]:
+    """Строки блока оплаты: (подпись, значение, моноширинно). Необязательные — только если заданы."""
+    t = _LABELS[language]
+    rows = [
+        (t['beneficiary'], issuer.legal_name, False),
+        (t['iban'], issuer.iban_grouped, True),
+        (t['bank'], issuer.bank_name, False),
+    ]
+    if issuer.bank_address:
+        rows.append((t['bank_address'], issuer.bank_address, False))
+    rows.append((t['swift'], issuer.swift, True))
+    if issuer.intermediary_bank:
+        swift = f', SWIFT/BIC {issuer.intermediary_swift}' if issuer.intermediary_swift else ''
+        rows.append((t['intermediary'], issuer.intermediary_bank + swift, False))
+    rows.append((t['reference'], number, True))
+    return rows
+
+
+def render_html(invoice: Invoice, issuer: Issuer, *, status: InvoiceStatus = 'issued') -> str:
     """Счёт в самодостаточном HTML: A4, без внешних шрифтов и картинок, «Печать → PDF» в браузере.
 
     Всё, что пришло из флагов и файлов (клиент, позиции, примечания), экранируется.
 
     Args:
         invoice: Счёт.
-        operator: Реквизиты оператора.
+        issuer: Реквизиты оператора — снимок из реестра, с которым счёт выпущен.
         status: Статус в реестре; аннулированный счёт печатается с отметкой.
 
     Returns:
@@ -470,7 +564,7 @@ def render_html(invoice: Invoice, operator: OperatorProfile, *, status: InvoiceS
     """
     lang = invoice.language
     t = _LABELS[lang]
-    issuer = operator.display_name(lang)
+    name = issuer.display_name(lang)
     rows = ''.join(
         f'<tr><td class="idx">{index}</td><td>{_esc(item.description)}</td>'
         f'<td class="num">{_quantity(item.quantity, lang)}</td>'
@@ -485,13 +579,19 @@ def render_html(invoice: Invoice, operator: OperatorProfile, *, status: InvoiceS
         client_lines.append(f'<p>{_esc(t["tax_id"])}: {_esc(invoice.client.tax_id)}</p>')
     if invoice.client.email:
         client_lines.append(f'<p>{_esc(invoice.client.email)}</p>')
-    contacts = [operator.email, operator.phone, operator.website]
+    contacts = [issuer.email, issuer.phone, issuer.website]
     issuer_lines = [
-        f'<p class="name">{_esc(issuer)}</p>',
-        f'<p>{_esc(t["id"])}: {_esc(operator.id_number)}</p>',
-        f'<p>{_multiline(operator.address)}</p>',
+        f'<p class="name">{_esc(name)}</p>',
+        f'<p>{_esc(t["id"])}: {_esc(issuer.id_number)}</p>',
+        f'<p>{_multiline(issuer.address)}</p>',
         *(f'<p>{_esc(contact)}</p>' for contact in contacts if contact),
     ]
+    payment = ''.join(
+        f'<tr><td>{_esc(label)}</td><td{_MONO if mono else ""}>{_esc(value)}</td></tr>'
+        for label, value, mono in _payment_rows(issuer, invoice.number, lang)
+    )
+    payment_note = issuer.payment_note.text(lang)
+    extra = f'<p class="small">{_multiline(payment_note)}</p>' if payment_note.strip() else ''
     notes = (
         f'<div class="notes"><div class="label">{_esc(t["notes"])}</div><p>{_multiline(invoice.notes)}</p></div>'
         if invoice.notes.strip()
@@ -504,7 +604,7 @@ def render_html(invoice: Invoice, operator: OperatorProfile, *, status: InvoiceS
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<title>{_esc(t["title"])} {_esc(invoice.number)} — {_esc(invoice.client.name)}</title>'
         f'<style>{_CSS}</style></head><body><main class="sheet">{stamp}'
-        f'<header><div><h1>{_esc(t["title"])}</h1><div class="issuer">{_esc(issuer)}</div></div>'
+        f'<header><div><h1>{_esc(t["title"])}</h1><div class="issuer">{_esc(name)}</div></div>'
         f'<table class="meta"><tr><td>{_esc(t["number"])}</td><td><b>{_esc(invoice.number)}</b></td></tr>'
         f'<tr><td>{_esc(t["issued"])}</td><td>{invoice.issue_date.isoformat()}</td></tr>'
         f'<tr><td>{_esc(t["due"])}</td><td>{invoice.due_date.isoformat()}</td></tr>'
@@ -517,14 +617,9 @@ def render_html(invoice: Invoice, operator: OperatorProfile, *, status: InvoiceS
         f'<th class="num">{_esc(t["amount"])}</th></tr></thead><tbody>{rows}'
         f'<tr class="total"><td></td><td colspan="3">{_esc(t["total"])}</td><td class="num">{_esc(total)}</td></tr>'
         '</tbody></table>'
-        f'<section class="pay"><div class="label">{_esc(t["pay"])}</div><table>'
-        f'<tr><td>{_esc(t["beneficiary"])}</td><td>{_esc(operator.legal_name)}</td></tr>'
-        f'<tr><td>{_esc(t["iban"])}</td><td class="mono">{_esc(operator.iban_grouped)}</td></tr>'
-        f'<tr><td>{_esc(t["bank"])}</td><td>{_esc(operator.bank_name)}</td></tr>'
-        f'<tr><td>{_esc(t["swift"])}</td><td class="mono">{_esc(operator.swift_code)}</td></tr>'
-        f'<tr><td>{_esc(t["reference"])}</td><td class="mono"><b>{_esc(invoice.number)}</b></td></tr>'
-        f'</table><p class="small">{_esc(t["fees"])}</p></section>'
-        f'{notes}<p class="tax">{_esc(operator.tax_note.text(lang))}</p>'
+        f'<section class="pay"><div class="label">{_esc(t["pay"])}</div><table>{payment}</table>'
+        f'{extra}<p class="small">{_esc(t["fees"])}</p></section>'
+        f'{notes}<p class="tax">{_esc(issuer.tax_note.text(lang))}</p>'
         '</main></body></html>\n'
     )
 
@@ -534,12 +629,12 @@ def md_text(text: str) -> str:
     return ' '.join(text.split()).replace('|', '\\|').replace('<', '&lt;').replace('>', '&gt;')
 
 
-def render_markdown(invoice: Invoice, operator: OperatorProfile, *, status: InvoiceStatus = 'issued') -> str:
+def render_markdown(invoice: Invoice, issuer: Issuer, *, status: InvoiceStatus = 'issued') -> str:
     """Короткая сводка счёта в Markdown — для письма клиенту или заметок оператора.
 
     Args:
         invoice: Счёт.
-        operator: Реквизиты оператора.
+        issuer: Реквизиты оператора — снимок из реестра.
         status: Статус в реестре.
 
     Returns:
@@ -563,11 +658,16 @@ def render_markdown(invoice: Invoice, operator: OperatorProfile, *, status: Invo
             for index, item in enumerate(invoice.items, start=1)
         ),
         '',
-        f'**{t["pay"]}:** {md_text(operator.legal_name)} · {t["iban"]} `{operator.iban_grouped}` · '
-        f'{md_text(operator.bank_name)} · {t["swift"]} `{operator.swift_code}` · {t["reference"]}: `{invoice.number}`',
-        '',
-        md_text(operator.tax_note.text(lang)),
+        f'**{t["pay"]}:** '
+        + ' · '.join(
+            f'{label}: `{md_text(value)}`' if mono else f'{label}: {md_text(value)}'
+            for label, value, mono in _payment_rows(issuer, invoice.number, lang)
+        ),
     ]
+    payment_note = issuer.payment_note.text(lang)
+    if payment_note.strip():
+        lines += ['', md_text(payment_note)]
+    lines += ['', md_text(issuer.tax_note.text(lang))]
     if invoice.notes.strip():
         lines += ['', f'{t["notes"]}: {md_text(invoice.notes)}']
     return '\n'.join(lines) + '\n'

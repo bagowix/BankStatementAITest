@@ -1,8 +1,11 @@
 import datetime as dt
+import sqlite3
+from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
+import msgspec
 import pytest
 import respx
 
@@ -12,6 +15,9 @@ from autostudio.office import cli
 from autostudio.office.contract import ContractIncompleteError
 from autostudio.office.rates import NBG_URL, RateUnavailableError
 from autostudio.office.store import OfficeStore
+from tests.office.helpers import OPERATOR_TOML, TEST_BANK, TEST_NAME
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 NOW = dt.datetime(2026, 10, 20, 9, 0, tzinfo=dt.UTC)
 NBG_USD = b'[{"date": "2026-10-14T00:00:00.000Z", "currencies": [{"code": "USD", "quantity": 1, "rate": 2.7123}]}]'
@@ -30,6 +36,7 @@ def office(tmp_path: Path, operator_file: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv('AUTOSTUDIO_OPERATOR', str(operator_file))
     monkeypatch.setenv('AUTOSTUDIO_OFFICE_DIR', str(data))
     monkeypatch.setattr(cli, '_now', lambda: NOW)
+    OfficeStore(data / 'office.sqlite').init()
     return data
 
 
@@ -39,9 +46,11 @@ def _issue(**overrides: object) -> None:
     cli.invoice_new(**values)
 
 
-def test__office_dir__flag_env_default(monkeypatch):
+def test__office_dir__flag_env_default(monkeypatch, tmp_path):
     monkeypatch.delenv('AUTOSTUDIO_OFFICE_DIR', raising=False)
-    assert cli.office_dir(None) == Path('var/office')
+    monkeypatch.chdir(tmp_path)
+    # Не от текущего каталога: из любой папки — тот же реестр в корне репозитория.
+    assert cli.office_dir(None) == REPO_ROOT / 'var' / 'office'
     monkeypatch.setenv('AUTOSTUDIO_OFFICE_DIR', '/srv/office')
     assert cli.office_dir(None) == Path('/srv/office')
     assert cli.office_dir(Path('x')) == Path('x')
@@ -77,10 +86,46 @@ def test__invoice__flags__registry_html_and_markdown(office, capsys):
 
 
 def test__invoice__georgian_client_in_usd_and_future_date__notes(office, capsys):
-    _issue(client_country='GE', date=dt.date(2026, 11, 1))
+    _issue(client_country='GE', date=dt.date(2026, 10, 25))
     out = capsys.readouterr().out
     assert 'местные клиенты платят в лари' in out
     assert 'дата счёта в будущем' in out
+    assert f'реестр: {office.resolve() / "office.sqlite"}' in out
+
+
+def test__invoice__typo_dates__refused_before_number_or_allowed_explicitly(office, capsys):
+    with pytest.raises(ConfigError, match='--allow-date'):
+        _issue(date=dt.date(2062, 10, 10))
+    _issue(date=dt.date(2026, 10, 1))
+    with pytest.raises(ConfigError, match='раньше последнего счёта серии'):
+        _issue(date=dt.date(2026, 3, 1))
+    _issue(date=dt.date(2026, 3, 1), allow_date=True)
+    numbers = [(r.invoice.number, r.invoice.issue_date) for r in OfficeStore(office / 'office.sqlite').list_invoices()]
+    assert numbers == [('AS-2026-001', dt.date(2026, 10, 1)), ('AS-2026-002', dt.date(2026, 3, 1))]
+
+
+def test__invoice__several_support_months__period_range_in_line(office):
+    _issue(setup=None, support='99', months=3, period='2026-11')
+    html = (office / 'invoices' / 'AS-2026-001.html').read_text(encoding='utf-8')
+    assert '(monthly) — November 2026 – January 2027' in html
+    with pytest.raises(ConfigError, match='--months: от 1 до 24'):
+        _issue(setup=None, support='99', months=25, period='2026-11')
+
+
+def test__invoice__absurd_numbers__config_error_not_traceback(office):
+    with pytest.raises(ConfigError, match='12 цифр'):
+        _issue(setup=None, item=['x;1;99999999999999999999999999999'])
+    with pytest.raises(ConfigError, match='2 знаков'):
+        _issue(setup=None, item=['Hours;3;33.333'])
+    with pytest.raises(ConfigError, match='2000'):
+        cli.invoice_list(year=0)
+    with pytest.raises(ConfigError, match='2000'):
+        cli.ledger_export(year=0)
+    with pytest.raises(ConfigError, match='12 цифр'):
+        cli.ledger_add(
+            amount='999999999999999999999999999999', currency='GEL', channel='bank', counterparty='X', country='GE'
+        )
+    assert OfficeStore(office / 'office.sqlite').list_invoices() == []
 
 
 def test__invoice__from_file__lang_and_overrides(office, tmp_path, capsys):
@@ -143,6 +188,36 @@ def test__invoice_void__file_rewritten_with_stamp(office, capsys):
     assert (office / 'invoices' / 'AS-2026-002.html').exists()
 
 
+def test__invoice_void_and_show__after_profile_change__issued_details_kept(office, tmp_path, monkeypatch):
+    _issue()
+    moved = tmp_path / 'operator-new.toml'
+    moved.write_text(
+        OPERATOR_TOML.replace(TEST_BANK, 'JSC Other Bank').replace('Test Street 1', 'New Street 99'), encoding='utf-8'
+    )
+    monkeypatch.setenv('AUTOSTUDIO_OPERATOR', str(moved))
+    cli.invoice_void('AS-2026-001', reason='wrong amount')
+    html = (office / 'invoices' / 'AS-2026-001.html').read_text(encoding='utf-8')
+    assert TEST_BANK in html and 'Test Street 1' in html
+    assert 'Other Bank' not in html and 'New Street 99' not in html
+    cli.invoice_show('AS-2026-001', html=True)
+    assert 'Other Bank' not in (office / 'invoices' / 'AS-2026-001.md').read_text(encoding='utf-8')
+    _issue()
+    assert 'JSC Other Bank' in (office / 'invoices' / 'AS-2026-002.html').read_text(encoding='utf-8')
+
+
+def test__invoice_show__invoice_without_snapshot__current_profile_with_warning(office, capsys):
+    _issue()
+    store = OfficeStore(office / 'office.sqlite')
+    record = store.get_invoice('AS-2026-001')
+    legacy = msgspec.json.encode(msgspec.structs.replace(record.invoice, issuer=None)).decode()
+    with closing(sqlite3.connect(store.path)) as conn, conn:
+        conn.execute("UPDATE invoices SET payload = ? WHERE number = 'AS-2026-001'", (legacy,))
+    capsys.readouterr()
+    cli.invoice_show('AS-2026-001')
+    out = capsys.readouterr().out
+    assert 'нет снимка реквизитов' in out and TEST_BANK in out
+
+
 def test__invoice_show__markdown_and_html(office, capsys):
     _issue()
     (office / 'invoices' / 'AS-2026-001.html').unlink()
@@ -164,6 +239,150 @@ def test__invoice_paid__defaults_from_invoice__receipt_in_ledger(office, capsys)
     assert receipt.platform_fee == Decimal('12.50')
     with pytest.raises(ConfigError, match='статус paid'):
         cli.invoice_paid('AS-2026-001', rate='2.7')
+
+
+def test__invoice_paid__other_currency_without_amount__refused(office, capsys):
+    # Сумма USD-счёта не может молча стать той же цифрой в лари: оборот занизился бы в 2.7 раза.
+    _issue(setup='450')
+    with pytest.raises(ConfigError, match='укажите --amount'):
+        cli.invoice_paid('AS-2026-001', date=dt.date(2026, 10, 14), currency='GEL')
+    assert OfficeStore(office / 'office.sqlite').receipts() == []
+    cli.invoice_paid('AS-2026-001', date=dt.date(2026, 10, 14), currency='GEL', amount='1215.00')
+    assert 'другой валюте' in capsys.readouterr().out
+    [receipt] = OfficeStore(office / 'office.sqlite').receipts()
+    assert (receipt.amount, receipt.currency, receipt.gel_amount) == (Decimal('1215.00'), 'GEL', Decimal('1215.00'))
+
+
+def test__ledger_add_then_invoice_paid__one_receipt_not_two(office, capsys):
+    _issue(setup='1000')
+    cli.ledger_add(
+        amount='1000',
+        currency='USD',
+        channel='bank',
+        counterparty='Example Corp',
+        country='US',
+        date=dt.date(2026, 10, 10),
+        rate='2.70',
+        invoice='AS-2026-001',
+    )
+    out = capsys.readouterr().out
+    assert 'invoice paid AS-2026-001 (без --amount: только статус' in out
+    cli.invoice_paid('AS-2026-001')
+    out = capsys.readouterr().out
+    assert 'отмечен оплаченным 2026-10-10' in out and 'новой записи нет' in out
+    store = OfficeStore(office / 'office.sqlite')
+    assert len(store.receipts()) == 1
+    assert store.get_invoice('AS-2026-001').status == 'paid'
+    cli.ledger_month('2026-10')
+    month = capsys.readouterr().out
+    assert 'Оборот месяца: **2 700.00 GEL**' in month
+    assert 'Налог к уплате за месяц (оценка): **27.00 GEL**' in month
+
+
+def test__ledger_add_partial_then_invoice_paid__flags_and_top_up(office, capsys):
+    _issue(setup='1000')
+    common = {'currency': 'USD', 'channel': 'bank', 'counterparty': 'Example Corp', 'country': 'US', 'rate': '2.70'}
+    cli.ledger_add(amount='400', date=dt.date(2026, 10, 10), invoice='AS-2026-001', **common)
+    assert 'получено 400.00, а в счёте 1000.00 USD' in capsys.readouterr().out
+    with pytest.raises(ConfigError, match='добавьте --amount'):
+        cli.invoice_paid('AS-2026-001', rate='2.70')
+    with pytest.raises(ConfigError, match='в будущем'):
+        cli.invoice_paid('AS-2026-001', date=dt.date(2026, 10, 21))
+    # Доплата остатка — явной суммой, отдельной записью.
+    cli.invoice_paid('AS-2026-001', amount='600', date=dt.date(2026, 10, 14), rate='2.70')
+    assert 'внимание' not in capsys.readouterr().out
+    amounts = [r.amount for r in OfficeStore(office / 'office.sqlite').receipts()]
+    assert amounts == [Decimal('400.00'), Decimal('600.00')]
+
+
+def test__ledger_add__invoice_already_paid__summary_without_paid_hint(office, capsys):
+    # Путь из docs/office.md, раздел 9: первая часть — invoice paid --amount, остаток — ledger add --invoice.
+    _issue(setup='1000')
+    cli.invoice_paid('AS-2026-001', amount='400', date=dt.date(2026, 10, 10), rate='2.70')
+    assert 'внимание: получено 400.00, а в счёте 1000.00 USD: не хватает 600.00' in capsys.readouterr().out
+    cli.ledger_add(
+        amount='600',
+        currency='USD',
+        channel='bank',
+        counterparty='Example Corp',
+        country='US',
+        date=dt.date(2026, 10, 14),
+        rate='2.70',
+        invoice='AS-2026-001',
+    )
+    out = capsys.readouterr().out
+    assert 'записано #2' in out and 'invoice paid' not in out
+    assert 'по счёту AS-2026-001: получено 1000.00 USD — ровно сумма счёта (2 зап.)' in out
+
+
+def test__invoice_paid_then_ledger_add_same_amount__refused_or_warned(office, capsys):
+    # Обратный порядок к ledger add → invoice paid: invoice paid уже записал поступление,
+    # и та же банковская проводка через ledger add --invoice удвоила бы оборот и налог.
+    _issue(client_name='Beta LLC', setup='1000', date=dt.date(2026, 10, 10))
+    cli.invoice_paid('AS-2026-001', date=dt.date(2026, 10, 14), currency='usd', rate='2.7', fetch=False)
+    assert 'по счёту AS-2026-001: получено 1000.00 USD — ровно сумма счёта' in capsys.readouterr().out
+    again = {
+        'amount': '1000',
+        'currency': 'USD',
+        'channel': 'bank',
+        'counterparty': 'Beta LLC',
+        'country': 'US',
+        'invoice': 'AS-2026-001',
+        'rate': '2.70',
+    }
+    with pytest.raises(ConfigError, match=r'та же сумма и дата.*--extra'):
+        cli.ledger_add(date=dt.date(2026, 10, 14), **again)
+    with pytest.raises(ConfigError, match=r'больше суммы счёта.*--extra'):
+        cli.ledger_add(date=dt.date(2026, 10, 15), **again)
+    with pytest.raises(ConfigError, match='--extra относится к поступлению по счёту'):
+        cli.ledger_add(**{**again, 'invoice': None}, extra=True)
+    store = OfficeStore(office / 'office.sqlite')
+    assert len(store.receipts()) == 1
+    cli.ledger_month('2026-10')
+    month = capsys.readouterr().out
+    assert 'Оборот месяца: **2 700.00 GEL**' in month
+    assert 'Налог к уплате за месяц (оценка): **27.00 GEL**' in month
+    # Клиент правда заплатил дважды: --extra записывает, а сводка громко показывает переплату.
+    cli.ledger_add(date=dt.date(2026, 10, 15), extra=True, **again)
+    out = capsys.readouterr().out
+    assert 'записано #2' in out
+    assert 'внимание: получено 2000.00, а в счёте 1000.00 USD: больше на 1000.00' in out
+    assert 'не записана ли оплата дважды' in out
+
+
+def test__ledger_add_full_then_invoice_paid_amount__top_up_beyond_total_refused(office, capsys):
+    _issue(setup='1000')
+    common = {'currency': 'USD', 'channel': 'bank', 'counterparty': 'Example Corp', 'country': 'US', 'rate': '2.70'}
+    cli.ledger_add(amount='1000', date=dt.date(2026, 10, 10), invoice='AS-2026-001', **common)
+    assert 'по счёту AS-2026-001: получено 1000.00 USD — ровно сумма счёта (1 зап.)' in capsys.readouterr().out
+    # «Доплата остатка» на всю сумму — та же оплата второй раз.
+    with pytest.raises(ConfigError, match='больше суммы счёта'):
+        cli.invoice_paid('AS-2026-001', amount='1000', date=dt.date(2026, 10, 14), rate='2.70')
+    with pytest.raises(ConfigError, match='--extra относятся к новой записи'):
+        cli.invoice_paid('AS-2026-001', extra=True)
+    store = OfficeStore(office / 'office.sqlite')
+    assert len(store.receipts()) == 1 and store.get_invoice('AS-2026-001').status == 'issued'
+    cli.invoice_paid('AS-2026-001', amount='1000', date=dt.date(2026, 10, 14), rate='2.70', extra=True)
+    assert 'внимание: получено 2000.00, а в счёте 1000.00 USD' in capsys.readouterr().out
+    assert store.get_invoice('AS-2026-001').status == 'paid'
+
+
+def test__invoice_paid__flip_only_partial__warns_received_less(office, capsys):
+    _issue(setup='1000')
+    cli.ledger_add(
+        amount='400',
+        currency='USD',
+        channel='bank',
+        counterparty='Example Corp',
+        country='US',
+        date=dt.date(2026, 10, 10),
+        rate='2.70',
+        invoice='AS-2026-001',
+    )
+    capsys.readouterr()
+    cli.invoice_paid('AS-2026-001', date=dt.date(2026, 10, 12))
+    out = capsys.readouterr().out
+    assert 'отмечен оплаченным 2026-10-12' in out and 'внимание: получено 400.00' in out
 
 
 def test__invoice_paid__partial_amount__warning_and_country_needed(office, capsys, tmp_path):
@@ -252,7 +471,7 @@ def test__ledger_month_and_export__numbers_and_csv(office, capsys):
     cli.ledger_month('2026-10')
     out = capsys.readouterr().out
     assert 'Оборот месяца: **5 700.00 GEL**' in out
-    assert 'Налог 1% (оценка): **57.00 GEL**' in out
+    assert 'Налог к уплате за месяц (оценка): **57.00 GEL**' in out
     assert 'до 2026-11-15' in out
     assert 'ledger export --month 2026-10' in out
     cli.ledger_export(month='2026-10')
@@ -294,9 +513,30 @@ def test__contract__flags_file_and_set__html_written(office, tmp_path, capsys):
     target = office / 'contracts' / 'SA-7-support-sla.en.html'
     assert f'договор собран: {target}' in out
     page = target.read_text(encoding='utf-8')
-    assert 'Agreement No. SA-7 dated 2026-10-20 between Jane Example and Example &lt;LLC&gt;.' in page
+    assert f'Agreement No. SA-7 dated 2026-10-20 between {TEST_NAME} and Example &lt;LLC&gt;.' in page
     assert 'by the 3rd Business Day. Daily encrypted backups.' in page
     assert 'Template. Not legal advice' not in page
+
+
+def test__contract__existing_file__refused_unless_force(office, tmp_path, capsys):
+    templates = _template_dir(tmp_path)
+    request = {
+        'client_name': 'ООО Ромашка',
+        'date': '2026-10-20',
+        'set_': ['5th=5th', 'VERIFY: backups.=', 'number=1'],
+        'fmt': 'md',
+        'templates': templates,
+    }
+    cli.contract_render('support-sla', **request)
+    [first] = (office / 'contracts').iterdir()
+    first.write_text('правки оператора', encoding='utf-8')
+    with pytest.raises(ConfigError, match='--force'):
+        cli.contract_render('support-sla', **request)
+    assert first.read_text(encoding='utf-8') == 'правки оператора'
+    cli.contract_render('support-sla', **{**request, 'client_name': 'ИП Иванов'})
+    assert len(list((office / 'contracts').iterdir())) == 2
+    cli.contract_render('support-sla', **request, force=True)
+    assert first.read_text(encoding='utf-8').startswith('# Support Terms')
 
 
 def test__contract__markdown_and_notices(office, tmp_path, capsys):
@@ -347,6 +587,8 @@ def test__cyclopts__default_and_subcommands__parsed(office, tmp_path, capsys):
     assert 'Parsed Co' in capsys.readouterr().out
     [record] = OfficeStore(office / 'office.sqlite').list_invoices()
     assert [item.unit_price for item in record.invoice.items] == [Decimal(100), Decimal(5), Decimal(2)]
+    cli.app(['init'], result_action='return_value', exit_on_error=False)
+    assert 'реестр уже есть' in capsys.readouterr().out
     templates = _template_dir(tmp_path)
     cli.app(
         ['contract', 'fields', 'support-sla', '--templates', str(templates)],
@@ -374,6 +616,59 @@ def test__cyclopts__default_and_subcommands__parsed(office, tmp_path, capsys):
         exit_on_error=False,
     )
     assert 'записано #1' in capsys.readouterr().out
+    by_invoice = [
+        'ledger',
+        'add',
+        '--amount',
+        '5',
+        '--currency',
+        'GEL',
+        '--channel',
+        'bank',
+        '--counterparty',
+        'Parsed Co',
+    ]
+    by_invoice += ['--country', 'GE', '--no-fetch', '--invoice', 'AS-2026-001']
+    cli.app(by_invoice, result_action='return_value', exit_on_error=False)
+    with pytest.raises(ConfigError, match='--extra'):
+        cli.app(by_invoice, result_action='return_value', exit_on_error=False)
+    cli.app([*by_invoice, '--extra'], result_action='return_value', exit_on_error=False)
+    assert 'записано #3' in capsys.readouterr().out
+
+
+def test__office_init__creates_once_and_commands_never_create(tmp_path, capsys):
+    data = tmp_path / 'fresh'
+    with pytest.raises(ConfigError, match='office init'):
+        cli.ledger_month('2026-10', data_dir=data)
+    with pytest.raises(ConfigError, match='office init'):
+        cli.ledger_add(amount='10', currency='GEL', channel='bank', counterparty='X', country='GE', data_dir=data)
+    assert not data.exists()
+    cli.office_init(data_dir=data)
+    assert f'реестр создан: {data.resolve() / "office.sqlite"}' in capsys.readouterr().out
+    cli.office_init(data_dir=data)
+    assert 'реестр уже есть' in capsys.readouterr().out
+
+
+def test__office__run_from_other_directory__same_registry_at_repo_root(tmp_path, operator_file, monkeypatch, capsys):
+    # Раньше var/office считался от текущего каталога: из другой папки — пустой реестр и второй AS-2026-001.
+    root = tmp_path / 'repo'
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    monkeypatch.setattr(cli, 'project_root', lambda: root)
+    monkeypatch.setattr(cli, '_now', lambda: NOW)
+    monkeypatch.delenv('AUTOSTUDIO_OFFICE_DIR', raising=False)
+    monkeypatch.setenv('AUTOSTUDIO_OPERATOR', str(operator_file))
+    monkeypatch.chdir(elsewhere)
+    with pytest.raises(ConfigError) as caught:
+        _issue()
+    assert str(root / 'var' / 'office' / 'office.sqlite') in str(caught.value)
+    cli.office_init()
+    _issue()
+    monkeypatch.chdir(tmp_path)
+    _issue(client_name='Other Corp')
+    assert 'счёт AS-2026-002 выставлен' in capsys.readouterr().out
+    assert not (elsewhere / 'var').exists() and not (tmp_path / 'var').exists()
+    assert len(OfficeStore(root / 'var' / 'office' / 'office.sqlite').list_invoices()) == 2
 
 
 def test__root_cli__office_registered_lazily():

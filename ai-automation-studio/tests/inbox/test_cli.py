@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+import cyclopts
 import httpx
 import msgspec
 import pytest
@@ -251,6 +252,13 @@ def test__format_result__aborted_errors_and_invoices():
     assert 'счета' not in text
     text = cli.format_result(RunResult(folder='INBOX', invoices_verified=2, invoices_unverified=1, invoice_rows=3))
     assert 'счета: сверено 2, на ручную проверку 1, строк во вкладку счетов 3' in text
+    assert 'отложено' not in text
+
+
+def test__format_result__postponed_count__console_only_not_in_error_text():
+    errors = ['письма отложены до следующего запуска (не работает: notifier — NotifyError: channel down)']
+    text = cli.format_result(RunResult(folder='INBOX', postponed=7, errors=errors))
+    assert 'отложено до следующего запуска: 7' in text and '7' not in errors[0]
 
 
 def test__run__model_provider_not_set__refuses_to_run_on_stub(env, tmp_path):
@@ -324,8 +332,26 @@ def test__require_model__real_provider__passes_silently(capsys):
     from autostudio.settings import Settings
 
     settings = Settings.from_env({'AUTOSTUDIO_LLM_PROVIDER': 'openai', 'OPENAI_API_KEY': 'sk-test'})
-    cli.require_model(settings, {'AUTOSTUDIO_LLM_PROVIDER': 'openai'})
+    cli.require_model(settings)
     assert capsys.readouterr().out == ''
+
+
+@pytest.mark.parametrize('value', ['fake', 'FAKE', ' fake '])
+def test__require_model__stub_chosen_explicitly__warns_and_passes(value, capsys):
+    from autostudio.settings import Settings
+
+    cli.require_model(Settings.from_env({'AUTOSTUDIO_LLM_PROVIDER': value}))
+    assert 'модель-заглушка' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('environ', [{}, {'AUTOSTUDIO_LLM_PROVIDER': ''}])
+def test__require_model__stub_by_default__decided_by_core_explicit_flag__refused(environ):
+    from autostudio.settings import Settings
+
+    settings = Settings.from_env(environ)
+    assert not settings.llm_provider_explicit
+    with pytest.raises(ConfigError, match='AUTOSTUDIO_LLM_PROVIDER не задан'):
+        cli.require_model(settings)
 
 
 def test__run__copy_folder_missing__run_failed_operator_signal_and_error_exit(server, tmp_path):
@@ -475,3 +501,25 @@ def test__provider_hint__oauth_methods__provider_checklist(auth, needle):
 
 def test__app__oauth_google_command_registered():
     assert 'oauth-google' in set(cli.app)
+
+
+def test__oauth_google__help__no_browser_flag_without_meaningless_negative():
+    # Регрессия: cyclopts добавлял к bool-флагу «--no-no-browser».
+    import io
+
+    from rich.console import Console
+
+    out = io.StringIO()
+    cli.app.help_print(['oauth-google'], console=Console(file=out, width=200))
+    assert '--no-browser' in out.getvalue() and '--no-no-browser' not in out.getvalue()
+
+
+def test__oauth_google__flag_parsed__no_browser_true_negative_rejected():
+    _, bound, _ = cli.app.parse_args(['oauth-google', '--client-secrets', 'cs.json', '--no-browser'])
+    assert bound.arguments['no_browser'] is True
+    _, bound, _ = cli.app.parse_args(['oauth-google', '--client-secrets', 'cs.json'])
+    assert 'no_browser' not in bound.arguments
+    with pytest.raises(cyclopts.UnknownOptionError, match='no-no-browser'):
+        cli.app.parse_args(
+            ['oauth-google', '--client-secrets', 'cs.json', '--no-no-browser'], exit_on_error=False, print_error=False
+        )

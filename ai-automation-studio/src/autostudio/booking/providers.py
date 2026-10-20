@@ -12,8 +12,15 @@
 - уведомления владельцу в боевом режиме идут только в настоящие каналы (бот, Telegram-чат,
   вебхук). Консольный канал ядра там не используется: в нём имена, телефоны и тексты
   вопросов покупателей попали бы в stdout, а значит — в логи контейнера.
+
+Модель с запасным выходом (`ResilientLLM`) собирается здесь, а не через `make_llm(…,
+on_fallback=…)`: ядро отмечает «сигнал отправлен» до вызова хука, и одна реплика, с которой
+модель не справилась (`content` — не повод будить оператора), съедала бы часовой слот сигнала,
+а отозванный через пять минут ключ остался бы без сигнала. Поэтому частоту сигналов ведёт
+пакет (`OperatorAlarm`, отдельно по видам `outage` и `config`), а ядро не ограничивает.
 """
 
+import datetime as dt
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -45,11 +52,11 @@ from autostudio.clientconf import NotifyConfig, SinkConfig, client_data_dir, eve
 from autostudio.clock import Clock
 from autostudio.errors import ConfigError, LLMError
 from autostudio.events import EventLog
-from autostudio.llm import LLMClient, make_llm
+from autostudio.llm import LLMClient, ResilientLLM, make_llm
 from autostudio.notify import Notifier, make_notifier
 from autostudio.providers import OperatorAlerts
 from autostudio.runlog import Heartbeat
-from autostudio.settings import Settings
+from autostudio.settings import LLMProvider, Settings
 from autostudio.sinks import TableSink, make_sink
 
 STORE_FILE: Final = 'booking.sqlite'
@@ -173,22 +180,25 @@ class BookingProvider(Provider):
         return make_sink(resolve_sink(config.sink, settings, config))
 
     @provide
-    async def llm(
-        self, settings: Settings, config: BookingConfig, operator: OperatorAlerts
-    ) -> AsyncIterator[LLMClient]:
-        notifier = operator.notifier
-
+    async def llm(self, settings: Settings, alarm: OperatorAlarm, clock: Clock) -> AsyncIterator[LLMClient]:
         async def degraded(error: LLMError) -> None:
-            # Ядро шлёт этот сигнал не чаще раза в час: бот тем временем работает на эвристиках.
-            # Модель, не справившаяся с одной репликой (`content`), — не повод будить оператора.
-            if notifier is None or error.kind == 'content':
+            # Модель, не справившаяся с одной репликой (`content`), — не повод будить оператора и
+            # не повод занимать слот сигнала. Остальное — не чаще раза в час на вид, пока бот на правилах.
+            if error.kind == 'content':
                 return
             what = 'проверьте ключ, права и модель' if error.kind == 'config' else 'провайдер недоступен'
-            await notifier.send(
-                f'⚠️ {config.client.name} / booking: модель недоступна ({what}), бот на правилах: {error}'
+            await alarm.raise_(
+                f'llm_{error.kind}', f'модель недоступна ({what}), бот на правилах: {error}', repeat=True
             )
 
-        client = make_llm(settings, booking_fake_llm(), on_fallback=degraded)
+        client: LLMClient
+        if settings.llm_provider is LLMProvider.FAKE:
+            client = booking_fake_llm()
+        else:
+            # Частоту сигналов ведёт `alarm`, поэтому ядро не ограничивает (`alert_every` = 0).
+            client = ResilientLLM(
+                make_llm(settings), booking_fake_llm(), degraded, clock=clock, alert_every=dt.timedelta(0)
+            )
         yield client
         await client.aclose()
 

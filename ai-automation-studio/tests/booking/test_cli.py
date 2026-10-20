@@ -220,6 +220,30 @@ def test__describe__idle_staff_console_notify_unwritable_csv__warnings(env, writ
     assert f'таблица: csv → {env / "data" / "demo-booking" / "out"}' in joined
 
 
+OLD_BOOKINGS_HEADER = 'Logged at,Action,Booking,Date,Time,Service,Staff,Customer,Phone,Price,Source\n'
+
+
+def test__describe__bookings_csv_from_previous_version__warning_to_archive(env):
+    from autostudio.booking.texts import BOOKINGS_HEADER
+
+    config = cli.load_booking_config(EXAMPLE)
+    out = env / 'data' / 'demo-booking' / 'out'
+    out.mkdir(parents=True)
+    # Первая версия писала 11 колонок (цена «40 GEL», без канала); заголовок пишется только в новый файл.
+    (out / 'Bookings.csv').write_text(OLD_BOOKINGS_HEADER + 'row\n', encoding='utf-8')
+    now = dt.datetime(2026, 10, 20, 8, 30, tzinfo=dt.UTC)
+    joined = '\n'.join(cli.describe(config, cli.Settings(data_dir=env / 'data'), now))
+    assert 'Bookings.csv: заголовок от прежней версии или другого языка (11 колонок, сейчас 13)' in joined
+    assert 'переименуйте файл' in joined
+    header = BOOKINGS_HEADER[config.owner_language]
+    assert cli.stale_bookings_header(out, header) is not None
+    (out / 'Bookings.csv').write_text(','.join(header) + '\n', encoding='utf-8')
+    assert cli.stale_bookings_header(out, header) is None
+    (out / 'Bookings.csv').write_text('', encoding='utf-8')
+    assert cli.stale_bookings_header(out, header) is None
+    assert cli.stale_bookings_header(env / 'nowhere', header) is None
+
+
 def test__describe__service_only_idle_staff__warning(env, write_toml):
     text = EXAMPLE.read_text(encoding='utf-8').replace('staff_ids = ["giorgi"]', 'staff_ids = ["nika"]')
     text = text.replace('wed = ["12:00-20:00"]\nthu = ["12:00-20:00"]\nfri = ["12:00-20:00"]\nsat = ["10:00-18:00"]',

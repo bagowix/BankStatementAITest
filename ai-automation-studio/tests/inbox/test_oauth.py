@@ -1,7 +1,9 @@
 """OAuth2 для IMAP: строка XOAUTH2, токены Google и Microsoft 365, разовое согласие Google."""
 
 import datetime as dt
+import errno
 import json
+import time
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -158,6 +160,49 @@ def test__microsoft__tenant_domain_accepted():
     assert provider.label == 'Microsoft 365'
 
 
+@pytest.mark.parametrize(
+    'tenant',
+    [
+        f'{TENANT}.',
+        f'{TENANT},',
+        f'{TENANT}"',
+        f'{TENANT} # tenant of Acme',
+        'a' * 40 + '!',
+        ('a' * 60 + '.') * 5 + '!',
+    ],
+)
+def test__microsoft__tenant_with_trailing_junk__config_error_fast_not_catastrophic_backtracking(tenant):
+    # Регрессия: шаблон с вложенными повторами на GUID с хвостом («# комментарий» из .env,
+    # лишняя точка или кавычка) перебирал варианты экспоненциально — час CPU, а `run` и
+    # `check --connect` молча висели до всякого сигнала оператору.
+    started = time.perf_counter()
+    with pytest.raises(ConfigError, match='тенанта'):
+        MicrosoftClientCredentialsProvider(tenant_id=tenant, client_id='a', client_secret='b', http=httpx.AsyncClient())
+    assert time.perf_counter() - started < 0.5
+
+
+@respx.mock
+@pytest.mark.parametrize('value', [f'{TENANT} ', f'  {TENANT}\t', TENANT.upper(), 'contoso.com', 'a-b.c-d.example'])
+async def test__valid_tenant__guid_or_domain_after_strip__accepted_and_url_clean(value):
+    # GUID с пробелом по краям (кавычки в .env) — тот же тенант: значение обрезается, а не висит.
+    respx.post(url__regex=r'https://login\.microsoftonline\.com/[^/ ]+/oauth2/v2\.0/token').mock(
+        return_value=httpx.Response(200, json={'access_token': 'tok', 'expires_in': 3600})
+    )
+    started = time.perf_counter()
+    async with httpx.AsyncClient() as http:
+        provider = MicrosoftClientCredentialsProvider(tenant_id=value, client_id='a', client_secret='b', http=http)
+        assert await provider.access_token() == 'tok'
+    assert time.perf_counter() - started < 0.5
+    assert respx.calls.last.request.url.path == f'/{value.strip()}/oauth2/v2.0/token'
+
+
+@pytest.mark.parametrize(
+    'value', ['contoso', 'common', '-contoso.com', 'contoso-.com', 'a' * 64 + '.com', 'x.' * 130 + 'com']
+)
+def test__valid_tenant__single_label_bad_label_or_too_long__rejected(value):
+    assert not oauth.valid_tenant(value)
+
+
 # --- Google -------------------------------------------------------------------------------
 
 
@@ -286,6 +331,48 @@ def test__run_google_consent__loopback_offline_consent__refresh_token_returned(t
 def test__run_google_consent__no_refresh_token__config_error(tmp_path):
     with pytest.raises(ConfigError, match='refresh token'):
         run_google_consent(_secrets(tmp_path), flow_factory=lambda path, scopes: _Flow(None))
+
+
+class _FailingFlow:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    def run_local_server(self, **kwargs: object) -> _Creds:
+        raise self.exc
+
+
+def _consent_errors() -> list[tuple[Exception, str]]:
+    from google_auth_oauthlib.flow import WSGITimeoutError
+    from oauthlib.oauth2.rfc6749.errors import AccessDeniedError, InvalidClientError, MismatchingStateError
+
+    redirect = 'http://localhost:8765/?state=s&code=4/secret-auth-code'
+    busy = OSError(errno.EADDRINUSE, 'Address already in use')
+    scope = Warning('Scope has changed from "https://mail.google.com/" to "openid".')
+    return [
+        (WSGITimeoutError('Timed out waiting for response from authorization server'), 'за 5 минут'),
+        (AccessDeniedError(description=redirect), 'доступ не разрешён'),
+        (InvalidClientError(description=redirect), r'не завершено \(invalid_client\)'),
+        (MismatchingStateError(), r'не завершено \(mismatching_state\)'),
+        (scope, 'оставьте отмеченным доступ к Gmail'),
+        (busy, 'порт 8765 занят'),
+        (ConnectionResetError(errno.ECONNRESET, redirect), 'нет связи \\(ConnectionResetError\\)'),
+    ]
+
+
+@pytest.mark.parametrize(('exc', 'reason'), _consent_errors())
+def test__run_google_consent__flow_fails__config_error_with_reason_without_redirect_url(tmp_path, exc, reason):
+    # Регрессия: тайм-аут (WSGITimeoutError — наследник AttributeError), «Отмена» в окне Google,
+    # не тот скоуп и занятый порт выходили из `oauth-google` трассировкой, а не строкой «ошибка: …».
+    with pytest.raises(ConfigError, match=reason) as caught:
+        run_google_consent(_secrets(tmp_path), port=8765, flow_factory=lambda path, scopes: _FailingFlow(exc))
+    assert 'secret-auth-code' not in str(caught.value) and caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
+def test__run_google_consent__unknown_error__not_masked(tmp_path):
+    # Незнакомое исключение — баг, а не «отказ Google»: оно не превращается в ConfigError.
+    with pytest.raises(KeyError):
+        run_google_consent(_secrets(tmp_path), flow_factory=lambda path, scopes: _FailingFlow(KeyError('x')))
 
 
 def test__read_client_secrets__web_client_missing_or_broken_file__config_error(tmp_path):

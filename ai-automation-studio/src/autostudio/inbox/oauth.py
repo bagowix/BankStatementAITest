@@ -21,6 +21,7 @@
 """
 
 import datetime as dt
+import errno
 import logging
 import re
 from collections.abc import Callable
@@ -40,8 +41,15 @@ GOOGLE_SCOPE: Final = 'https://mail.google.com/'
 GOOGLE_TOKEN_URI: Final = 'https://oauth2.googleapis.com/token'  # noqa: S105 - адрес, а не секрет
 MICROSOFT_SCOPE: Final = 'https://outlook.office365.com/.default'
 MICROSOFT_TOKEN_URL: Final = 'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token'  # noqa: S105
-# ID тенанта уходит в путь URL: только GUID или домен, без «/», «?» и «..».
-_TENANT: Final = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}\.?)*[A-Za-z0-9]$')
+# ID тенанта уходит в путь URL: только GUID или домен, без «/», «?» и «..». Шаблоны без
+# вложенных квантификаторов: прежний `(?:[…]{0,62}\.?)*` на GUID с хвостовым пробелом или
+# «# комментарием» из .env перебирал варианты экспоненциально — час CPU до ConfigError.
+_GUID: Final = re.compile(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}')
+_DOMAIN_LABEL: Final = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?')
+_DOMAIN_LIMIT: Final = 253
+# Домен — это хотя бы «имя.зона»: одиночное «contoso» или «common» для client credentials не годится.
+_DOMAIN_LABELS_MIN: Final = 2
+_SHOWN_LIMIT: Final = 80
 # Токен берётся заново чуть раньше срока: вход в ящик и первые команды не должны попасть на границу.
 _EARLY: Final = dt.timedelta(minutes=5)
 TIMEOUT: Final = 30.0
@@ -168,9 +176,13 @@ class MicrosoftClientCredentialsProvider:
         http: httpx.AsyncClient,
         clock: Clock = system_now,
     ) -> None:
-        if not _TENANT.match(tenant_id) or '..' in tenant_id:
-            raise ConfigError(f'ID тенанта Microsoft {tenant_id!r}: нужен GUID или домен (contoso.onmicrosoft.com)')
-        self._url = MICROSOFT_TOKEN_URL.format(tenant=tenant_id)
+        tenant = tenant_id.strip()
+        if not valid_tenant(tenant):
+            raise ConfigError(
+                f'ID тенанта Microsoft {tenant[:_SHOWN_LIMIT]!r}: нужен GUID или домен (contoso.onmicrosoft.com); '
+                'в .env комментарий «#» в строке значения становится частью значения'
+            )
+        self._url = MICROSOFT_TOKEN_URL.format(tenant=tenant)
         self._client_id = client_id
         self._secret = client_secret
         self._http = http
@@ -231,6 +243,28 @@ class MicrosoftClientCredentialsProvider:
             hint = ' — тенант не найден: проверьте ID тенанта'
         detail = scrub(f'{failure.error}: {description}'.strip(': '), (self._secret,))[:_DETAIL_LIMIT]
         return f'Microsoft 365 OAuth: токен не выдан (HTTP {response.status_code}) {detail}{hint}'
+
+
+def valid_tenant(value: str) -> bool:
+    """ID тенанта Entra: GUID (Directory ID) или домен из двух и более меток.
+
+    Проверка линейная по длине строки: метки домена сверяются по одной, без шаблона с
+    вложенными повторами.
+
+    Args:
+        value: ID тенанта (уже без пробелов по краям).
+
+    Returns:
+        True, если значение можно подставить в путь URL токена.
+    """
+    if _GUID.fullmatch(value):
+        return True
+    labels = value.split('.')
+    return (
+        len(value) <= _DOMAIN_LIMIT
+        and len(labels) >= _DOMAIN_LABELS_MIN
+        and all(_DOMAIN_LABEL.fullmatch(label) for label in labels)
+    )
 
 
 def scrub(text: str, secrets: tuple[str, ...]) -> str:
@@ -324,6 +358,53 @@ def read_client_secrets(path: Path) -> _InstalledClient:
     return secrets.installed
 
 
+def consent_failure(exc: Exception, port: int) -> ConfigError | None:
+    """Понятная оператору причина, по которой согласие Google не получено, или None.
+
+    `run_local_server` бросает разнородные исключения: `WSGITimeoutError` (наследник
+    AttributeError) по тайм-ауту, ошибки oauthlib (`access_denied` — нажата «Отмена»),
+    `Warning` oauthlib, если выдан не тот скоуп, и `OSError`, если порт занят или нет сети.
+    Текст исключения в причину не попадает: в нём бывает адрес возврата с кодом авторизации.
+
+    Args:
+        exc: Исключение из потока согласия.
+        port: Порт петлевого сервера (для подсказки).
+
+    Returns:
+        ConfigError с подсказкой или None, если исключение незнакомое (это баг, пусть падает).
+    """
+    try:
+        from google_auth_oauthlib.flow import WSGITimeoutError
+
+        # oauthlib без аннотаций и без stubs (types-oauthlib не в зависимостях); нужен только класс для isinstance.
+        from oauthlib.oauth2.rfc6749.errors import OAuth2Error  # pyrefly: ignore[untyped-import]
+    except ImportError:  # pragma: no cover - без extra `oauth` поток согласия не создаётся вовсе
+        return None
+    if isinstance(exc, WSGITimeoutError):
+        return ConfigError(
+            f'Google: вход не завершён за {_CONSENT_TIMEOUT // 60} минут — запустите команду снова и '
+            'разрешите доступ в открывшемся окне'
+        )
+    if isinstance(exc, OAuth2Error):
+        code = exc.error or type(exc).__name__
+        if code == 'access_denied':
+            return ConfigError(
+                'Google: доступ не разрешён (нажата «Отмена» или вход не в ящик клиента) — повторите и '
+                'разрешите доступ к почте'
+            )
+        return ConfigError(f'Google: согласие не завершено ({code}) — проверьте OAuth-клиент «Desktop app» и повторите')
+    if isinstance(exc, Warning):
+        # oauthlib сообщает так о сменившемся скоупе: на экране согласия сняли галочку доступа к Gmail.
+        return ConfigError(
+            f'Google выдал доступ без почты: на экране согласия оставьте отмеченным доступ к Gmail ({GOOGLE_SCOPE})'
+        )
+    if isinstance(exc, OSError):
+        if exc.errno == errno.EADDRINUSE:
+            return ConfigError(f'порт {port} занят — укажите другой --port или 0 (любой свободный)')
+        return ConfigError(f'Google: нет связи ({type(exc).__name__}) — проверьте сеть и повторите')
+    return None
+
+
 def run_google_consent(
     client_secrets: Path, *, port: int = 0, open_browser: bool = True, flow_factory: FlowFactory | None = None
 ) -> GoogleConsent:
@@ -343,19 +424,26 @@ def run_google_consent(
         Client ID, secret и refresh token.
 
     Raises:
-        ConfigError: Файл клиента не подходит или Google не выдал refresh token.
+        ConfigError: Файл клиента не подходит, согласие не получено (тайм-аут, отказ, не тот
+            скоуп, порт занят, нет сети) или Google не выдал refresh token.
     """
     client = read_client_secrets(client_secrets)
     flow = (flow_factory or _installed_app_flow)(client_secrets, [GOOGLE_SCOPE])
-    credentials = flow.run_local_server(
-        host='localhost',
-        port=port,
-        open_browser=open_browser,
-        timeout_seconds=_CONSENT_TIMEOUT,
-        authorization_prompt_message='Откройте ссылку и войдите в ящик клиента: {url}',
-        access_type='offline',
-        prompt='consent',
-    )
+    try:
+        credentials = flow.run_local_server(
+            host='localhost',
+            port=port,
+            open_browser=open_browser,
+            timeout_seconds=_CONSENT_TIMEOUT,
+            authorization_prompt_message='Откройте ссылку и войдите в ящик клиента: {url}',
+            access_type='offline',
+            prompt='consent',
+        )
+    except Exception as exc:
+        failure = consent_failure(exc, port)
+        if failure is None:
+            raise
+        raise failure from None
     if not credentials.refresh_token:
         raise ConfigError('Google не выдал refresh token — отзовите доступ приложения в аккаунте и повторите')
     return GoogleConsent(

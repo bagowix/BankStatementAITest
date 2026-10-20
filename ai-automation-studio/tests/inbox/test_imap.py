@@ -348,6 +348,35 @@ async def test__imap__server_error_mentions_oauth_token__scrubbed():
     assert 'ya29.valid-token' not in str(caught.value) and '***' in str(caught.value)
 
 
+class RotatingTokens(StaticTokens):
+    """Каждый вход — новый токен, как у настоящего провайдера после истечения срока."""
+
+    async def access_token(self) -> str:
+        self.calls += 1
+        return f'ya29.token-{self.calls}'
+
+
+async def test__imap__many_oauth_sessions__only_current_token_kept_and_still_scrubbed():
+    # Регрессия: в цикле `run --every-minutes` каждый вход дописывал токен в список секретов
+    # ящика — за сутки при запуске раз в 5 минут 288 строк, и все они перебирались при каждой ошибке.
+    server = FakeImapServer(messages={1: b'x'})
+    tokens = RotatingTokens()
+    box = _oauth_box(server, tokens)
+    for session in range(1, 6):
+        server.token = f'ya29.token-{session}'
+        async with box:
+            await box.select('INBOX')
+    assert box._token is None and tokens.calls == 5
+    server.token = 'ya29.token-6'
+    server.fail['FETCH'] = imaplib.IMAP4.error('FETCH failed for ya29.token-6 and old ya29.token-5')
+    with pytest.raises(MailboxError) as caught:
+        async with box:
+            await box.select('INBOX')
+            await box.fetch(1)
+    message = str(caught.value)
+    assert 'ya29.token-6' not in message and '***' in message and box._token is None
+
+
 @pytest.mark.parametrize(('password', 'tokens'), [(None, None), ('p', StaticTokens())])
 def test__imap__login_method__exactly_one_required(password, tokens):
     with pytest.raises(ValueError, match='ровно один способ входа'):

@@ -191,38 +191,95 @@ async def test__post__network_error__type_only_no_token(app):
     assert str(caught.value) == 'WhatsApp недоступен: ConnectError' and TOKEN not in str(caught.value)
 
 
+REVOKED = httpx.Response(401, json={'error': {'code': 190, 'message': 'expired'}})
+
+
 @respx.mock
-async def test__post__token_revoked__not_retried_operator_alerted_once(app):
-    respx.post(URL).mock(return_value=httpx.Response(401, json={'error': {'code': 190, 'message': 'expired'}}))
+async def test__post__token_revoked__channel_failure_alerted_once_recovery_then_alerted_again(app):
+    route = respx.post(URL).mock(side_effect=[REVOKED, REVOKED, REVOKED, OK, REVOKED])
     contact(app)
     async with httpx.AsyncClient() as http:
         sender = make_sender(app, http)
         for _ in range(3):
-            with pytest.raises(RecipientGoneError, match='190'):
+            # Сбой всего канала, а не получателя: напоминание должно вернуться в очередь.
+            with pytest.raises(DeliveryError, match='190') as caught:
                 await sender.send('wa:c1', Outgoing(text='x'))
-    assert len(app.operator.texts) == 1 and 'отклонил токен' in app.operator.texts[0]
-    assert app.events_of(MESSAGE_EVENT) == []
+            assert not isinstance(caught.value, RecipientGoneError)
+        assert route.call_count == 3  # повтором внутри отправки токен не чинится
+        await sender.send('wa:c1', Outgoing(text='fixed'))
+        with pytest.raises(DeliveryError):
+            await sender.send('wa:c1', Outgoing(text='revoked again'))
+    assert [text[:1] for text in app.operator.texts] == ['⚠', '✅', '⚠']
+    assert 'отклонил токен' in app.operator.texts[0] and 'снова принимает токен' in app.operator.texts[1]
+    assert len(app.events_of(MESSAGE_EVENT)) == 1
 
 
 @respx.mock
-async def test__template_rejected__operator_alerted_about_template(app):
-    respx.post(URL).mock(return_value=httpx.Response(400, json={'error': {'code': 132001, 'message': 'no template'}}))
+async def test__template_rejected__channel_failure_alerted_recovered_on_next_template(app):
+    rejected = httpx.Response(400, json={'error': {'code': 132001, 'message': 'no template'}})
+    respx.post(URL).mock(side_effect=[rejected, OK])
     contact(app)
     app.store.set_consent('wa:c1', subscribed=True, now=app.clock())
     app.clock.advance(dt.timedelta(hours=30))
     async with httpx.AsyncClient() as http:
-        with pytest.raises(RecipientGoneError):
-            await make_sender(app, http).send('wa:c1', reminder())
+        sender = make_sender(app, http)
+        with pytest.raises(DeliveryError) as caught:
+            await sender.send('wa:c1', reminder())
+        assert not isinstance(caught.value, RecipientGoneError)
+        await sender.send('wa:c1', reminder())
     assert 'шаблон booking_reminder не отправлен' in app.operator.texts[0]
+    assert app.operator.texts[1] == '✅ Test Barbers / booking: шаблон booking_reminder снова отправляется'
 
 
 @respx.mock
-async def test__post__error_body_not_json__code_zero(app):
+async def test__post__error_body_not_json__no_code_recipient_gone_no_token_alarm(app):
     respx.post(URL).mock(return_value=httpx.Response(400, text='<html>'))
     contact(app)
     async with httpx.AsyncClient() as http:
-        with pytest.raises(RecipientGoneError, match=r'\(0\): HTTP 400'):
+        with pytest.raises(RecipientGoneError, match=r'\(—\): HTTP 400'):
             await make_sender(app, http).send('wa:c1', Outgoing(text='x'))
+    assert app.operator.texts == []
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    'response',
+    [httpx.Response(503, text='<html>Service Unavailable</html>'), httpx.Response(429), httpx.Response(502, json={})],
+)
+async def test__post__outage_without_graph_error__retryable_no_token_alarm(app, response):
+    # Код 0 у Graph — это AuthException; тело не от Graph (HTML прокси, пустой 429) кода не имеет.
+    route = respx.post(URL).mock(return_value=response)
+    contact(app)
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(DeliveryError, match='—') as caught:
+            await make_sender(app, http).send('wa:c1', Outgoing(text='x'))
+    assert not isinstance(caught.value, RecipientGoneError) and route.call_count == 2
+    assert app.operator.texts == []
+
+
+@respx.mock
+async def test__reminder__token_revoked_then_fixed__released_and_delivered_next_pass(app):
+    from autostudio.booking.reminders import send_due_reminders
+    from tests.booking.helpers import WED, local
+
+    route = respx.post(URL).mock(side_effect=[REVOKED, OK])
+    contact(app)
+    app.store.set_consent('wa:c1', subscribed=True, now=app.clock())
+    app.book_directly('wa:c1', 'haircut', 'giorgi', local(WED, 17))
+    app.clock.set(local(WED, 15, 1))  # вне 24-часового окна: напоминание уходит шаблоном
+
+    async def run_pass() -> int:
+        async with httpx.AsyncClient() as http:
+            sender = make_sender(app, http)
+            return await send_due_reminders(
+                app.store, sender, app.clock(), config=app.config, texts=app.texts, events=app.events
+            )
+
+    assert await run_pass() == 0
+    app.clock.advance(dt.timedelta(minutes=5))  # оператор заменил токен
+    assert await run_pass() == 1
+    assert route.call_count == 2 and sent_json(route)[1]['type'] == 'template'
+    assert len(app.events_of('booking.reminded')) == 1
 
 
 def long_list() -> Outgoing:
@@ -352,6 +409,36 @@ async def test__webhook_post__signature_checked_before_parsing__duplicates_once(
     assert key is not None and key.key.startswith('wa:') and key.phone == '995599000111'
 
 
+@respx.mock
+async def test__webhook_post__wrong_app_secret__operator_alerted_once_then_recovery(app):
+    respx.post(URL).mock(return_value=OK)
+    async with httpx.AsyncClient() as http:
+        harness = Harness(app, http)
+        async with TestClient(TestServer(web_app(harness))) as client:
+            body = harness.body({'type': 'text', 'text': {'body': 'hi'}})
+            foreign = 'sha256=' + hmac.new(b'other-app-secret', body, hashlib.sha256).hexdigest()
+            assert await harness.post(client, body, signature=foreign) == 403
+            assert await harness.post(client, body, signature=foreign) == 403
+            assert len(app.operator.texts) == 1 and 'App Secret' in app.operator.texts[0]
+            assert await harness.post(client, body) == 200
+    assert app.operator.texts[1] == (
+        '✅ Test Barbers / booking: подпись вебхука WhatsApp снова сходится — сообщения доходят'
+    )
+
+
+@respx.mock
+async def test__webhook_post__scanner_junk__403_without_alarm(app):
+    async with httpx.AsyncClient() as http:
+        harness = Harness(app, http)
+        async with TestClient(TestServer(web_app(harness))) as client:
+            body = harness.body({'type': 'text', 'text': {'body': 'hi'}})
+            assert (await client.post('/wa', data=body)).status == 403  # без подписи
+            assert await harness.post(client, body, signature='sha256=nothex') == 403
+            assert await harness.post(client, b'{"x": 1}', signature='sha256=' + 'a' * 64) == 403
+            assert await harness.post(client, b'<html>', signature='sha256=' + 'a' * 64) == 403
+    assert app.operator.texts == []
+
+
 async def spy_on(app: App) -> list[Incoming]:
     seen: list[Incoming] = []
 
@@ -476,12 +563,17 @@ async def test__webhook__engine_crash_and_bad_message__apology_alarm_next_messag
 
 
 @respx.mock
-async def test__webhook__failed_template_status__operator_alerted(app):
+async def test__webhook__failed_template_status__operator_alerted_at_most_hourly(app):
     async with httpx.AsyncClient() as http:
         harness = Harness(app, http)
         statuses = [{'id': 'out', 'status': 'failed', 'errors': [{'code': 132015, 'title': 'Template is paused'}]}]
         await harness.feed(statuses=statuses)
-    assert 'отклонил шаблон' in app.operator.texts[0]
+        await harness.feed(statuses=statuses)
+        assert len(app.operator.texts) == 1 and 'отклонил шаблон' in app.operator.texts[0]
+        # Восстановление по статусам не видно — поэтому сигнал не «один на жизнь процесса», а раз в час.
+        app.clock.advance(dt.timedelta(minutes=61))
+        await harness.feed(statuses=statuses)
+    assert len(app.operator.texts) == 2
 
 
 def test__sender__without_whatsapp_section__refused(tmp_path):

@@ -126,8 +126,11 @@ class RunResult(msgspec.Struct, frozen=True, kw_only=True):
         invoices_verified: Счетов, которые сошлись (итог в PDF, строки с итогом).
         invoices_unverified: Счетов не сверено: не сошлись или не разбирались (скан, шифр).
         invoice_rows: Строк записано во вкладку счетов.
+        postponed: Писем отложено до следующего запуска (модель или канал не работают).
         aborted: Причина остановки по серии сбоев или None.
         errors: Общие ошибки (таблица или канал недоступны) — данные не потеряны, повторятся.
+            Текст постоянен для одного вида сбоя (без счётчиков и текста конкретного письма):
+            `supervised_run` сравнивает его с прошлым запуском и пишет оператору только о смене.
     """
 
     folder: str
@@ -146,6 +149,7 @@ class RunResult(msgspec.Struct, frozen=True, kw_only=True):
     invoices_verified: int = 0
     invoices_unverified: int = 0
     invoice_rows: int = 0
+    postponed: int = 0
     by_category: dict[str, int] = msgspec.field(default_factory=dict)
     outcomes: list[EmailOutcome] = msgspec.field(default_factory=list)
     aborted: str | None = None
@@ -165,6 +169,7 @@ class _Failure(msgspec.Struct, frozen=True):
         cause: Что сломалось: `email` (само письмо), `model`, `model_content`, `mailbox`,
             `drafts`, `notifier`, `copy:<папка>`.
         stage: Шаг, на котором сломалось (`triage`, `draft`, `invoice`, …) — для пометки в таблице.
+        signature: Вид сбоя без подробностей конкретного письма — для текста ошибки запуска.
     """
 
     uid: int
@@ -173,6 +178,7 @@ class _Failure(msgspec.Struct, frozen=True):
     error: str
     cause: str
     stage: str = ''
+    signature: str = ''
 
 
 def model_outage(exc: LLMError) -> bool:
@@ -181,6 +187,27 @@ def model_outage(exc: LLMError) -> bool:
     Вид ошибки размечает ядро (`LLMError.kind`) по HTTP-коду провайдера, а не по тексту.
     """
     return exc.kind != 'content'
+
+
+def failure_signature(exc: Exception) -> str:
+    """Вид сбоя для текста ошибки запуска: одинаковый, пока сломано одно и то же.
+
+    Оператору пишут о смене текста ошибки, а не о каждом запуске. Текст ошибки модели
+    меняется от письма к письму (ответ не прошёл схему на другом поле, «повторите через 2 с»),
+    поэтому для неё в подпись идут только вид (`outage`, `config`, `content`) и HTTP-код;
+    подробности остаются в логе. Ошибки каналов (бот заблокирован, папки нет) постоянны и
+    полезны как есть.
+
+    Args:
+        exc: Исключение по письму.
+
+    Returns:
+        Подпись сбоя.
+    """
+    if isinstance(exc, LLMError):
+        status = f', HTTP {exc.status_code}' if exc.status_code is not None else ''
+        return f'LLMError ({exc.kind}{status})'
+    return f'{type(exc).__name__}: {exc}'[:300]
 
 
 def unreadable_key(raw: bytes) -> str:
@@ -270,6 +297,7 @@ class _Run:
         self.given_up = 0
         self.sheet_rows = 0
         self.invoice_rows = 0
+        self.postponed = 0
         self.invoice_counts: dict[str, int] = {}
         self.uidvalidity: int | None = None
         self.calls_before = deps.llm.usage.calls
@@ -349,7 +377,8 @@ class _Run:
                         self.down.add(cause)
                 key = email.message_id if email is not None else (unreadable_key(raw) if raw is not None else None)
                 error = f'{type(exc).__name__}: {exc}'[:300]
-                self.failures.append(_Failure(uid, email, key, error, cause, self.stage))
+                signature = failure_signature(exc)
+                self.failures.append(_Failure(uid, email, key, error, cause, self.stage, signature))
                 self.outcomes.append(
                     EmailOutcome(
                         uid=uid,
@@ -363,7 +392,7 @@ class _Run:
                 # на его содержимом ничего не говорят о том, жива ли модель.
                 consecutive = consecutive + 1 if cause in _BREAKER_CAUSES else 0
                 if consecutive >= BREAKER:
-                    self.aborted = f'{consecutive} писем подряд не разобраны, последняя ошибка: {error}'
+                    self.aborted = f'{consecutive} писем подряд не разобраны, последняя ошибка: {signature}'
                     break
 
     def _ok(self, dependency: str) -> None:
@@ -757,11 +786,17 @@ class _Run:
             )
             if attempts >= MAX_ATTEMPTS:
                 await self._give_up(state, failure)
-        if postponed and self.aborted is None:
-            causes = ', '.join(sorted({failure.cause for failure in postponed}))
-            self.errors.append(
-                f'писем отложено до следующего запуска: {len(postponed)} (не работает: {causes}; {postponed[-1].error})'
-            )
+        self.postponed = len(postponed)
+        if postponed:
+            # Без счётчика писем и без текста конкретного письма: новое письмо, отложенное по
+            # той же причине, не должно поднимать сигнал оператору на каждом запуске. Та же
+            # строка и при срабатывании прерывателя: для оператора «модель лежит, письма ждут» —
+            # одно состояние, сколько бы писем ни накопилось.
+            signatures: dict[str, set[str]] = {}
+            for failure in postponed:
+                signatures.setdefault(failure.cause, set()).add(failure.signature)
+            causes = '; '.join(f'{cause} — {min(signatures[cause])}' for cause in sorted(signatures))
+            self.errors.append(f'письма отложены до следующего запуска (не работает: {causes})')
             if self.probe_error is not None:
                 self.errors.append(self._probe_report(self.probe_error))
             elif self.config_error is not None:
@@ -889,6 +924,7 @@ class _Run:
             invoices_verified=self.invoice_counts.get('verified', 0),
             invoices_unverified=sum(n for status, n in self.invoice_counts.items() if status != 'verified'),
             invoice_rows=self.invoice_rows,
+            postponed=self.postponed,
             by_category=by_category,
             outcomes=self.outcomes,
             aborted=self.aborted,

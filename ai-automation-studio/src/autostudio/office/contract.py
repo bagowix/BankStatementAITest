@@ -11,12 +11,17 @@
 
 Каждая скобка заполняется по точному тексту внутри неё; пустая строка убирает скобку
 целиком. Всё, что осталось незаполненным, — ошибка со списком мест: договор с
-пробелами или с пометкой юриста клиенту не уходит. Пометки юриста и бухгалтера можно
-снять одним флагом (`--drop-review-notes`) после проверки; пометки VERIFY — только
-по одной, осознанно: они отмечают обещания, которые должны быть правдой.
+пробелами или с пометкой юриста клиенту не уходит. Незакрытая `[` в шаблоне — тоже
+ошибка: иначе пометка без `]` уехала бы клиенту как есть. Скобку с суммой (`[amount]`,
+`[сумма]`), которая встречается несколько раз, одним значением не заполнить: предоплата,
+остаток и абонентская плата — разные суммы, каждую задают `"amount#1"`, `"amount#2"`, ….
+Пометки юриста и бухгалтера можно снять одним флагом (`--drop-review-notes`) после
+проверки; пометки VERIFY — только по одной, осознанно: они отмечают обещания, которые
+должны быть правдой.
 """
 
 import datetime as dt
+import hashlib
 import html
 import re
 import tomllib
@@ -34,14 +39,13 @@ from autostudio.office.money import Language
 from autostudio.office.operator import OperatorProfile
 
 type TemplateName = Literal['service-agreement', 'support-sla', 'dpa']
-type PlaceholderKind = Literal['field', 'review', 'verify']
+type PlaceholderKind = Literal['field', 'review', 'verify', 'unclosed']
 type ClientKey = Literal[
     'name', 'legal_form', 'country', 'registration_number', 'address', 'representative', 'business_name'
 ]
 type AgreementKey = Literal['number', 'date']
 
 TEMPLATES: Final[tuple[TemplateName, ...]] = ('service-agreement', 'support-sla', 'dpa')
-DEFAULT_TEMPLATES_DIR: Final = Path('docs/legal')
 
 _REVIEW_WORDS: Final = frozenset({'LAWYER', 'ACCOUNTANT', 'ЮРИСТ', 'БУХГАЛТЕР'})
 _VERIFY_WORDS: Final = frozenset({'VERIFY', 'ПРОВЕРИТЬ'})
@@ -55,6 +59,9 @@ _SLUG: Final = re.compile(r'[^A-Za-z0-9._-]+')
 _SHOWN_KEY: Final = 90
 _QUOTE_CONTINUATION: Final = re.compile(r'\n[ \t]*>[ \t]?')
 _CHECKBOX: Final = frozenset({'', 'x', 'X'})
+# Скобки с суммой: одна сумма на все места — почти всегда ошибка в условиях оплаты.
+PER_PLACE_KEYS: Final = frozenset({'amount', 'сумма', 'price', 'цена', 'fee'})
+_HASH_CHARS: Final = 8
 
 # Какие скобки — это сведения о клиенте и договоре, по шаблонам и языкам. Ключ — точный
 # текст в скобках. Одна и та же скобка значит разное в разных шаблонах: `[address]` в
@@ -125,7 +132,8 @@ class Placeholder(msgspec.Struct, frozen=True, kw_only=True):
 
     Attributes:
         key: Текст внутри скобок без лишних пробелов и переводов строк.
-        kind: `field` — поле или вариант, `review` — пометка юриста/бухгалтера, `verify` — VERIFY/ПРОВЕРИТЬ.
+        kind: `field` — поле или вариант, `review` — пометка юриста/бухгалтера, `verify` — VERIFY/ПРОВЕРИТЬ,
+            `unclosed` — `[` без пары: заполнить нельзя, только исправить шаблон.
         line: Строка шаблона (с 1).
         occurrence: Номер вхождения этого текста в шаблоне (с 1).
         start: Смещение `[` в тексте.
@@ -286,7 +294,8 @@ def _matching_bracket(text: str, start: int) -> int:
 def scan_placeholders(text: str) -> list[Placeholder]:
     """Находит скобки верхнего уровня: вложенные (`[… [12] …]`) — часть текста внешней.
 
-    Пропускаются код в обратных кавычках, ссылки `[текст](url)` и флажки `[ ]`.
+    Пропускаются код в обратных кавычках, ссылки `[текст](url)` и флажки `[ ]`. Незакрытая
+    `[` возвращается как `unclosed` (ключ — остаток строки), а поиск продолжается со следующего символа.
 
     Args:
         text: Шаблон (уже без врезки).
@@ -308,6 +317,17 @@ def scan_placeholders(text: str) -> list[Placeholder]:
             continue
         end = _matching_bracket(text, index)
         if end == -1:
+            line_end = text.find('\n', index)
+            found.append(
+                Placeholder(
+                    key=normalize_key(text[index + 1 : len(text) if line_end == -1 else line_end]),
+                    kind='unclosed',
+                    line=text.count('\n', 0, index) + 1,
+                    occurrence=1,
+                    start=index,
+                    end=index + 1,
+                )
+            )
             index += 1
             continue
         inner = text[index + 1 : end]
@@ -373,10 +393,11 @@ def _incomplete(
     missing_operator: Sequence[str],
     template_label: str,
 ) -> ContractIncompleteError:
-    groups: dict[PlaceholderKind, dict[str, list[int]]] = {'field': {}, 'review': {}, 'verify': {}}
+    groups: dict[PlaceholderKind, dict[str, list[int]]] = {'unclosed': {}, 'field': {}, 'review': {}, 'verify': {}}
     for item in missing:
         groups[item.kind].setdefault(item.key, []).append(item.line)
     titles: dict[PlaceholderKind, str] = {
+        'unclosed': 'незакрытые скобки "[" в шаблоне — исправьте копию шаблона и соберите из неё (--templates)',
         'field': 'поля и варианты [...] — [client]/[agreement]/[fields] файла клиента или флаги',
         'review': 'пометки юриста/бухгалтера — снимите в [fields] ("" или исправленный текст) '
         'или флагом --drop-review-notes после проверки',
@@ -429,8 +450,10 @@ def render_contract(
         Договор в Markdown и замечания.
 
     Raises:
-        ContractIncompleteError: Осталась хоть одна незаполненная скобка, пометка или поле `{{…}}`.
-        ConfigError: Сведение о клиенте задано пустой строкой.
+        ContractIncompleteError: Осталась хоть одна незаполненная скобка, пометка, поле `{{…}}`
+            или незакрытая `[` в шаблоне.
+        ConfigError: Сведение о клиенте задано пустой строкой, или одна сумма задана сразу на
+            несколько мест (`PER_PLACE_KEYS` без `#N`).
     """
     semantic_values = request.semantic()
     for name, value in semantic_values.items():
@@ -440,9 +463,9 @@ def render_contract(
     raw = {normalize_key(key): value for key, value in request.fields.items()}
     text = strip_template_box(template_text)
     placeholders = scan_placeholders(text)
-    counts = Counter(item.key for item in placeholders)
     used: set[str] = set()
-    semantic_used: dict[str, str] = {}
+    # Где одно значение без `#N` легло в несколько мест: о каждом таком ключе — заметка.
+    bare: dict[str, tuple[str, list[int]]] = {}
     missing: list[Placeholder] = []
     dropped = 0
     result = ''
@@ -452,15 +475,18 @@ def render_contract(
         position = item.end
         exact = f'{item.key}#{item.occurrence}'
         value: str | None = None
-        if exact in raw:
+        if item.kind == 'unclosed':
+            pass
+        elif exact in raw:
             value = raw[exact]
             used.add(exact)
         elif item.key in raw:
             value = raw[item.key]
             used.add(item.key)
+            bare.setdefault(item.key, (value, []))[1].append(item.line)
         elif item.kind == 'field' and item.key in by_text and by_text[item.key] in semantic_values:
             value = semantic_values[by_text[item.key]]
-            semantic_used[item.key] = value
+            bare.setdefault(item.key, (value, []))[1].append(item.line)
         elif item.kind == 'review' and drop_review_notes:
             value = ''
             dropped += 1
@@ -472,6 +498,7 @@ def render_contract(
         else:
             result = _glue(result, text[item.end : item.end + 1])
     result += text[position:]
+    _refuse_shared_sums(bare)
 
     operator_values = operator_fields(operator, language)
     missing_operator: list[str] = []
@@ -488,13 +515,29 @@ def render_contract(
         raise _incomplete(template, language, missing, missing_operator, template_label or template)
 
     notices = [
-        f'[{_short(key)}] ×{counts[key]}: везде «{value}»; другое значение для одного места — "{_short(key)}#2" = "…"'
-        for key, value in semantic_used.items()
-        if counts[key] > 1 and not any(f'{key}#{n}' in raw for n in range(1, counts[key] + 1))
+        f'[{_short(key)}] ×{len(lines)} (стр. {", ".join(str(n) for n in lines)}): везде «{value}»; '
+        f'другое значение для одного места — "{_short(key)}#2" = "…"'
+        for key, (value, lines) in bare.items()
+        if len(lines) > 1
     ]
     notices += [f'ключ [fields] не найден в шаблоне: "{_short(key)}"' for key in raw if key not in used]
     text_out = re.sub(r'\n{3,}', '\n\n', result).strip() + '\n'
     return RenderedContract(text=text_out, notices=notices, dropped_notes=dropped)
+
+
+def _refuse_shared_sums(bare: Mapping[str, tuple[str, list[int]]]) -> None:
+    shared = {key: lines for key, (_, lines) in bare.items() if key in PER_PLACE_KEYS and len(lines) > 1}
+    if not shared:
+        return
+    details = '; '.join(
+        f'[{key}] в {len(lines)} местах (стр. {", ".join(str(n) for n in lines)}) — задайте '
+        + ', '.join(f'"{key}#{n}"' for n in range(1, len(lines) + 1))
+        for key, lines in shared.items()
+    )
+    raise ConfigError(
+        f'одна сумма на несколько мест не подставляется: предоплата, остаток и абонентская плата — разные суммы. '
+        f'{details} (одинаковые — тоже явно, по каждому месту)'
+    )
 
 
 def _merge_party(base: ContractParty, top: ContractParty) -> ContractParty:
@@ -552,9 +595,16 @@ def load_contract_request(path: Path) -> ContractRequest:
 
 
 def output_name(request: ContractRequest, template: TemplateName, language: Language, extension: str) -> str:
-    """Имя файла: `<номер договора или клиент>-<шаблон>.<язык>.<расширение>`."""
+    """Имя файла: `<номер договора или клиент>-<шаблон>.<язык>.<расширение>`.
+
+    Из имени остаются латиница, цифры и `._-`. Если в имени были другие буквы (кириллица,
+    грузинский), добавляется короткий хеш имени: «ООО Ромашка» и «ИП Иванов» иначе
+    получили бы один и тот же файл `contract-…`.
+    """
     base = request.agreement.number or request.client.name or 'contract'
     slug = _SLUG.sub('-', base).strip('-._') or 'contract'
+    if not base.isascii():
+        slug += '-' + hashlib.sha256(base.strip().encode()).hexdigest()[:_HASH_CHARS]
     return f'{slug}-{template}.{language}.{extension}'
 
 
@@ -615,7 +665,8 @@ def fields_skeleton(template_text: str, *, template: TemplateName, language: Lan
         TOML-текст для файла клиента.
     """
     text = strip_template_box(template_text)
-    placeholders = scan_placeholders(text)
+    scanned = scan_placeholders(text)
+    placeholders = [item for item in scanned if item.kind != 'unclosed']
     by_text = semantic_keys(template, language)
     counts = Counter(item.key for item in placeholders)
     lines = [
@@ -623,6 +674,11 @@ def fields_skeleton(template_text: str, *, template: TemplateName, language: Lan
         '# Раскомментируйте и заполните. Пустая строка "" в [fields] убирает скобку целиком',
         '# (вариант не выбран, пометка снята). Другое значение для одного места: "date#2" = "...".',
         '# Поля {{…}} оператора берутся из operator.toml, сюда их не пишут.',
+        *(
+            f'# ВНИМАНИЕ: стр. {item.line} — незакрытая "[" в шаблоне; договор не соберётся, пока её не исправить.'
+            for item in scanned
+            if item.kind == 'unclosed'
+        ),
         '',
     ]
     semantic_present = {by_text[key]: key for key in counts if key in by_text}
@@ -658,7 +714,14 @@ def fields_skeleton(template_text: str, *, template: TemplateName, language: Lan
         seen: set[str] = set()
         block = [title]
         for item in placeholders:
-            if item.kind != kind or item.key in by_text or item.key in seen:
+            if item.kind != kind or item.key in by_text:
+                continue
+            if item.key in PER_PLACE_KEYS and counts[item.key] > 1:
+                # Сумма в каждом месте своя: заготовка сразу по местам.
+                block.append(f'# стр. {item.line}, место {item.occurrence} из {counts[item.key]}')
+                block.append(f'# {_toml_string(f"{item.key}#{item.occurrence}")} = ""')
+                continue
+            if item.key in seen:
                 continue
             seen.add(item.key)
             block.append(f'# стр. {item.line}' + (f' (×{counts[item.key]})' if counts[item.key] > 1 else ''))

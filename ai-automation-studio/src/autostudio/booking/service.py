@@ -115,7 +115,9 @@ class BookingService:
         Расчёт слотов остаётся синхронным и чистым: он получает этот снимок как данные.
         """
         if self._availability is not None:
-            self._busy = await self._availability.busy(self.bookings(now), now)
+            start = now - dt.timedelta(days=1)
+            end = now + dt.timedelta(days=self._config.booking.horizon_days + 1)
+            self._busy = await self._availability.busy(self._store.calendar_events(start, end), now)
 
     def note_source(self, user: str, raw: str | None, now: dt.datetime) -> str | None:
         """Запоминает, откуда пришёл покупатель (deep link, реклама), и пишет событие для отчёта.

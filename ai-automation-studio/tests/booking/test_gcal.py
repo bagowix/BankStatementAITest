@@ -2,6 +2,7 @@ import datetime as dt
 import json
 
 import httpx
+import msgspec
 import pytest
 import respx
 
@@ -9,6 +10,7 @@ from autostudio.booking.gcal import (
     BOOKING_PROPERTY,
     CALENDAR_API,
     FREEBUSY_MAX_CALENDARS,
+    SCOPES,
     CalendarError,
     EventDraft,
     EventGoneError,
@@ -136,6 +138,8 @@ async def test__events__find_insert_patch_delete__escaped_calendar_path_and_priv
     body = json.loads(insert.calls[0].request.content)
     assert body == event_body(DRAFT)
     assert 'attendees' not in body  # сервисный аккаунт без delegation гостей не приглашает
+    # Патч несёт `confirmed`: событие, удалённое руками (у Google оно `cancelled`), восстанавливается.
+    assert json.loads(patch.calls[0].request.content)['status'] == 'confirmed'
     assert body['start'] == {'dateTime': '2026-10-21T08:00:00+00:00', 'timeZone': 'Asia/Tbilisi'}
     assert body['extendedProperties'] == {'private': {BOOKING_PROPERTY: 'test-barbers/K7Q2MX'}}
     assert patch.called and delete.called
@@ -169,6 +173,19 @@ async def test__events__missing_event_or_calendar__gone_or_calendar_error():
             await api.insert_event('c@x', DRAFT)
 
 
+@respx.mock
+async def test__patch_event__google_keeps_it_cancelled__event_gone():
+    base = f'{CALENDAR_API}/calendars/a%40x/events'
+    respx.patch(f'{base}/moved').mock(return_value=httpx.Response(200, json={'id': 'moved', 'status': 'cancelled'}))
+    respx.patch(f'{base}/odd').mock(return_value=httpx.Response(200, text='not json'))
+    async with httpx.AsyncClient() as http:
+        api = calendar(http)
+        with pytest.raises(EventGoneError, match='осталось удалённым'):
+            await api.patch_event('a@x', 'moved', DRAFT)
+        with pytest.raises(CalendarError, match='изменение события'):
+            await api.patch_event('a@x', 'odd', DRAFT)
+
+
 async def test__fake_calendar__own_events_busy_missing_calendars_and_failures():
     fake = FakeCalendar({'g@x': [(START, START + dt.timedelta(hours=1))]})
     fake.missing.add('n@x')
@@ -183,6 +200,33 @@ async def test__fake_calendar__own_events_busy_missing_calendars_and_failures():
     fake.fail = True
     with pytest.raises(CalendarError):
         await fake.free_busy(['g@x'], START, END)
+
+
+async def test__fake_calendar__deleted_event__cancelled_like_google_patch_with_status_restores(monkeypatch):
+    from autostudio.booking import gcal
+
+    fake = FakeCalendar()
+    event = await fake.insert_event('g@x', DRAFT)
+    await fake.delete_event('g@x', event)
+    # Как у Google: удалённое не занимает время и не находится поиском, но патч по нему — 200.
+    assert (await fake.free_busy(['g@x'], START, END)).busy['g@x'] == []
+    assert await fake.find_event('g@x', DRAFT.booking_key) is None
+    later = msgspec.structs.replace(DRAFT, start=DRAFT.start + dt.timedelta(hours=1))
+    without_status = {key: value for key, value in event_body(later).items() if key != 'status'}
+    monkeypatch.setattr(gcal, 'event_body', lambda draft: without_status)
+    await fake.patch_event('g@x', event, later)  # тело без `status` — событие остаётся удалённым
+    assert fake.events['g@x'] == {} and fake.cancelled['g@x'][event] == later
+    monkeypatch.undo()
+    await fake.patch_event('g@x', event, later)
+    assert fake.events['g@x'] == {event: later} and fake.cancelled['g@x'] == {}
+
+
+def test__scopes__client_calendars_shared_with_service_account__events_freebusy_and_events():
+    # `calendar.freebusy` — «ваши календари»; у сервисного аккаунта своих нет, календари клиента расшарены.
+    assert SCOPES == (
+        'https://www.googleapis.com/auth/calendar.events.freebusy',
+        'https://www.googleapis.com/auth/calendar.events',
+    )
 
 
 def test__service_account_email__key_file__email_or_none(tmp_path):

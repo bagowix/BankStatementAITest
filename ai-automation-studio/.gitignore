@@ -24,5 +24,10 @@ clients/*
 .idea/
 .DS_Store
 # Реквизиты ИП оператора и его бухгалтерия: репозиторий зеркалируется в публичный.
-operator.toml
+# Любой профиль оператора (operator.toml, operator.prod.toml, operator-ge.toml), его резервные
+# копии (operator.toml~, operator.toml.bak) и файлы подкачки редактора — вне git; образец — в git.
+operator*.toml*
+.operator*.swp
+.operator*.swo
+!operator.example.toml
 var/office/

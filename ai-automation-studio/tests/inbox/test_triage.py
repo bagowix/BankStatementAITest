@@ -99,6 +99,24 @@ def test__verify_phone__wrong_country_code_completed_by_model__dropped():
     assert verify_phone('+7 599 12 34 56', ['Call +995 599 12 34 56']) is None
 
 
+@pytest.mark.parametrize('proposed', ['+48 599 123 456', '+33 5 99 12 34 56', '+31 599 123 456', '+43 599 123456'])
+def test__verify_phone__model_country_code_valid_there_too__local_number_not_read_in_model_region(proposed):
+    # Регрессия: регион из кода страны модели добавлялся к регионам письма, и «599 12 34 56»
+    # (грузинский номер) подтверждался как польский +48 599 123 456 — модель сама выбирала,
+    # как читать письмо, а владелец получал в Telegram чужой номер «для звонка в один тап».
+    texts = ['Мой номер 599 12 34 56, перезвоните, пожалуйста']
+    assert verify_phone(proposed, texts, ['GE', 'RU']) is None
+    assert verify_phone('+995 599 12 34 56', texts, ['GE', 'RU']) == VerifiedPhone('599 12 34 56', '+995599123456')
+
+
+def test__verify_phone__foreign_number_written_internationally__found_without_its_region():
+    texts = ['Call me on +48 599 123 456 or 0048 599 123 456']
+    assert verify_phone('+48 599 123 456', texts, ['GE']) == VerifiedPhone('+48 599 123 456', '+48599123456')
+    assert verify_phone('+48 599 123 456', texts, []) == VerifiedPhone('+48 599 123 456', '+48599123456')
+    # Местная запись чужой страны без её региона в конфиге не подтверждается (а не угадывается).
+    assert verify_phone('+7 916 123 45 67', ['8 (916) 123-45-67'], ['GE']) is None
+
+
 def test__normalize_phone__regions_in_order__e164_or_none():
     assert normalize_phone('599 12 34 56', ['GE']) == '+995599123456'
     assert normalize_phone('8 916 123 45 67', ['GE', 'RU']) == '+79161234567'

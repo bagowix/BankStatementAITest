@@ -71,6 +71,25 @@ def test__month_report__fixture_ledger__numbers():
     assert all(isinstance(value, Decimal) for value in (report.turnover_gel, report.tax_estimate_gel))
 
 
+def test__month_report__cumulative_payable__months_add_up_to_year():
+    # 1234.55 GEL в сентябре и октябре: по 12.35 «помесячно», но за два месяца налог 24.69.
+    ledger = [_r('2026-09-10', '1234.55', 'GEL', '1', 'GE'), _r('2026-10-10', '1234.55', 'GEL', '1', 'GE')]
+    september = build_month_report(ledger, dt.date(2026, 9, 1))
+    october = build_month_report(ledger, dt.date(2026, 10, 1))
+    assert (september.tax_estimate_gel, october.tax_estimate_gel) == (Decimal('12.35'), Decimal('12.35'))
+    assert october.ytd_tax_estimate_gel == Decimal('24.69')
+    assert september.tax_due_gel == Decimal('12.35')
+    assert october.tax_due_gel == Decimal('12.34')
+    assert september.tax_due_gel + october.tax_due_gel == october.ytd_tax_estimate_gel
+    assert october.prior_ytd_turnover_gel == Decimal('1234.55')
+
+
+def test__month_report__january__nothing_carried_from_last_year():
+    january = build_month_report([_r('2025-12-20', '1000'), _r('2026-01-15', '100', 'GEL', '1')], dt.date(2026, 1, 1))
+    assert january.prior_ytd_turnover_gel == 0
+    assert january.tax_due_gel == Decimal('1.00')
+
+
 def test__tax_estimate__half_up_to_tetri():
     assert tax_estimate(Decimal('12.50')) == Decimal('0.13')  # 0.125 → 0.13
     assert tax_estimate(Decimal('0')) == Decimal('0.00')
@@ -142,7 +161,9 @@ def test__render_month_report__key_lines_and_disclaimer():
     assert 'Поступления и налог за 2026-10' in text
     assert 'не налоговая консультация' in text
     assert 'Оборот месяца: **37 375.61 GEL**' in text
-    assert 'Налог 1% (оценка): **373.76 GEL**' in text
+    assert 'С начала года (нарастающим итогом): **70 062.71 GEL**' in text
+    assert 'Налог к уплате за месяц (оценка): **373.76 GEL** = 1% нарастающим итогом 700.63 − 1% на конец' in text
+    assert '1% от оборота месяца — 373.76 GEL' in text
     assert 'до 2026-11-15' in text
     assert '100 USD' in text
     assert 'Порог НДС: 63 333.33 GEL' in text

@@ -5,6 +5,7 @@ import pytest
 
 from autostudio.errors import ConfigError
 from autostudio.office.contract import (
+    PER_PLACE_KEYS,
     TEMPLATES,
     AgreementInfo,
     ContractIncompleteError,
@@ -25,6 +26,7 @@ from autostudio.office.contract import (
     strip_template_box,
     template_path,
 )
+from tests.office.helpers import TEST_BANK, TEST_EMAIL, TEST_ID, TEST_NAME, TEST_NAME_RU, TEST_SWIFT, TEST_TELEGRAM
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LEGAL = REPO_ROOT / 'docs' / 'legal'
@@ -59,6 +61,13 @@ development and not "consulting".]
 
 Date: [date]
 """
+
+FULL_OPERATOR_FIELDS = {
+    'SERVER_LOCATION': 'Test Country',
+    'HOSTING_PROVIDER': 'Test Hosting',
+    'BACKUP_PROVIDER': 'Test Storage',
+    'BACKUP_LOCATION': 'Test Country',
+}
 
 FULL_FIELDS = {
     ', direct clients only: email {{EMAIL}}': ', email {{EMAIL}}',
@@ -124,14 +133,14 @@ def test__strip_template_box__removed_and_line_numbers_kept():
 def test__render__everything_filled__no_placeholders_left(operator):
     rendered = _render(operator, _request(), drop_review_notes=True)
     text = rendered.text
-    assert '**Jane Example**, identification number 000000000, email jane@example.com (the **Developer**)' in text
+    assert f'**{TEST_NAME}**, identification number {TEST_ID}, email {TEST_EMAIL} (the **Developer**)' in text
     assert '**Example LLC**, LLC, address Tbilisi.' in text
     assert 'on real data.' in text  # пустая скобка не оставляет « .»
     assert 'not consulting.\n\n4.3.' in text
     assert 'Disputes go to the courts of Georgia.' in text
-    assert '| Hosting | Shared server in Example Country |' in text
+    assert '| Hosting | Shared server in Test Country |' in text
     assert '| Backups | Daily copies. |' in text
-    assert 'IBAN GE07 XX00 0000 0000 0000 00, JSC Example Bank, SWIFT/BIC XXXXGE22' in text
+    assert f'IBAN GE07 XX00 0000 0000 0000 00, {TEST_BANK}, SWIFT/BIC {TEST_SWIFT}' in text
     assert '`[code, not a field]`' in text and '[a link](https://example.com)' in text
     assert '{{' not in text and '[LAWYER' not in text and '[VERIFY' not in text
     assert rendered.dropped_notes == 2
@@ -179,7 +188,7 @@ def test__render__client_text__inserted_as_data_and_escaped_in_html(operator):
     assert '<script>' not in page
     assert '&lt;script&gt;alert(1)&lt;/script&gt;' in page
     # Поля оператора подставляются и во вписанные значения: так вариант «сервер в {{SERVER_LOCATION}}» работает.
-    assert 'address 000000000' in rendered.text
+    assert f'address {TEST_ID}' in rendered.text
     assert page.startswith('<!doctype html><html lang="en">')
     assert '<title>Software Services Agreement</title>' in page
     assert '@page { size: A4' in page
@@ -209,11 +218,11 @@ def test__semantic_keys__address_means_client_address_only_in_agreement():
 
 def test__operator_fields__builtin_and_overrides(operator):
     fields = operator_fields(operator, 'ru')
-    assert fields['NAME'] == 'Джейн Пример'
-    assert fields['TELEGRAM'] == 'jane_example'
-    assert fields['BANK_DETAILS'].startswith('IBAN GE07 XX00') and 'банк JSC Example Bank' in fields['BANK_DETAILS']
-    overridden = msgspec.structs.replace(operator, contract_fields={'NAME': 'J. Example'})
-    assert operator_fields(overridden, 'en')['NAME'] == 'J. Example'
+    assert fields['NAME'] == TEST_NAME_RU
+    assert fields['TELEGRAM'] == TEST_TELEGRAM
+    assert fields['BANK_DETAILS'].startswith('IBAN GE07 XX00') and f'банк {TEST_BANK}' in fields['BANK_DETAILS']
+    overridden = msgspec.structs.replace(operator, contract_fields={'NAME': 'T. Operator'})
+    assert operator_fields(overridden, 'en')['NAME'] == 'T. Operator'
 
 
 def test__request_files__merge_and_toml_date(tmp_path):
@@ -250,6 +259,16 @@ def test__output_name__slug_from_number_or_client():
     assert output_name(ContractRequest(), 'dpa', 'en', 'md') == 'contract-dpa.en.md'
 
 
+def test__output_name__non_ascii_clients__distinct_files():
+    # Раньше все кириллические и грузинские имена давали один файл contract-… и перезаписывали друг друга.
+    names = ['ООО Ромашка', 'ИП Иванов', 'შპს მაგალითი']
+    files = {output_name(ContractRequest(client=ContractParty(name=name)), 'dpa', 'ru', 'html') for name in names}
+    assert len(files) == 3
+    assert all(name.startswith('contract-') and name.endswith('-dpa.ru.html') for name in files)
+    mixed = output_name(ContractRequest(client=ContractParty(name='ООО Acme')), 'dpa', 'ru', 'md')
+    assert mixed.startswith('Acme-') and mixed != 'Acme-dpa.ru.md'
+
+
 def test__fields_skeleton__all_keys_commented():
     skeleton = fields_skeleton(TEMPLATE, template='service-agreement', language='en', label='t.md')
     assert '# name = ""  # [Client\'s legal name] ×1' in skeleton
@@ -274,20 +293,82 @@ def test__real_templates__unfilled__error_and_filled__clean(operator, name, lang
     text = load_template(template_path(LEGAL, name, language))
     with pytest.raises(ContractIncompleteError):
         render_contract(text, template=name, language=language, operator=operator, request=ContractRequest())
-    keys = {item.key for item in scan_placeholders(strip_template_box(text))}
-    filled = ContractRequest(fields=dict.fromkeys(keys, 'FILLED'))
-    full_operator = msgspec.structs.replace(
-        operator,
-        contract_fields={
-            'SERVER_LOCATION': 'Example Country',
-            'HOSTING_PROVIDER': 'Example Hosting',
-            'BACKUP_PROVIDER': 'Example Storage',
-            'BACKUP_LOCATION': 'Example Country',
-        },
-    )
+    found = scan_placeholders(strip_template_box(text))
+    assert not [item for item in found if item.kind == 'unclosed']
+    keys = {item.key for item in found}
+    fields = dict.fromkeys(keys - PER_PLACE_KEYS, 'FILLED')
+    fields.update({f'{item.key}#{item.occurrence}': 'FILLED' for item in found if item.key in PER_PLACE_KEYS})
+    filled = ContractRequest(fields=fields)
+    full_operator = msgspec.structs.replace(operator, contract_fields=FULL_OPERATOR_FIELDS)
     rendered = render_contract(text, template=name, language=language, operator=full_operator, request=filled)
     for marker in ('{{', '[LAWYER', '[VERIFY', '[ЮРИСТ', '[ПРОВЕРИТЬ', '[ACCOUNTANT', '[БУХГАЛТЕР'):
         assert marker not in rendered.text
     assert 'Template. Not legal advice' not in rendered.text
     assert 'Шаблон. Не юридическая консультация' not in rendered.text
     assert contract_html(rendered.text, language=language).count('<h1>') == 1
+
+
+def _real_fields(text: str, **overrides: str) -> ContractRequest:
+    keys = {item.key for item in scan_placeholders(strip_template_box(text))}
+    return ContractRequest(fields={**dict.fromkeys(keys, 'FILLED'), **overrides})
+
+
+@pytest.mark.parametrize(('language', 'key'), [('en', 'amount'), ('ru', 'сумма')])
+def test__real_service_agreement__one_sum_for_three_places__refused(operator, language, key):
+    # Предоплата 50%, остаток 50% и абонентская плата — три разные суммы; «USD 225» во всех трёх — брак.
+    text = load_template(template_path(LEGAL, 'service-agreement', language))
+    full = msgspec.structs.replace(operator, contract_fields=FULL_OPERATOR_FIELDS)
+    with pytest.raises(ConfigError, match=f'"{key}#3"') as caught:
+        render_contract(
+            text,
+            template='service-agreement',
+            language=language,
+            operator=full,
+            request=_real_fields(text, **{key: 'USD 225'}),
+        )
+    assert 'стр.' in str(caught.value)
+    per_place = {f'{key}#1': 'USD 225', f'{key}#2': 'USD 225', f'{key}#3': 'USD 99'}
+    rendered = render_contract(
+        text,
+        template='service-agreement',
+        language=language,
+        operator=full,
+        request=_real_fields(text, **per_place),
+    )
+    assert 'USD 99' in rendered.text
+    assert not any(f'[{key}]' in notice for notice in rendered.notices)
+
+
+def test__real_templates__repeated_raw_field__notice_with_lines(operator):
+    text = load_template(template_path(LEGAL, 'dpa', 'en'))
+    full = msgspec.structs.replace(operator, contract_fields=FULL_OPERATOR_FIELDS)
+    rendered = render_contract(text, template='dpa', language='en', operator=full, request=_real_fields(text))
+    [notice] = [n for n in rendered.notices if n.startswith('[Anthropic / OpenAI]')]
+    assert '×3 (стр. ' in notice and '«FILLED»' in notice
+
+
+def test__render__unclosed_bracket__incomplete_with_line(operator):
+    template = '# T\n\nThe fee is [amount]. [LAWYER: check the liability cap before use.\n\nSigned by {{NAME}}.\n'
+    request = ContractRequest(fields={'amount': 'USD 100'})
+    with pytest.raises(ContractIncompleteError) as caught:
+        render_contract(
+            template,
+            template='support-sla',
+            language='en',
+            operator=operator,
+            request=request,
+            drop_review_notes=True,
+        )
+    message = str(caught.value)
+    assert 'незакрытые скобки' in message and 'стр. 3: [LAWYER: check the liability cap' in message
+    skeleton = fields_skeleton(template, template='support-sla', language='en', label='t.md')
+    assert 'стр. 3 — незакрытая "["' in skeleton
+    assert '# "amount" = ""' in skeleton
+
+
+def test__fields_skeleton__repeated_sum__one_line_per_place():
+    template = '# T\n\nPrepay [amount], rest [amount].\n\nMonthly [amount] in [English], signed in [English].\n'
+    skeleton = fields_skeleton(template, template='service-agreement', language='en', label='t.md')
+    assert '# "amount#1" = ""' in skeleton and '# "amount#3" = ""' in skeleton
+    assert '# "amount" = ""' not in skeleton
+    assert skeleton.count('# "English" = ""') == 1 and '(×2)' in skeleton

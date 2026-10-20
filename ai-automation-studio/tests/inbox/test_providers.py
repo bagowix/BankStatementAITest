@@ -119,6 +119,24 @@ async def test__build_mailbox__oauth_variable_missing__config_error_names_it():
             )
 
 
+async def test__build_token_provider__google_auth_not_installed__config_error_with_install_hint(monkeypatch):
+    # Регрессия: без extras `sheets` ленивый импорт ронял `run` и `check --connect` трассировкой
+    # ModuleNotFoundError, а не строкой «ошибка: …» с подсказкой.
+    import sys
+
+    import httpx
+    import pytest
+
+    from autostudio.errors import ConfigError
+    from autostudio.inbox.providers import build_token_provider
+
+    monkeypatch.setitem(sys.modules, 'autostudio.inbox.google_oauth', None)
+    env = {'INBOX_OAUTH_CLIENT_ID': 'c', 'INBOX_OAUTH_CLIENT_SECRET': 's', 'INBOX_OAUTH_REFRESH_TOKEN': 'r'}
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(ConfigError, match='uv sync --extra sheets'):
+            build_token_provider(make_config(auth='google_oauth').inbox, env, http)
+
+
 async def test__inbox_provider__events_at_shared_events_path(monkeypatch, tmp_path):
     from autostudio.clientconf import events_path
 

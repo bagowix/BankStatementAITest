@@ -3,14 +3,25 @@
 import datetime as dt
 import email
 
+import httpx
 import msgspec
 
 from autostudio.errors import LLMError, NotifyError, kind_for_status
+from autostudio.inbox.errors import InboxError
 from autostudio.inbox.heuristics import make_fake_llm, triage_heuristic
 from autostudio.inbox.imap import FakeFolder
-from autostudio.inbox.pipeline import MAX_ATTEMPTS, OUTAGE_GRACE, dry_run, model_outage, run_once
+from autostudio.inbox.pipeline import (
+    MAX_ATTEMPTS,
+    OUTAGE_GRACE,
+    RunResult,
+    dry_run,
+    failure_signature,
+    model_outage,
+    run_once,
+)
 from autostudio.inbox.triage import Triage
 from autostudio.llm import FakeLLM
+from autostudio.runlog import Heartbeat, supervised_run
 from tests.inbox.helpers import NOW, Harness, make_config, make_email
 
 LEAD = {'subject': 'Tour price', 'body': 'What is the price of the Kazbegi tour? Phone: +995 599 12 34 56'}
@@ -446,3 +457,72 @@ async def test__run__refusal_while_model_also_down__refusal_waits_too(tmp_path):
         result = await run_once(h.config, h.deps, _later(minute))
         assert result.given_up == 0
     assert h.store.record_failure('INBOX', 1, 1, 'probe', now=NOW) == 1
+
+
+# --- сигнал оператору только о переходах (supervised_run ядра) ------------------------------
+
+
+async def _supervised(h: Harness, now: dt.datetime) -> None:
+    # Та же работа, что у `autostudio inbox run` (cli._serve): не ok → InboxError → supervised_run.
+    async def job() -> RunResult:
+        result = await run_once(h.config, h.deps, now)
+        if not result.ok:
+            raise InboxError('; '.join(result.errors) or str(result.aborted))
+        return result
+
+    async with httpx.AsyncClient() as http:
+        await supervised_run(
+            package='inbox',
+            job=job,
+            events=h.events,
+            heartbeat=Heartbeat(http, None),
+            operator=h.operator,
+            client_name='Acme',
+            now=lambda: now,
+        )
+
+
+async def test__supervised__owner_channel_down_new_leads_each_run__one_operator_alert_then_recovery(tmp_path):
+    # Регрессия: в тексте ошибки был счётчик «писем отложено: N» — он рос с каждым новым лидом,
+    # и сигнал оператору уходил на КАЖДОМ запуске, а не о первом сбое.
+    h = Harness(tmp_path)
+    h.owner.fail = True
+    for run in range(4):
+        h.box.add(
+            make_email(
+                subject='Tour price',
+                message_id=f'<lead{run}@x.example>',
+                body=f'What is the price of the Kazbegi tour for {run + 2} people? Phone: +995 599 12 34 5{run}',
+            )
+        )
+        await _supervised(h, _later(15 * run))
+    assert h.operator is not None
+    assert len(h.operator.sent) == 1 and 'notifier' in h.operator.sent[0]
+    assert 'отложены' in h.operator.sent[0] and not any(ch.isdigit() for ch in h.operator.sent[0].split('(')[0])
+    h.owner.fail = False
+    await _supervised(h, _later(90))
+    assert len(h.operator.sent) == 2 and 'снова работает' in h.operator.sent[1]
+
+
+async def test__supervised__model_outage_text_changes_every_run__one_operator_alert(tmp_path):
+    # Текст провайдера меняется от запуска к запуску («retry in Ns»), а вид сбоя — нет.
+    seconds = iter(range(10, 100))
+
+    def overloaded(system: str, prompt: str) -> Triage:
+        raise LLMError(f'OpenAI 429: rate limit, retry in {next(seconds)}s', status_code=429, kind='outage')
+
+    h = Harness(tmp_path, llm=FakeLLM({Triage: overloaded}))
+    for run in range(5):
+        # С третьего письма срабатывает прерыватель — состояние для оператора то же: модель лежит.
+        h.box.add(make_email(subject=f'Booking {run}', message_id=f'<b{run}@x.example>', body='I want a tour'))
+        await _supervised(h, _later(15 * run))
+    assert h.operator is not None and len(h.operator.sent) == 1
+    assert 'model — LLMError (outage, HTTP 429)' in h.operator.sent[0] and 'retry in' not in h.operator.sent[0]
+
+
+def test__failure_signature__model_error_kind_and_status_only__channel_error_text_kept():
+    assert failure_signature(LLMError('ответ не прошёл схему Triage: $.category')) == 'LLMError (content)'
+    assert failure_signature(LLMError('OpenAI 401: bad key sk-…', status_code=401, kind='config')) == (
+        'LLMError (config, HTTP 401)'
+    )
+    assert failure_signature(NotifyError('Telegram: бот заблокирован')) == 'NotifyError: Telegram: бот заблокирован'

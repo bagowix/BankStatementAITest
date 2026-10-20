@@ -423,25 +423,13 @@ def _e164(number: PhoneNumber) -> str:
     return phonenumbers.format_number(number, PhoneNumberFormat.E164)
 
 
-def _phone_regions(proposal: str, regions: Sequence[str]) -> list[str]:
-    # Регион из кода страны, который модель написала сама («+7 916…»), тоже пробуется для
-    # номеров письма: «8 (916) 123-45-67» становится +7 916… только при разборе в регионе RU.
-    found = list(regions)
-    try:
-        number = phonenumbers.parse(proposal, None)
-    except phonenumbers.NumberParseException:
-        return found
-    if number.country_code is not None:
-        found += phonenumbers.region_codes_for_country_code(number.country_code)
-    return list(dict.fromkeys(found))
-
-
-def normalize_phone(value: str, regions: Sequence[str]) -> str | None:
+def normalize_phone(value: str, regions: Sequence[str | None]) -> str | None:
     """Номер в E.164, если он существует хотя бы в одном из регионов (по порядку).
 
     Args:
         value: Номер в любой записи (`8 (916) 123-45-67`, `+995 599 12 34 56`, `599123456`).
-        regions: Регионы для номеров без кода страны, в порядке предпочтения.
+        regions: Регионы для номеров без кода страны, в порядке предпочтения; None — только
+            международная запись с «+».
 
     Returns:
         `+79161234567` или None, если такого номера нет ни в одном регионе.
@@ -461,11 +449,14 @@ def verify_phone(
 ) -> VerifiedPhone | None:
     """Телефон, только если в письме есть номер с тем же E.164.
 
-    Модель могла переписать `8 (916) 123-45-67` как `+7 916 123 45 67` — это тот же номер.
-    А `+44 599 12 34 56` вместо `599 12 34 56` — уже другой: модель «достроила» местный
-    номер чужим кодом страны. Номера в тексте ищет `phonenumbers.PhoneNumberMatcher`
-    (только существующие номера: даты, номера брони и суммы им не становятся). Сравнение
-    цифр «хвостом», как было раньше, второй случай пропускало (var/review_inbox/compare_phones.py).
+    Модель могла переписать `8 (916) 123-45-67` как `+7 916 123 45 67` — это тот же номер
+    (если RU среди регионов клиента). А `+48 599 123 456` вместо `599 12 34 56` — уже другой:
+    модель «достроила» местный номер чужим кодом страны. Номера в тексте ищет
+    `phonenumbers.PhoneNumberMatcher` (только существующие номера: даты, номера брони и суммы
+    им не становятся). Номер без кода страны читается только в регионах из конфига, а не в
+    стране, которую назвала модель: иначе модель сама выбирала бы, как читать письмо, и
+    «599 12 34 56» подтверждался бы как польский номер. Сравнение цифр «хвостом», как было
+    раньше, «достройку» пропускало (var/review_inbox/compare_phones.py).
 
     Args:
         phone: Телефон от модели.
@@ -477,12 +468,13 @@ def verify_phone(
     """
     if not phone or not phone.strip():
         return None
-    all_regions = _phone_regions(phone, regions)
-    wanted = normalize_phone(phone, all_regions)
+    # None — номера только в международной записи («+48 …»): их страна написана в самом номере.
+    known: list[str | None] = [*regions, None]
+    wanted = normalize_phone(phone, known)
     if wanted is None:
         return None
     for text in texts_:
-        for region in all_regions:
+        for region in known:
             for match in PhoneNumberMatcher(text, region, leniency=Leniency.VALID):
                 if _e164(match.number) == wanted:
                     return VerifiedPhone(literal=match.raw_string.strip(), e164=wanted)

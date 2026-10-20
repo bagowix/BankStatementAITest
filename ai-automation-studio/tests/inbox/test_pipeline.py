@@ -476,8 +476,8 @@ async def test__run__llm_down_single_email__postponed_never_given_up(tmp_path):
     h.box.add(make_email(**LEAD))
     for minute in range(MAX_ATTEMPTS + 2):
         result = await run_once(h.config, h.deps, _later(minute))
-        assert not result.ok and result.aborted is None and 'отложено' in result.errors[0]
-        assert result.given_up == 0
+        assert not result.ok and result.aborted is None and 'письма отложены' in result.errors[0]
+        assert result.given_up == 0 and result.postponed == 1
     assert h.sheet() == []
     h.llm.register(Triage, triage_heuristic)
     h.llm.set_writer(lambda system, prompt: 'Thanks!')

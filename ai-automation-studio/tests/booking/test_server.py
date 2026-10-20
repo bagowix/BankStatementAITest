@@ -1,15 +1,27 @@
 import asyncio
+import json
 import socket
 
 import aiohttp
+import msgspec
 import pytest
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.methods import DeleteWebhook, GetMe, SendMessage, SetWebhook
+from aiogram.types import Message
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from autostudio.booking.reminders import ReminderLoop
-from autostudio.booking.server import HEALTH_PATH, TELEGRAM_PATH, WHATSAPP_PATH, serve, web_app
+from autostudio.booking.server import (
+    HEALTH_PATH,
+    TELEGRAM_AUTH_HEADER,
+    TELEGRAM_PATH,
+    WHATSAPP_PATH,
+    TelegramWebhook,
+    serve,
+    web_app,
+)
 from autostudio.booking.telegram import ALLOWED_UPDATES, BookingBot, TelegramSender
 from autostudio.runlog import Heartbeat
 from tests.booking.helpers import App, make_config
@@ -181,5 +193,138 @@ async def test__web_app__routes_health_whatsapp_and_secretless_telegram_refused(
             assert (await client.get(HEALTH_PATH)).status == 200
             assert (await client.get(WHATSAPP_PATH)).status == 403
             assert (await client.post(TELEGRAM_PATH)).status in (404, 405)
-    with pytest.raises(ValueError, match='secret_token'):
-        web_app(dispatcher=Dispatcher(), bot=Bot(TOKEN, session=MockSession()))
+    for secret in (None, ''):
+        with pytest.raises(ValueError, match='secret_token'):
+            TelegramWebhook(Dispatcher(), Bot(TOKEN, session=MockSession()), secret)
+
+
+async def test__web_app__whatsapp_payload_2mb_signed__accepted_not_413(tmp_path):
+    # Meta шлёт вебхуки до 3 МБ; у aiohttp по умолчанию предел 1 МиБ — такой вебхук получил бы 413.
+    import httpx
+
+    from tests.booking.test_whatsapp import Harness, sign
+
+    app = App(tmp_path, make_config(whatsapp={'phone_number_id': '106540352242922'}))
+    value = {'messaging_product': 'whatsapp', 'statuses': [], 'padding': 'x' * (2 * 1024**2)}
+    raw = {'object': 'whatsapp_business_account', 'entry': [{'changes': [{'field': 'messages', 'value': value}]}]}
+    body = msgspec.json.encode(raw)
+    async with httpx.AsyncClient() as http:
+        harness = Harness(app, http)
+        async with TestClient(TestServer(web_app(whatsapp=harness.bot))) as client:
+            response = await client.post(WHATSAPP_PATH, data=body, headers={'X-Hub-Signature-256': sign(body)})
+            assert response.status == 200
+            await harness.bot.drain()
+
+
+class SlowBot:
+    """Диспетчер с хендлером, который ждёт сигнала: апдейт «в работе», пока тест не отпустит."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.gate = asyncio.Event()
+        self.started: list[str] = []
+        self.done: list[str] = []
+        self.dispatcher = Dispatcher()
+        router = Router()
+
+        @router.message()
+        async def slow(message: Message) -> None:
+            self.started.append(message.text or '')
+            await self.gate.wait()
+            if fail:
+                raise RuntimeError('bug')
+            self.done.append(message.text or '')
+
+        self.dispatcher.include_router(router)
+
+    async def wait_started(self, count: int) -> None:
+        for _ in range(200):
+            if len(self.started) >= count:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(f'начато {len(self.started)} апдейтов из {count}')
+
+
+def update_json(text: str, update_id: int) -> str:
+    return json.dumps({**message_update(text), 'update_id': update_id})
+
+
+async def test__telegram_webhook__limit_reached__next_update_waits_for_slot_then_drained(tmp_path):
+    slow = SlowBot()
+    webhook = TelegramWebhook(slow.dispatcher, Bot(TOKEN, session=MockSession()), SECRET, limit=1)
+    application = web.Application()
+    webhook.routes(application, '/tg')
+    headers = {TELEGRAM_AUTH_HEADER: SECRET, 'Content-Type': 'application/json'}
+    async with TestClient(TestServer(application)) as client:
+        first = await client.post('/tg', data=update_json('one', 1), headers=headers)
+        assert first.status == 200 and webhook.in_flight == 1  # 200 сразу, обработка в фоне
+        await slow.wait_started(1)
+        second = asyncio.create_task(client.post('/tg', data=update_json('two', 2), headers=headers))
+        await asyncio.sleep(0.05)
+        # Слот занят: второй апдейт не стал ещё одной задачей, Telegram ждёт ответа.
+        assert not second.done() and slow.started == ['one']
+        slow.gate.set()
+        assert (await second).status == 200
+        await webhook.drain()
+    assert slow.done == ['one', 'two'] and webhook.in_flight == 0
+
+
+async def test__telegram_webhook__wrong_secret_bad_json_handler_crash__401_400_logged(tmp_path, caplog):
+    slow = SlowBot(fail=True)
+    slow.gate.set()
+    webhook = TelegramWebhook(slow.dispatcher, Bot(TOKEN, session=MockSession()), SECRET)
+    application = web.Application()
+    webhook.routes(application, '/tg')
+    async with TestClient(TestServer(application)) as client:
+        wrong = await client.post('/tg', data=update_json('x', 1), headers={TELEGRAM_AUTH_HEADER: 'nope'})
+        assert wrong.status == 401 and slow.started == []
+        bad = await client.post('/tg', data='{"update_id": "x"', headers={TELEGRAM_AUTH_HEADER: SECRET})
+        assert bad.status == 400
+        crash = await client.post('/tg', data=update_json('boom', 3), headers={TELEGRAM_AUTH_HEADER: SECRET})
+        assert crash.status == 200
+        await webhook.drain()
+    assert slow.started == ['boom'] and 'апдейт Telegram 3 не обработан' in caplog.text
+
+
+async def test__serve__telegram_webhook_update_in_flight_on_stop__finished_before_return(tmp_path):
+    # Telegram уже получил 200 и апдейт не повторит: остановка должна дождаться его, а не оборвать.
+    config = make_config(
+        telegram={'mode': 'webhook'}, server={'public_url': 'https://bot.example.test/', 'host': '127.0.0.1'}
+    )
+    app = App(tmp_path, config)
+    bot, booking_bot, loop = parts(app, MockSession())
+    gate = asyncio.Event()
+    handled: list[str] = []
+
+    async def slow_engine(incoming):
+        await gate.wait()
+        handled.append(incoming.text)
+        return []
+
+    app.engine.handle = slow_engine
+    port = free_port()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        serve(
+            config=config,
+            bot=bot,
+            booking_bot=booking_bot,
+            loop=loop,
+            telegram_secret=SECRET,
+            port=port,
+            stop=stop,
+            install_signals=False,
+        )
+    )
+    base = f'http://127.0.0.1:{port}'
+    await wait_up(f'{base}{HEALTH_PATH}')
+    async with aiohttp.ClientSession() as client:
+        headers = {TELEGRAM_AUTH_HEADER: SECRET}
+        async with client.post(f'{base}{TELEGRAM_PATH}', json=message_update('hello'), headers=headers) as response:
+            assert response.status == 200
+    await asyncio.sleep(0.05)
+    stop.set()  # как SIGTERM, пока апдейт ещё в работе
+    await asyncio.sleep(0.1)
+    assert not task.done() and handled == []
+    gate.set()
+    await asyncio.wait_for(task, timeout=5)
+    assert handled == ['hello']

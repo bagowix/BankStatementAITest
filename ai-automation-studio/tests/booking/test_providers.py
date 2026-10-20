@@ -11,7 +11,7 @@ from autostudio.booking.store import BookingStore
 from autostudio.booking.telegram import BookingBot, TelegramSender
 from autostudio.errors import ConfigError, LLMError
 from autostudio.events import EventLog
-from autostudio.llm import FakeLLM, LLMClient, ResilientLLM
+from autostudio.llm import FakeLLM, LLMClient, LLMUsage, ResilientLLM
 from autostudio.providers import CoreProvider, OperatorAlerts
 from autostudio.settings import LLMProvider, Settings
 from tests.booking.helpers import Recorder
@@ -100,6 +100,52 @@ async def test__booking_provider__real_provider__resilient_llm_alerts_operator_a
         '⚠️ Test Barbers / booking: модель недоступна (проверьте ключ, права и модель), бот на правилах: OpenAI 401: key',
     ]
     await built.close()
+
+
+class FailingModel:
+    """Модель провайдера, которая падает заданными ошибками по очереди."""
+
+    model = 'gpt-test'
+
+    def __init__(self, errors: list[LLMError]) -> None:
+        self.errors = errors
+        self.usage = LLMUsage()
+
+    async def extract(self, *, system, prompt, schema):
+        raise self.errors.pop(0)
+
+    async def write(self, *, system, prompt):
+        raise self.errors.pop(0)
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test__booking_provider__refused_reply_then_key_revoked__key_alert_not_swallowed(
+    tmp_path, config, monkeypatch
+):
+    from autostudio.booking import providers
+
+    errors = [
+        LLMError('ответ не по схеме'),  # одна реплика — не повод будить оператора и занимать слот сигнала
+        LLMError('OpenAI 401: key', status_code=401, kind='config'),
+        LLMError('OpenAI 401: key', status_code=401, kind='config'),
+        LLMError('OpenAI 503', status_code=503, kind='outage'),
+    ]
+    monkeypatch.setattr(providers, 'make_llm', lambda settings: FailingModel(errors))
+    recorder = Recorder()
+    settings = Settings(llm_provider=LLMProvider.OPENAI, llm_model='gpt-5.4-mini', data_dir=tmp_path / 'data')
+    built = make_async_container(
+        CoreProvider(), BookingProvider(), _Operator(recorder), context={Settings: settings, BookingConfig: config}
+    )
+    llm = await built.get(LLMClient)
+    for _ in range(4):
+        # Бот не встаёт: каждую реплику отвечают эвристики пакета.
+        assert isinstance(await llm.write(system='s', prompt='p'), str)
+    await built.close()
+    # Ключ — сразу после «плохой реплики», второй раз за час — тишина; сбой провайдера — свой сигнал.
+    assert len(recorder.texts) == 2
+    assert 'проверьте ключ' in recorder.texts[0] and 'провайдер недоступен' in recorder.texts[1]
 
 
 async def test__booking_provider__no_operator__degradation_hook_silent(tmp_path, config, monkeypatch):

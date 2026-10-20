@@ -5,7 +5,10 @@
 и уменьшать счётчик. Аннулированный счёт остаётся в реестре с отметкой — налоговая
 и банк клиента должны видеть непрерывную нумерацию.
 
-Файл по умолчанию — `var/office/office.sqlite` (весь `var/` в .gitignore).
+Файл по умолчанию — `var/office/office.sqlite` в корне репозитория (весь `var/` в .gitignore).
+Создаёт файл только `init()` (команда `office init`): обычная команда, запущенная не с тем
+`--data-dir`, не заведёт молча пустой реестр и не выдаст номер второй раз — она откажется
+и назовёт полный путь, где искала.
 """
 
 import datetime as dt
@@ -19,8 +22,9 @@ from typing import Final
 import msgspec
 
 from autostudio.errors import ConfigError
-from autostudio.office.invoice import Invoice, InvoiceDraft, InvoiceStatus, validate_draft
+from autostudio.office.invoice import Invoice, InvoiceDraft, InvoiceStatus, check_issue_date, validate_draft
 from autostudio.office.ledger import CHANNELS, Channel, Receipt
+from autostudio.office.money import tbilisi_today
 from autostudio.office.rates import Rate, RateSource
 
 DB_NAME: Final = 'office.sqlite'
@@ -92,6 +96,7 @@ _RECEIPT_COLUMNS: Final = (
     'id, received_on, amount, currency, rate, rate_source, channel, counterparty, client_country, '
     'invoice_number, platform_fee, note'
 )
+type _ReceiptRow = tuple[int, str, str, str, str, str, str, str, str, str | None, str | None, str]
 
 
 class InvoiceRecord(msgspec.Struct, frozen=True, kw_only=True):
@@ -134,6 +139,37 @@ def _channel(value: str) -> Channel:
     return next((channel for channel in CHANNELS if channel == value), 'bank')
 
 
+def _receipt_from_row(row: _ReceiptRow) -> Receipt:
+    (
+        row_id,
+        received_on,
+        amount,
+        currency,
+        rate,
+        rate_source,
+        channel,
+        counterparty,
+        client_country,
+        invoice_number,
+        platform_fee,
+        note,
+    ) = row
+    return Receipt(
+        id=row_id,
+        received_on=dt.date.fromisoformat(received_on),
+        amount=Decimal(amount),
+        currency=currency,
+        rate=Decimal(rate),
+        rate_source=_rate_source(rate_source),
+        channel=_channel(channel),
+        counterparty=counterparty,
+        client_country=client_country,
+        invoice_number=invoice_number,
+        platform_fee=None if platform_fee is None else Decimal(platform_fee),
+        note=note,
+    )
+
+
 def format_number(prefix: str, year: int, seq: int) -> str:
     """Номер счёта: `AS-2026-001`; после 999 номер просто становится длиннее."""
     return f'{prefix}{year}-{seq:03d}'
@@ -146,21 +182,39 @@ class OfficeStore:
     соединения делают конкурентную выдачу номеров честной.
 
     Args:
-        path: Файл SQLite; каталог создаётся при первом обращении.
+        path: Файл SQLite; создаётся только `init()`.
     """
 
     def __init__(self, path: Path) -> None:
-        self._path = path
+        self._path = path.resolve()
 
     @property
     def path(self) -> Path:
         return self._path
 
+    def init(self) -> bool:
+        """Создаёт каталог и базу со схемой, если их ещё нет.
+
+        Returns:
+            True, если база создана сейчас; False, если уже была.
+        """
+        created = not self._path.exists()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self._path, timeout=_BUSY_TIMEOUT_S, isolation_level=None)) as conn:
+            conn.executescript(_SCHEMA)
+        return created
+
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection]:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._path.is_file():
+            raise ConfigError(
+                f'реестр офиса не найден: {self._path}. Первый запуск — autostudio office init; '
+                'реестр в другом месте — --data-dir или AUTOSTUDIO_OFFICE_DIR'
+            )
+        # mode=rw: файл, удалённый между проверкой и открытием, не пересоздастся пустым.
+        uri = f'{self._path.as_uri()}?mode=rw'
         # isolation_level=None: транзакциями управляем сами, чтобы взять блокировку записи до чтения счётчика.
-        with closing(sqlite3.connect(self._path, timeout=_BUSY_TIMEOUT_S, isolation_level=None)) as conn:
+        with closing(sqlite3.connect(uri, uri=True, timeout=_BUSY_TIMEOUT_S, isolation_level=None)) as conn:
             conn.executescript(_SCHEMA)
             yield conn
 
@@ -177,23 +231,37 @@ class OfficeStore:
 
     # --- счета ---------------------------------------------------------------------------
 
-    def issue_invoice(self, draft: InvoiceDraft, *, prefix: str, now: dt.datetime) -> Invoice:
+    def issue_invoice(self, draft: InvoiceDraft, *, prefix: str, now: dt.datetime, allow_date: bool = False) -> Invoice:
         """Выдаёт следующий номер серии `prefix` + год и сохраняет счёт.
+
+        Номера растут вместе с датами: счёт с датой раньше последнего счёта серии получил
+        бы больший номер при меньшей дате — бухгалтер и банк ждут обратного.
 
         Args:
             draft: Проверяемый черновик.
             prefix: Префикс номера из профиля оператора.
             now: Момент выпуска, с часовым поясом.
+            allow_date: Оператор подтвердил необычную дату (`--allow-date`).
 
         Returns:
             Счёт с номером.
 
         Raises:
-            ConfigError: Черновик неверен (номер при этом не расходуется).
+            ConfigError: Черновик неверен, дата неправдоподобна или раньше последнего счёта серии
+                (номер при этом не расходуется).
         """
         validate_draft(draft)
+        check_issue_date(draft.issue_date, tbilisi_today(now), allow=allow_date)
         year = draft.issue_date.year
         with self._write() as conn:
+            latest = conn.execute(
+                'SELECT MAX(issued_on) FROM invoices WHERE prefix = ? AND year = ?', (prefix, year)
+            ).fetchone()
+            if latest[0] is not None and draft.issue_date < dt.date.fromisoformat(latest[0]) and not allow_date:
+                raise ConfigError(
+                    f'дата счёта {draft.issue_date.isoformat()} раньше последнего счёта серии ({latest[0]}): '
+                    'номер был бы больше при меньшей дате. Проверьте --date (осознанно: --allow-date)'
+                )
             counter = conn.execute(
                 'SELECT last_seq FROM invoice_counters WHERE prefix = ? AND year = ?', (prefix, year)
             ).fetchone()
@@ -282,24 +350,86 @@ class OfficeStore:
             )
         return self.get_invoice(number)
 
-    def pay_invoice(self, number: str, receipt: Receipt, *, now: dt.datetime) -> tuple[InvoiceRecord, Receipt]:
+    def pay_invoice(
+        self, number: str, receipt: Receipt, *, now: dt.datetime, top_up: bool = False, extra: bool = False
+    ) -> tuple[InvoiceRecord, Receipt]:
         """Отмечает счёт оплаченным и записывает поступление — одной транзакцией.
 
+        Одна оплата — одна запись в книге. Если по счёту уже есть поступления
+        (`ledger add --invoice`), вторая запись на всю сумму удвоила бы оборот и налог:
+        без `top_up` она не принимается (для такого счёта есть `mark_paid`). Доплата
+        проходит ту же проверку на повтор, что и `add_receipt`.
+
+        Args:
+            number: Номер счёта.
+            receipt: Поступление.
+            now: Момент записи, с часовым поясом.
+            top_up: Записать, даже если по счёту уже есть поступления (доплата остатка).
+            extra: Оператор подтвердил, что деньги правда пришли ещё раз (`--extra`), —
+                записать, даже если запись похожа на повтор.
+
+        Returns:
+            Счёт со статусом и записанное поступление.
+
         Raises:
-            ConfigError: Нет такого счёта, он аннулирован или уже оплачен.
+            ConfigError: Нет такого счёта, он аннулирован или уже оплачен, по счёту уже
+                есть поступления, а `top_up` не задан, или доплата похожа на повтор.
         """
         with self._write() as conn:
-            status = self._current_status(conn, number)
-            if status == 'void':
-                raise ConfigError(f'счёт {number} аннулирован: оплату запишите как поступление без счёта')
-            if status == 'paid':
-                raise ConfigError(f'счёт {number} уже отмечен оплаченным')
+            self._payable(conn, number)
+            count, _ = self._linked(conn, number)
+            if count and not top_up:
+                raise ConfigError(
+                    f'по счёту {number} в книге уже есть поступления ({count}): вторая запись удвоит оборот. '
+                    'Только отметить оплату — без --amount; доплата остатка — --amount <остаток>'
+                )
+            receipt = msgspec.structs.replace(receipt, invoice_number=number)
+            if not extra:
+                self._refuse_repeat(conn, number, receipt)
+            saved = self._insert_receipt(conn, receipt, now)
             conn.execute(
                 "UPDATE invoices SET status = 'paid', paid_on = ? WHERE number = ?",
                 (receipt.received_on.isoformat(), number),
             )
-            saved = self._insert_receipt(conn, msgspec.structs.replace(receipt, invoice_number=number), now)
         return self.get_invoice(number), saved
+
+    def mark_paid(self, number: str, *, paid_on: dt.date | None = None) -> InvoiceRecord:
+        """Отмечает оплаченным счёт, оплата которого уже записана в книгу (`ledger add --invoice`).
+
+        Args:
+            number: Номер счёта.
+            paid_on: Дата оплаты; по умолчанию — дата последнего поступления по счёту.
+
+        Returns:
+            Счёт со статусом `paid`.
+
+        Raises:
+            ConfigError: Нет такого счёта, он аннулирован или уже оплачен, или поступлений по нему нет.
+        """
+        with self._write() as conn:
+            self._payable(conn, number)
+            count, last_received = self._linked(conn, number)
+            if count == 0 or last_received is None:
+                raise ConfigError(f'по счёту {number} в книге нет поступлений: запишите оплату (invoice paid {number})')
+            paid = paid_on or dt.date.fromisoformat(last_received)
+            conn.execute(
+                "UPDATE invoices SET status = 'paid', paid_on = ? WHERE number = ?", (paid.isoformat(), number)
+            )
+        return self.get_invoice(number)
+
+    def _payable(self, conn: sqlite3.Connection, number: str) -> None:
+        status = self._current_status(conn, number)
+        if status == 'void':
+            raise ConfigError(f'счёт {number} аннулирован: оплату запишите как поступление без счёта')
+        if status == 'paid':
+            raise ConfigError(f'счёт {number} уже отмечен оплаченным')
+
+    @staticmethod
+    def _linked(conn: sqlite3.Connection, number: str) -> tuple[int, str | None]:
+        row = conn.execute(
+            'SELECT COUNT(*), MAX(received_on) FROM receipts WHERE invoice_number = ?', (number,)
+        ).fetchone()
+        return int(row[0]), row[1]
 
     @staticmethod
     def _current_status(conn: sqlite3.Connection, number: str) -> InvoiceStatus:
@@ -310,16 +440,84 @@ class OfficeStore:
 
     # --- поступления ---------------------------------------------------------------------
 
-    def add_receipt(self, receipt: Receipt, *, now: dt.datetime) -> Receipt:
+    def add_receipt(self, receipt: Receipt, *, now: dt.datetime, extra: bool = False) -> Receipt:
         """Записывает поступление; номер счёта, если указан, должен быть в реестре и не аннулирован.
 
+        Поступление по счёту, которое похоже на повтор уже записанной оплаты, не принимается
+        независимо от статуса счёта: `invoice paid` тоже пишет поступление, и та же банковская
+        проводка, записанная ещё раз через `ledger add --invoice`, удвоила бы оборот и налог.
+
+        Args:
+            receipt: Поступление.
+            now: Момент записи, с часовым поясом.
+            extra: Оператор подтвердил, что деньги по счёту правда пришли ещё раз (`--extra`).
+
+        Returns:
+            Записанное поступление с номером в книге.
+
         Raises:
-            ConfigError: Счёта нет или он аннулирован.
+            ConfigError: Счёта нет, он аннулирован, или поступление похоже на повтор, а `extra` не задан.
         """
         with self._write() as conn:
-            if receipt.invoice_number is not None and self._current_status(conn, receipt.invoice_number) == 'void':
-                raise ConfigError(f'счёт {receipt.invoice_number} аннулирован — уберите --invoice')
+            if receipt.invoice_number is not None:
+                if self._current_status(conn, receipt.invoice_number) == 'void':
+                    raise ConfigError(f'счёт {receipt.invoice_number} аннулирован — уберите --invoice')
+                if not extra:
+                    self._refuse_repeat(conn, receipt.invoice_number, receipt)
             return self._insert_receipt(conn, receipt, now)
+
+    @staticmethod
+    def _refuse_repeat(conn: sqlite3.Connection, number: str, receipt: Receipt) -> None:
+        """Отказывает, если поступление по счёту похоже на повторную запись уже учтённой оплаты.
+
+        Проверка внутри транзакции записи: две консоли не запишут одну оплату дважды.
+        Первое поступление по счёту не проверяется — повторять ещё нечего, а переплату
+        одним платежом команды показывают предупреждением.
+
+        Raises:
+            ConfigError: Та же сумма и дата уже записаны по счёту; с этой записью в валюте счёта
+                получено больше суммы счёта; счёт уже закрыт полученной суммой; счёт оплачен,
+                а часть поступлений в другой валюте и сверить сумму нельзя.
+        """
+        linked: list[tuple[int, str, str, str]] = conn.execute(
+            'SELECT id, received_on, amount, currency FROM receipts WHERE invoice_number = ? ORDER BY received_on, id',
+            (number,),
+        ).fetchall()
+        if not linked:
+            return
+        status, currency, total_text = conn.execute(
+            'SELECT status, currency, total FROM invoices WHERE number = ?', (number,)
+        ).fetchone()
+        total = Decimal(total_text)
+        retry = 'Если деньги по счёту правда пришли ещё раз (клиент заплатил повторно, переплата) — повторите с --extra'
+        same = (receipt.currency, receipt.amount, receipt.received_on.isoformat())
+        for row_id, received_on, amount, code in linked:
+            if (code, Decimal(amount), received_on) == same:
+                raise ConfigError(
+                    f'по счёту {number} в книге уже есть #{row_id}: {received_on} {amount} {code} — та же сумма '
+                    f'и дата. Похоже, оплата записывается второй раз (invoice paid тоже пишет поступление в книгу), '
+                    f'и оборот и налог удвоились бы. {retry}'
+                )
+        received = sum((Decimal(amount) for _, _, amount, code in linked if code == currency), Decimal(0))
+        # Только суммы в валюте счёта сравнимы с ним без курса; остальное сверяет оператор.
+        if receipt.currency == currency and received + receipt.amount > total:
+            raise ConfigError(
+                f'по счёту {number} уже получено {received} из {total} {currency}, с этой записью было бы '
+                f'{received + receipt.amount} — больше суммы счёта. Похоже, оплата записывается второй раз '
+                f'(invoice paid тоже пишет поступление в книгу), и оборот и налог удвоились бы. {retry}'
+            )
+        if receipt.currency != currency and received >= total:
+            raise ConfigError(
+                f'по счёту {number} уже получено {received} {currency} — вся сумма счёта, а это поступление '
+                f'в {receipt.currency}: похоже, та же оплата после конвертации. {retry}'
+            )
+        foreign = receipt.currency != currency or any(code != currency for *_, code in linked)
+        if foreign and _status(str(status)) == 'paid':
+            raise ConfigError(
+                f'счёт {number} уже оплачен, а часть поступлений по нему не в {currency}: сверить их с суммой '
+                'счёта без курса нельзя, и запись может оказаться повтором. Сверьте книгу (ledger month) '
+                f'с выпиской. {retry}'
+            )
 
     @staticmethod
     def _insert_receipt(conn: sqlite3.Connection, receipt: Receipt, now: dt.datetime) -> Receipt:
@@ -353,36 +551,14 @@ class OfficeStore:
             params = (until.isoformat(),)
         with self._connect() as conn:
             rows = conn.execute(query + ' ORDER BY received_on, id', params).fetchall()
-        return [
-            Receipt(
-                id=int(row_id),
-                received_on=dt.date.fromisoformat(received_on),
-                amount=Decimal(amount),
-                currency=currency,
-                rate=Decimal(rate),
-                rate_source=_rate_source(rate_source),
-                channel=_channel(channel),
-                counterparty=counterparty,
-                client_country=client_country,
-                invoice_number=invoice_number,
-                platform_fee=None if platform_fee is None else Decimal(platform_fee),
-                note=note,
-            )
-            for (
-                row_id,
-                received_on,
-                amount,
-                currency,
-                rate,
-                rate_source,
-                channel,
-                counterparty,
-                client_country,
-                invoice_number,
-                platform_fee,
-                note,
-            ) in rows
-        ]
+        return [_receipt_from_row(row) for row in rows]
+
+    def receipts_for_invoice(self, number: str) -> list[Receipt]:
+        """Поступления, записанные по этому счёту, по дате получения."""
+        query = f'SELECT {_RECEIPT_COLUMNS} FROM receipts WHERE invoice_number = ?'  # noqa: S608 - колонки — константа
+        with self._connect() as conn:
+            rows = conn.execute(query + ' ORDER BY received_on, id', (number.strip(),)).fetchall()
+        return [_receipt_from_row(row) for row in rows]
 
     # --- курсы ---------------------------------------------------------------------------
 

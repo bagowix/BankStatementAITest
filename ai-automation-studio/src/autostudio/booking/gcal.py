@@ -4,14 +4,23 @@
 discovery-клиент; httpx уже есть в зависимостях и мокается в тестах (respx). Токен
 сервисного аккаунта выдаёт `gauth` (google-auth в extras `sheets`, импортируется лениво).
 
-Права (минимальные, по справочнику API):
+Права (самые узкие из тех, что подходят к **чужим расшаренным** календарям):
 
-- `calendar.freebusy` — freeBusy;
+- `calendar.events.freebusy` — freeBusy: «занятость в календарях, к которым есть доступ».
+  `calendar.freebusy` по таблице областей — «занятость в *ваших* календарях», а у сервисного
+  аккаунта своих календарей нет: календари принадлежат клиенту и расшарены на аккаунт. freeBusy
+  принимает обе области; `check --online` проверяет чтение настоящим токеном до запуска;
 - `calendar.events` — создать, найти, изменить и удалить события в расшаренном календаре
   (`calendar.events.owned` не подходит: календарь принадлежит клиенту, а не сервисному аккаунту).
 
 События создаются без гостей (`attendees`): сервисный аккаунт без domain-wide delegation
 не может приглашать гостей, а подтверждение покупатель и так получает в мессенджере.
+
+**Удалённое событие у Google не исчезает:** оно остаётся со `status = cancelled`, `get` и
+`patch` по нему отвечают 200, а не 404. Поэтому тело insert/patch всегда несёт
+`status = confirmed`: патч события, которое владелец удалил руками, восстанавливает его, а
+не молча правит невидимое. Если ответ всё же пришёл `cancelled`, событие считается пропавшим
+(`EventGoneError`) — синхронизация создаст новое.
 """
 
 import datetime as dt
@@ -32,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 CALENDAR_API: Final = 'https://www.googleapis.com/calendar/v3'
 SCOPES: Final[tuple[str, ...]] = (
-    'https://www.googleapis.com/auth/calendar.freebusy',
+    'https://www.googleapis.com/auth/calendar.events.freebusy',
     'https://www.googleapis.com/auth/calendar.events',
 )
 # Частное свойство события: по нему событие записи находится повторно (идемпотентность).
@@ -41,6 +50,9 @@ BOOKING_PROPERTY: Final = 'autostudioBooking'
 # freeBusy принимает не больше 50 календарей за запрос.
 FREEBUSY_MAX_CALENDARS: Final = 50
 REQUEST_TIMEOUT_S: Final = 5.0
+# Статусы события (Events resource, поле `status`, writable): `cancelled` — удалённое событие.
+STATUS_CONFIRMED: Final = 'confirmed'
+STATUS_CANCELLED: Final = 'cancelled'
 
 
 class CalendarError(AutoStudioError):
@@ -48,7 +60,7 @@ class CalendarError(AutoStudioError):
 
 
 class EventGoneError(CalendarError):
-    """События нет (удалено руками в календаре): 404 или 410."""
+    """События нет: 404, 410 или оно осталось удалённым (`status = cancelled`) после патча."""
 
 
 class EventDraft(msgspec.Struct, frozen=True, kw_only=True):
@@ -159,6 +171,7 @@ class _FreeBusyResponse(msgspec.Struct):
 
 class _Event(msgspec.Struct):
     id: str
+    status: str = ''
 
 
 class _Events(msgspec.Struct):
@@ -201,8 +214,13 @@ def _path(calendar_id: str) -> str:
 
 
 def event_body(draft: EventDraft) -> JSONObject:
-    """Тело события для insert/patch: время с часовым поясом клиента, частное свойство записи."""
+    """Тело события для insert/patch: время с часовым поясом клиента, частное свойство записи.
+
+    `status = confirmed` в каждом теле: патч события, которое владелец удалил руками (у Google
+    оно остаётся `cancelled`), восстанавливает его — запись жива, значит и событие должно быть.
+    """
     return {
+        'status': STATUS_CONFIRMED,
         'summary': draft.summary,
         'description': draft.description,
         'start': {'dateTime': draft.start.isoformat(), 'timeZone': draft.timezone},
@@ -310,7 +328,15 @@ class GoogleCalendar:
             raise CalendarError('Google Calendar: ответ на создание события не разобран') from None
 
     async def patch_event(self, calendar_id: str, event_id: str, draft: EventDraft) -> None:
-        await self._request('PATCH', f'{_path(calendar_id)}/{event_id}', body=event_body(draft))
+        response = await self._request('PATCH', f'{_path(calendar_id)}/{event_id}', body=event_body(draft))
+        try:
+            status = msgspec.json.decode(response.content, type=_Event).status
+        except msgspec.DecodeError:
+            raise CalendarError('Google Calendar: ответ на изменение события не разобран') from None
+        if status == STATUS_CANCELLED:
+            # Тело несёт `confirmed`, но событие осталось удалённым (например, его перенесли в
+            # другой календарь): для записи его нет — пусть синхронизация создаст новое.
+            raise EventGoneError(f'событие {event_id} осталось удалённым')
 
     async def delete_event(self, calendar_id: str, event_id: str) -> None:
         try:
@@ -325,6 +351,8 @@ class FakeCalendar:
 
     Занятость, которую «видит» freeBusy, — это внешние события (`external`) плюс события,
     созданные ботом: как у настоящего Google, где событие записи тоже занимает время.
+    Удаление — тоже как у Google: событие уходит в `cancelled` (не видно в freeBusy и в
+    поиске), а патч восстанавливает его, только если тело несёт `status = confirmed`.
 
     Args:
         external: Занятость по календарям, которую бот не создавал (личные дела мастера).
@@ -333,6 +361,7 @@ class FakeCalendar:
     def __init__(self, external: Mapping[str, Sequence[Span]] | None = None) -> None:
         self.external: dict[str, list[Span]] = {cal: list(spans) for cal, spans in (external or {}).items()}
         self.events: dict[str, dict[str, EventDraft]] = {}
+        self.cancelled: dict[str, dict[str, EventDraft]] = {}
         self.calls: list[str] = []
         self.fail: bool = False
         self.missing: set[str] = set()
@@ -356,6 +385,7 @@ class FakeCalendar:
 
     async def find_event(self, calendar_id: str, booking_key: str) -> str | None:
         self._check('find')
+        # Как events.list без showDeleted: удалённые события поиск не находит.
         events = self.events.get(calendar_id, {})
         return next((event_id for event_id, draft in events.items() if draft.booking_key == booking_key), None)
 
@@ -369,10 +399,21 @@ class FakeCalendar:
     async def patch_event(self, calendar_id: str, event_id: str, draft: EventDraft) -> None:
         self._check('patch')
         events = self.events.get(calendar_id, {})
-        if event_id not in events:
+        deleted = self.cancelled.get(calendar_id, {})
+        if event_id in events:
+            events[event_id] = draft
+        elif event_id in deleted:
+            # Google отвечает 200 и на удалённое событие; видимым его делает только `status` в теле.
+            if event_body(draft).get('status') == STATUS_CONFIRMED:
+                del deleted[event_id]
+                self.events.setdefault(calendar_id, {})[event_id] = draft
+            else:
+                deleted[event_id] = draft
+        else:
             raise EventGoneError('HTTP 404 notFound')
-        events[event_id] = draft
 
     async def delete_event(self, calendar_id: str, event_id: str) -> None:
         self._check('delete')
-        self.events.get(calendar_id, {}).pop(event_id, None)
+        draft = self.events.get(calendar_id, {}).pop(event_id, None)
+        if draft is not None:
+            self.cancelled.setdefault(calendar_id, {})[event_id] = draft

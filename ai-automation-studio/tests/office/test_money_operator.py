@@ -6,6 +6,7 @@ import pytest
 
 from autostudio.errors import ConfigError
 from autostudio.office.money import (
+    check_year,
     currency_code,
     format_amount,
     format_money,
@@ -19,6 +20,7 @@ from autostudio.office.money import (
 from autostudio.office.operator import (
     OPERATOR_ENV,
     OperatorProfile,
+    PaymentNote,
     group_iban,
     iban_problem,
     is_valid_iban,
@@ -26,7 +28,17 @@ from autostudio.office.operator import (
     operator_path,
     swift_problem,
 )
-from tests.office.helpers import OPERATOR_TOML, VALID_IBAN
+from autostudio.office.paths import find_project_root, project_root
+from tests.office.helpers import (
+    OPERATOR_TOML,
+    TEST_EMAIL,
+    TEST_ID,
+    TEST_NAME,
+    TEST_NAME_RU,
+    TEST_SWIFT,
+    VALID_IBAN,
+    make_profile,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -74,6 +86,30 @@ def test__parse_amount__decimal_and_int_inputs__kept_exact():
         parse_amount(Decimal('-1'), what='x')
     with pytest.raises(ConfigError, match='неотрицательное'):
         parse_amount(Decimal('Infinity'), what='x')
+
+
+def test__parse_amount__absurd_digits__config_error_not_traceback():
+    # Без ограничения 30 цифр доходили до quantize и падали decimal.InvalidOperation.
+    with pytest.raises(ConfigError, match='12 цифр'):
+        parse_amount('999999999999999999999999999999', what='--amount')
+    with pytest.raises(ConfigError, match='12 цифр'):
+        parse_amount(Decimal('1E+40'), what='items.unit_price')
+    assert parse_amount('999999999999.99', what='--amount') == Decimal('999999999999.99')
+
+
+def test__parse_amount__trailing_zeros__not_counted_as_places():
+    assert parse_amount(Decimal('33.330'), what='x', places=2) == Decimal('33.330')
+    with pytest.raises(ConfigError, match='2 знаков'):
+        parse_amount(Decimal('33.333'), what='x', places=2)
+
+
+def test__check_year__out_of_range__config_error():
+    assert check_year(2026) == 2026
+    for bad in (0, 1999, 2101):
+        with pytest.raises(ConfigError, match='2000'):
+            check_year(bad)
+    with pytest.raises(ConfigError, match='2000'):
+        parse_month('0000-01')
 
 
 def test__money__half_up__not_bankers_rounding():
@@ -175,48 +211,48 @@ def test__load_operator__valid_file__profile(operator_file):
     profile = load_operator(operator_file)
     assert profile.iban_compact == VALID_IBAN
     assert profile.iban_grouped == 'GE07 XX00 0000 0000 0000 00'
-    assert profile.swift_code == 'XXXXGE22'
+    assert profile.swift_code == TEST_SWIFT
     assert profile.invoice_prefix == 'AS-'
     assert profile.default_currency == 'USD'
-    assert profile.display_name('ru') == 'ИП Джейн Пример'
-    assert profile.display_name('en') == 'Individual Entrepreneur Jane Example'
+    assert profile.display_name('ru') == f'ИП {TEST_NAME_RU}'
+    assert profile.display_name('en') == f'Individual Entrepreneur {TEST_NAME}'
     assert profile.tax_note.text('ru').startswith('Статус малого бизнеса')
 
 
 def test__person_name__no_owner_name__prefix_stripped(operator):
-    assert operator.person_name('en') == 'Jane Example'
-    assert operator.person_name('ru') == 'Джейн Пример'
+    assert operator.person_name('en') == TEST_NAME
+    assert operator.person_name('ru') == TEST_NAME_RU
     named = OperatorProfile(
-        legal_name='Jane Example Studio',
-        owner_name='Jane Q. Example',
-        id_number='000000000',
+        legal_name='Test Operator Studio',
+        owner_name='Test Q. Operator',
+        id_number=TEST_ID,
         address='a',
         bank_name='b',
         iban=VALID_IBAN,
-        swift='XXXXGE22',
-        email='jane@example.com',
+        swift=TEST_SWIFT,
+        email=TEST_EMAIL,
     )
-    assert named.person_name('ru') == 'Jane Q. Example'
+    assert named.person_name('ru') == 'Test Q. Operator'
     bare = OperatorProfile(
-        legal_name='Jane Example Studio',
-        id_number='000000000',
+        legal_name='Test Operator Studio',
+        id_number=TEST_ID,
         address='a',
         bank_name='b',
         iban=VALID_IBAN,
-        swift='XXXXGE22',
-        email='jane@example.com',
+        swift=TEST_SWIFT,
+        email=TEST_EMAIL,
     )
-    assert bare.person_name('en') == 'Jane Example Studio'
+    assert bare.person_name('en') == 'Test Operator Studio'
 
 
 def test__load_operator__many_problems__all_listed_with_path(tmp_path):
     path = tmp_path / 'operator.toml'
     bad = (
         OPERATOR_TOML.replace(VALID_IBAN, 'GE00XX0000000000000000')
-        .replace('XXXXGE22', 'BAD')
-        .replace('"000000000"', '"12AB"')
-        .replace('jane@example.com', 'jane-at-example')
-        .replace('"jane_example"', '"@jane"')
+        .replace(TEST_SWIFT, 'BAD')
+        .replace(f'"{TEST_ID}"', '"12AB"')
+        .replace(TEST_EMAIL, 'office-at-operator')
+        .replace('"test_operator"', '"@op"')
     )
     path.write_text(bad + 'invoice_prefix = "as 2026"\n', encoding='utf-8')
     with pytest.raises(ConfigError) as caught:
@@ -247,12 +283,12 @@ def test__operator_profile__blank_required_and_bad_field_keys__rejected():
     with pytest.raises(ConfigError) as caught:
         OperatorProfile(
             legal_name=' ',
-            id_number='000000000',
+            id_number=TEST_ID,
             address='',
             bank_name='b',
             iban=VALID_IBAN,
-            swift='XXXXGE22',
-            email='jane@example.com',
+            swift=TEST_SWIFT,
+            email=TEST_EMAIL,
             contract_fields={'server_location': 'x'},
         )
     assert 'legal_name: пусто' in str(caught.value)
@@ -260,22 +296,118 @@ def test__operator_profile__blank_required_and_bad_field_keys__rejected():
     assert 'contract_fields' in str(caught.value)
 
 
-def test__operator_path__flag_then_env_then_repo_root():
+def test__operator_path__flag_then_env_then_repo_root(tmp_path, monkeypatch):
     assert operator_path(Path('a.toml'), {OPERATOR_ENV: 'b.toml'}) == Path('a.toml')
     assert operator_path(None, {OPERATOR_ENV: 'b.toml'}) == Path('b.toml')
-    assert operator_path(None, {}) == Path('operator.toml')
+    # Корень репозитория, а не текущий каталог: из другой папки ищется тот же файл.
+    monkeypatch.chdir(tmp_path)
+    assert operator_path(None, {}) == REPO_ROOT / 'operator.toml'
 
 
-def test__example_file__only_placeholder_iban_blocks_use(tmp_path):
-    example = REPO_ROOT / 'operator.example.toml'
-    with pytest.raises(ConfigError) as caught:
-        load_operator(example)
-    # Всё, кроме образцового IBAN, валидно: скопированный образец не выпустит счёт с выдуманным счётом.
-    problems = str(caught.value).split(': ', 1)[1]
-    assert 'IBAN' in problems
-    assert ';' not in problems
+def test__project_root__markers_found_from_package_or_cwd(tmp_path, monkeypatch):
+    assert project_root() == REPO_ROOT
+    assert find_project_root([tmp_path]) is None
+    (tmp_path / 'pyproject.toml').write_text('', encoding='utf-8')
+    (tmp_path / 'operator.example.toml').write_text('', encoding='utf-8')
+    nested = tmp_path / 'a' / 'b'
+    nested.mkdir(parents=True)
+    assert find_project_root([nested]) == tmp_path
+
+
+def test__project_root__installed_outside_repo__config_error(monkeypatch):
+    monkeypatch.setattr('autostudio.office.paths.find_project_root', lambda starts: None)
+    with pytest.raises(ConfigError, match='AUTOSTUDIO_OFFICE_DIR'):
+        project_root()
+
+
+def _example_with(replacements: dict[str, str]) -> str:
+    text = (REPO_ROOT / 'operator.example.toml').read_text(encoding='utf-8')
+    for old, new in replacements.items():
+        assert old in text
+        text = text.replace(old, new)
+    return text
+
+
+def test__example_file__copy_with_only_iban_fixed__still_refused(tmp_path):
+    # Скопированный образец, где заменили только IBAN, не выпустит счёт от имени «Jane Example».
     copy = tmp_path / 'operator.toml'
-    copy.write_text(example.read_text(encoding='utf-8').replace('GE00XX0000000000000000', VALID_IBAN), encoding='utf-8')
+    copy.write_text(_example_with({'GE00XX0000000000000000': VALID_IBAN}), encoding='utf-8')
+    with pytest.raises(ConfigError) as caught:
+        load_operator(copy)
+    message = str(caught.value)
+    for field in ('legal_name', 'address', 'bank_name', 'email', 'id_number', 'swift'):
+        assert f'{field}: значение-образец' in message
+    assert 'IBAN' not in message
+
+
+def test__example_file__required_fields_replaced__no_fictional_leftovers(tmp_path):
+    # Ровно то, что есть у оператора: имя, ID, адрес, банк, IBAN, SWIFT, e-mail. Необязательные
+    # поля в образце закомментированы — чужой телефон, Telegram и хостинг в профиль не попадут.
+    copy = tmp_path / 'operator.toml'
+    copy.write_text(
+        _example_with(
+            {
+                'Individual Entrepreneur Jane Example': f'Individual Entrepreneur {TEST_NAME}',
+                '"000000000"': f'"{TEST_ID}"',
+                'Georgia, Batumi, Example Street 1, Apartment 1': 'Georgia, Batumi, Test Street 1',
+                'JSC Example Bank': 'JSC Test Bank',
+                'GE00XX0000000000000000': VALID_IBAN,
+                '"XXXXGE22"': f'"{TEST_SWIFT}"',
+                'jane@example.com': TEST_EMAIL,
+            }
+        ),
+        encoding='utf-8',
+    )
     profile = load_operator(copy)
-    assert profile.legal_name == 'Individual Entrepreneur Jane Example'
-    assert profile.contract_fields['SERVER_LOCATION']
+    assert profile.person_name('en') == TEST_NAME
+    assert (profile.legal_name_ru, profile.owner_name, profile.phone, profile.website, profile.telegram) == (
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    assert profile.contract_fields == {}
+    assert profile.payment_note == PaymentNote()
+
+
+def test__example_file__as_shipped__refused():
+    with pytest.raises(ConfigError, match='IBAN'):
+        load_operator(REPO_ROOT / 'operator.example.toml')
+
+
+@pytest.mark.parametrize(
+    ('changes', 'field'),
+    [
+        ({'legal_name_ru': 'ИП Джейн Пример'}, 'legal_name_ru'),
+        ({'owner_name': 'Jane Example'}, 'owner_name'),
+        ({'website': 'https://example.com'}, 'website'),
+        ({'telegram': 'jane_example'}, 'telegram'),
+        ({'phone': '+995 500 00 00 00'}, 'phone'),
+        ({'contract_fields': {'HOSTING_PROVIDER': 'Example Hosting GmbH'}}, 'contract_fields.HOSTING_PROVIDER'),
+        ({'intermediary_bank': 'Example Correspondent Bank', 'intermediary_swift': 'XXXXUS33'}, 'intermediary_swift'),
+        ({'payment_note': PaymentNote(en='ACH to Example Bank')}, 'payment_note.en'),
+        ({'id_number': '111111111'}, 'id_number'),
+    ],
+)
+def test__operator_profile__example_leftovers__refused(changes, field):
+    with pytest.raises(ConfigError, match=f'{field}: значение-образец'):
+        make_profile(**changes)
+
+
+def test__operator_profile__payment_extras__validated_and_in_snapshot():
+    with pytest.raises(ConfigError, match='без intermediary_bank'):
+        make_profile(intermediary_swift='CHASUS33')
+    with pytest.raises(ConfigError, match='SWIFT/BIC'):
+        make_profile(intermediary_bank='Test Correspondent', intermediary_swift='CHASE')
+    profile = make_profile(
+        bank_address='Test Avenue 1, Tbilisi',
+        intermediary_bank='Test Correspondent Bank, New York',
+        intermediary_swift='tstbus33',
+        payment_note=PaymentNote(en='US clients: ACH (Wise).'),
+    )
+    issuer = profile.issuer()
+    assert issuer.intermediary_swift == 'TSTBUS33'
+    assert issuer.iban == VALID_IBAN and issuer.swift == TEST_SWIFT
+    assert issuer.payment_note.text('ru') == 'US clients: ACH (Wise).'  # русского нет — английский
+    assert issuer.display_name('ru') == f'ИП {TEST_NAME_RU}'

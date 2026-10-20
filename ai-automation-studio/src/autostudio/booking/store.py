@@ -149,6 +149,13 @@ _CALENDAR_DUE: Final = (
     'JOIN bookings b ON b.id = c.booking_id WHERE c.pending = 1 AND c.next_try_at <= ? '
     'ORDER BY c.next_try_at LIMIT ?'
 )
+# События, которые бот записал в календарь и которые совпадают с записью по времени (`pending = 0`:
+# перенос, ещё не доехавший до Google, оставляет событие на старом времени — его не вычитаем).
+_CALENDAR_EVENTS: Final = (
+    'SELECT c.calendar_id, b.start_at, b.end_at FROM calendar_sync c JOIN bookings b ON b.id = c.booking_id '
+    "WHERE c.event_id IS NOT NULL AND c.pending = 0 AND b.status IN ('pending', 'confirmed') "
+    'AND b.start_at < ? AND b.end_at > ? ORDER BY b.start_at'
+)
 _CONTACT_BY_KEY: Final = (
     'SELECT key, channel, user_id, phone, last_inbound_at, opted_in_at, opted_out_at '
     'FROM channel_contacts WHERE key = ?'
@@ -242,6 +249,20 @@ class CalendarTask(msgspec.Struct, frozen=True, kw_only=True):
     event_id: str | None
     version: int
     attempts: int
+
+
+class CalendarEvent(msgspec.Struct, frozen=True, kw_only=True):
+    """Событие записи, которое бот записал в календарь и которое стоит там на время записи.
+
+    Attributes:
+        calendar_id: Календарь, где лежит событие.
+        start: Начало, UTC.
+        end: Конец, UTC.
+    """
+
+    calendar_id: str
+    start: dt.datetime
+    end: dt.datetime
 
 
 class ChannelContact(msgspec.Struct, frozen=True, kw_only=True):
@@ -779,6 +800,25 @@ class BookingStore:
                 'WHERE booking_id = ? AND version = ?',
                 (_ts(next_try_at), booking_id, version),
             )
+
+    def calendar_events(self, start: dt.datetime, end: dt.datetime) -> list[CalendarEvent]:
+        """События активных записей в [start, end), которые бот записал в календарь и синхронизировал.
+
+        Только их можно вычитать из занятости календаря: запись без события (календарь не
+        пишется, запись старше подключения календаря, событие ещё не создано) там ничего не
+        занимает, и вычитание «съело» бы чужое событие в общем календаре салона.
+
+        Args:
+            start: Начало окна, UTC.
+            end: Конец окна, UTC.
+
+        Returns:
+            События по времени начала.
+        """
+        return [
+            CalendarEvent(calendar_id=_text(row[0]), start=_moment(row[1]), end=_moment(row[2]))
+            for row in self._rows(_CALENDAR_EVENTS, (_ts(end), _ts(start)))
+        ]
 
     def calendar_pending(self) -> int:
         """Сколько записей ждут синхронизации с календарём (для `check` и тестов)."""

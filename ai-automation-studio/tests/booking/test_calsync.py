@@ -98,6 +98,61 @@ async def test__busy__calendar_not_shared__alert_and_other_calendar_still_counte
     assert 'не расшарен' in app.operator.texts[0] and SALON in app.operator.texts[0]
 
 
+async def test__busy__calendar_not_shared__one_request_per_ttl(tmp_path):
+    # Нерасшаренный календарь (самая частая ошибка подключения) не должен гнать запрос к Google
+    # на каждое сообщение: его ответ «нет данных» кешируется на тот же срок.
+    fake = giorgi_busy()
+    fake.missing.add(SALON)
+    app = calendar_app(tmp_path, fake)
+    for _ in range(5):
+        await app.service.refresh_busy(app.clock())
+    assert fake.calls == ['freeBusy'] and set(app.service.busy) == {'giorgi'}
+    app.clock.advance(dt.timedelta(seconds=61))
+    await app.service.refresh_busy(app.clock())
+    assert fake.calls == ['freeBusy', 'freeBusy'] and len(app.operator.texts) == 1
+    fake.missing.clear()  # клиент расшарил календарь
+    app.clock.advance(dt.timedelta(seconds=61))
+    await app.service.refresh_busy(app.clock())
+    assert app.operator.texts[-1].startswith('✅')
+
+
+def salon_block() -> FakeCalendar:
+    # Общий календарь салона: владелец закрыл среду 15:00–16:00 для всех (собрание).
+    return FakeCalendar({SALON: [(local(WED, 15), local(WED, 16))]})
+
+
+async def test__busy__write_events_off__salon_block_not_subtracted_for_other_staff(tmp_path):
+    # Бот событий не пишет — вычитать нечего: запись к Гиорги не открывает Нике закрытое время.
+    fake = salon_block()
+    app = calendar_app(tmp_path, fake, staff={}, write_events=False)
+    await book(app, 'giorgi', local(WED, 15))
+    await app.service.refresh_busy(app.clock())
+    assert app.service.busy['nika'] == [(local(WED, 15), local(WED, 16))]
+    assert fake.events == {}
+
+
+async def test__busy__booking_without_written_event__not_subtracted(tmp_path):
+    # Запись старше подключения календаря: события нет, и чужое занятое время остаётся занятым.
+    fake = salon_block()
+    app = calendar_app(tmp_path, fake, staff={})
+    app.book_directly('tg:1', 'haircut', 'giorgi', local(WED, 15))
+    await app.service.refresh_busy(app.clock())
+    assert app.service.busy['nika'] == [(local(WED, 15), local(WED, 16))]
+
+
+async def test__busy__rescheduled_not_yet_synced__old_event_still_busy_new_time_not_subtracted(tmp_path):
+    fake = salon_block()
+    app = calendar_app(tmp_path, fake, staff={})
+    booking = await book(app, 'giorgi', local(WED, 12))
+    fake.fail = True  # перенос не доехал до Google: событие стоит на старом времени
+    await app.service.reschedule(booking.id, local(WED, 15), now=app.clock(), by_admin=True)
+    await app.service.drain()
+    fake.fail = False
+    app.clock.advance(dt.timedelta(seconds=61))
+    await app.service.refresh_busy(app.clock())
+    assert app.service.busy['nika'] == [(local(WED, 12), local(WED, 12, 45)), (local(WED, 15), local(WED, 16))]
+
+
 async def test__busy__shared_salon_calendar__own_booking_event_does_not_block_other_staff(tmp_path):
     # Один календарь на салон: событие записи к Гиорги не должно закрыть это время Нике.
     fake = FakeCalendar()
@@ -155,15 +210,28 @@ async def test__sync__response_lost_after_insert__found_by_property_not_duplicat
     assert len(fake.events[GIORGI]) == 1 and fake.calls[-2:] == ['find', 'patch']
 
 
-async def test__sync__event_deleted_by_hand__recreated_on_next_change(tmp_path):
+async def test__sync__event_deleted_by_hand__restored_on_next_change(tmp_path):
     fake = FakeCalendar()
     app = calendar_app(tmp_path, fake)
     booking = await book(app, 'giorgi', local(WED, 12))
-    fake.events[GIORGI].clear()  # владелец удалил событие в календаре руками
+    [event_id] = fake.events[GIORGI]
+    # Владелец удалил событие в календаре руками: у Google оно остаётся `cancelled`, и патч по нему — 200.
+    await fake.delete_event(GIORGI, event_id)
+    await app.service.reschedule(booking.id, local(WED, 16), now=app.clock(), by_admin=True)
+    await app.service.drain()
+    assert list(fake.events[GIORGI]) == [event_id] and fake.events[GIORGI][event_id].start == local(WED, 16)
+    assert fake.cancelled[GIORGI] == {} and fake.calls[-1] == 'patch'
+
+
+async def test__sync__event_gone_404__recreated_on_next_change(tmp_path):
+    fake = FakeCalendar()
+    app = calendar_app(tmp_path, fake)
+    booking = await book(app, 'giorgi', local(WED, 12))
+    fake.events[GIORGI].clear()  # события нет совсем (перенесено в другой календарь): патч — 404
     await app.service.reschedule(booking.id, local(WED, 16), now=app.clock(), by_admin=True)
     await app.service.drain()
     [draft] = fake.events[GIORGI].values()
-    assert draft.start == local(WED, 16)
+    assert draft.start == local(WED, 16) and fake.calls[-3:] == ['patch', 'find', 'insert']
 
 
 async def test__sync__changed_during_request__newer_change_still_pending(tmp_path):

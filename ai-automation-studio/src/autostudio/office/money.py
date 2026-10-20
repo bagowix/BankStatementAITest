@@ -13,6 +13,11 @@ type Language = Literal['en', 'ru']
 
 INVOICE_CURRENCIES: Final[tuple[InvoiceCurrency, ...]] = ('USD', 'EUR', 'GEL')
 CENT: Final = Decimal('0.01')
+# Сумма в триллион — опечатка, а не счёт; и quantize до центов падает, когда цифр больше 28.
+MAX_INTEGER_DIGITS: Final = 12
+# Годы, в которых у ИП вообще могут быть счета и поступления: `--year 0` — опечатка, а не запрос.
+MIN_YEAR: Final = 2000
+MAX_YEAR: Final = 2100
 # Счета, налог и порог считаются в датах Тбилиси: «сегодня» оператора, а не UTC.
 TBILISI: Final = ZoneInfo('Asia/Tbilisi')
 
@@ -51,7 +56,8 @@ def parse_amount(
         Конечное неотрицательное Decimal.
 
     Raises:
-        ConfigError: Не число, запятая, отрицательное, бесконечность или ноль, где он запрещён.
+        ConfigError: Не число, запятая, отрицательное, бесконечность, ноль, где он запрещён,
+            больше `MAX_INTEGER_DIGITS` цифр до точки или лишние знаки после неё.
     """
     if isinstance(text, Decimal):
         value = text
@@ -71,7 +77,10 @@ def parse_amount(
         raise ConfigError(f'{what}={text!r}: ожидается неотрицательное конечное число')
     if value == 0 and not allow_zero:
         raise ConfigError(f'{what}: ноль здесь не имеет смысла')
-    exponent = value.as_tuple().exponent
+    if value != 0 and value.adjusted() >= MAX_INTEGER_DIGITS:
+        raise ConfigError(f'{what}={text!r}: больше {MAX_INTEGER_DIGITS} цифр до точки — проверьте число')
+    # Нули в хвосте знаками не считаются: `33.330` из TOML — это те же 33.33.
+    exponent = value.normalize().as_tuple().exponent
     if places is not None and isinstance(exponent, int) and -exponent > places:
         raise ConfigError(f'{what}={text!r}: не больше {places} знаков после точки')
     return value
@@ -138,16 +147,35 @@ def format_money(value: Decimal, currency: str, language: Language) -> str:
     return f'{amount} {currency}' if language == 'ru' else f'{currency} {amount}'
 
 
+def check_year(year: int, *, what: str = '--year') -> int:
+    """Проверяет год на правдоподобие.
+
+    Args:
+        year: Год из флага.
+        what: Имя флага для сообщения.
+
+    Returns:
+        Тот же год.
+
+    Raises:
+        ConfigError: Год вне MIN_YEAR…MAX_YEAR.
+    """
+    if not MIN_YEAR <= year <= MAX_YEAR:
+        raise ConfigError(f'{what}={year}: ожидается год от {MIN_YEAR} до {MAX_YEAR}')
+    return year
+
+
 def parse_month(text: str) -> dt.date:
     """Месяц `ГГГГ-ММ` → первое число месяца.
 
     Raises:
-        ConfigError: Формат не `ГГГГ-ММ` или месяца нет.
+        ConfigError: Формат не `ГГГГ-ММ`, месяца нет или год неправдоподобен.
     """
     match = _MONTH.match(text.strip())
     if match is None or not 1 <= int(match.group(2)) <= 12:
         raise ConfigError(f'месяц {text!r}: ожидается ГГГГ-ММ, например 2026-10')
-    return dt.date(int(match.group(1)), int(match.group(2)), 1)
+    year = check_year(int(match.group(1)), what=f'месяц {text.strip()}')
+    return dt.date(year, int(match.group(2)), 1)
 
 
 def shift_months(day: dt.date, months: int) -> dt.date:

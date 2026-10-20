@@ -4,9 +4,8 @@ import asyncio
 import datetime as dt
 import os
 import sys
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
+from typing import Annotated, Final
 
 import cyclopts
 import httpx
@@ -273,29 +272,32 @@ def format_result(result: RunResult) -> str:
             f'  счета: сверено {result.invoices_verified}, на ручную проверку {result.invoices_unverified}, '
             f'строк во вкладку счетов {result.invoice_rows}'
         )
+    if result.postponed:
+        # Счётчик — только в консоль: в тексте ошибки он менялся бы каждый запуск.
+        lines.append(f'  отложено до следующего запуска: {result.postponed}')
     if result.aborted:
         lines.append(f'  ✗ остановлено: {result.aborted}')
     lines += [f'  ✗ {error}' for error in result.errors]
     return '\n'.join(lines)
 
 
-def require_model(settings: Settings, environ: Mapping[str, str]) -> None:
+def require_model(settings: Settings) -> None:
     """Не даёт боевому разбору молча работать на заглушке.
 
     Пустой AUTOSTUDIO_LLM_PROVIDER в ядре значит `fake`: забытый ключ превратил бы разбор
     почты клиента в сортировку по ключевым словам и шаблонные черновики. Заглушка в боевом
-    запуске — только если она выбрана явно (для проверки развёртывания).
+    запуске — только если она выбрана явно (`Settings.llm_provider_explicit`; для проверки
+    развёртывания).
 
     Args:
         settings: Настройки процесса.
-        environ: Окружение процесса.
 
     Raises:
         ConfigError: Провайдер модели не задан.
     """
     if settings.llm_provider is not LLMProvider.FAKE:
         return
-    if environ.get('AUTOSTUDIO_LLM_PROVIDER', '').strip().lower() != LLMProvider.FAKE.value:
+    if not settings.llm_provider_explicit:
         raise ConfigError(
             'AUTOSTUDIO_LLM_PROVIDER не задан: боевой разбор не запускается на заглушке. '
             'Задайте openai|anthropic и ключ (или явно fake — только для проверки развёртывания)'
@@ -323,7 +325,9 @@ async def _serve(config: InboxConfig, settings: Settings, every_minutes: int | N
                 raise
             print(format_result(result), flush=True)
             if not result.ok:
-                raise InboxError(result.aborted or '; '.join(result.errors))
+                # Оператору — постоянный текст вида сбоя (supervised_run пишет только о его смене);
+                # причина остановки прерывателем с номером «N писем подряд» остаётся в консоли.
+                raise InboxError('; '.join(result.errors) or str(result.aborted))
             return result
 
         while True:
@@ -359,7 +363,7 @@ def run(config: Path, *, every_minutes: int | None = None) -> None:
     load_sibling_env(config)
     cfg = load_client_config(config, InboxConfig)
     settings = Settings.from_env(os.environ)
-    require_model(settings, os.environ)
+    require_model(settings)
     try:
         asyncio.run(_serve(cfg, settings, every_minutes))
     except KeyboardInterrupt:
@@ -457,7 +461,14 @@ def demo(*, out: Path = Path('var/demo/inbox')) -> None:
 
 
 @app.command(name='oauth-google')
-def oauth_google(*, client_secrets: Path, config: Path | None = None, port: int = 0, no_browser: bool = False) -> None:
+def oauth_google(
+    *,
+    client_secrets: Path,
+    config: Path | None = None,
+    port: int = 0,
+    # Без негативного флага: cyclopts иначе добавил бы бессмысленный --no-no-browser.
+    no_browser: Annotated[bool, cyclopts.Parameter(negative='')] = False,
+) -> None:
     """Разовое согласие Google Workspace: выдаёт refresh token для IMAP (XOAUTH2).
 
     Запускать на компьютере с браузером (не на сервере): откроется окно входа Google, войдите

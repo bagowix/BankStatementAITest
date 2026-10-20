@@ -4,7 +4,14 @@
 горизонт записи и передаёт занятость в чистый расчёт слотов как данные
 (`domain.free_slots(busy=…)`) — личные дела мастера закрывают время так же, как запись.
 Ответ кешируется на `(календарь, день)` на `cache_ttl_s`: один запрос к Google на пачку
-сообщений, а не на каждое нажатие (квота — 600 запросов в минуту на пользователя).
+сообщений, а не на каждое нажатие (квота — 600 запросов в минуту на пользователя). Календарь,
+который Google не отдал (`notFound` — не расшарен, самая частая ошибка подключения), кешируется
+пустым на тот же срок: иначе один такой календарь гнал бы запрос к Google на каждое сообщение.
+
+Из занятости вычитаются только события, которые бот сам записал в этот календарь и которые
+стоят там на время записи (`store.calendar_events`): иначе запись к одному мастеру закрыла бы
+общий календарь салона всем. Запись без события (календарь только читается, запись старше
+подключения календаря) ничего не вычитает — чужое событие в общем календаре остаётся занятым.
 
 Если Google недоступен, бот **не останавливает запись**: слоты считаются только по базе
 (как без календаря), а оператор получает один сигнал и сообщение о восстановлении. Риск
@@ -28,7 +35,7 @@ from autostudio.booking.alarm import OperatorAlarm
 from autostudio.booking.config import BookingConfig, CalendarSection
 from autostudio.booking.domain import Booking, BusyMap, Span, day_bounds, format_phone, horizon_days, subtract_spans
 from autostudio.booking.gcal import CalendarApi, CalendarError, EventDraft, EventGoneError
-from autostudio.booking.store import BookingStore, CalendarTask
+from autostudio.booking.store import BookingStore, CalendarEvent, CalendarTask
 from autostudio.booking.texts import Texts
 from autostudio.clock import Clock
 
@@ -69,12 +76,13 @@ class CalendarAvailability:
         for key in [key for key in self._cache if key[0] == calendar_id]:
             del self._cache[key]
 
-    async def busy(self, bookings: Sequence[Booking], now: dt.datetime) -> BusyMap:
+    async def busy(self, own_events: Sequence[CalendarEvent], now: dt.datetime) -> BusyMap:
         """Занятость мастеров на горизонт записи — без событий самих записей.
 
         Args:
-            bookings: Активные записи на горизонт (их события вычитаются из занятости
-                календаря, иначе запись к одному мастеру закрыла бы общий календарь всем).
+            own_events: События, которые бот записал в календари (`store.calendar_events`): они
+                вычитаются из занятости своего календаря, иначе запись к одному мастеру закрыла
+                бы общий календарь всем.
             now: Текущий момент.
 
         Returns:
@@ -98,11 +106,7 @@ class CalendarAvailability:
                     spans += cached[1]
             if not spans:
                 continue
-            own = [
-                (booking.start, booking.end)
-                for booking in bookings
-                if booking.active and self._section.calendar_for(booking.staff_id) == calendar
-            ]
+            own = [(event.start, event.end) for event in own_events if event.calendar_id == calendar]
             out[member.id] = subtract_spans(_merge(spans), own)
         return out
 
@@ -138,7 +142,10 @@ class CalendarAvailability:
         day = stale[0]
         while day <= stale[-1]:
             first, last = day_bounds(day, zone)
-            for calendar, spans in answer.busy.items():
+            for calendar in calendars:
+                # Календарь с ошибкой — пустым на тот же срок: для слотов это «только база» (как и
+                # без кеша), а повтор запроса — не чаще раза в cache_ttl_s, а не на каждое сообщение.
+                spans = answer.busy.get(calendar, [])
                 self._cache[(calendar, day)] = (now, [(a, b) for a, b in spans if a < last and b > first])
             day += dt.timedelta(days=1)
         if answer.errors:

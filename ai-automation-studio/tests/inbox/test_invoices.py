@@ -6,6 +6,7 @@ from email.message import EmailMessage
 from email.policy import SMTP
 from pathlib import Path
 
+import msgspec
 import pytest
 from pypdf import PdfReader, PdfWriter
 
@@ -150,9 +151,90 @@ def test__verify__some_lines_without_amount__incomplete():
     assert 'lines_incomplete' in record.reasons and record.status == 'unverified'
 
 
-def test__verify__no_lines__total_and_dates_only_checks():
+def test__verify__no_lines__nothing_reconciled__unverified():
+    # Регрессия: без строк счёт считался «сверенным» по одному факту, что итог напечатан, —
+    # а модели прямо разрешено вернуть [], если таблица не читается.
     record = _verify(_fields(lines=[], tax=None))
-    assert record.status == 'verified' and record.lines_sum is None and record.delta is None
+    assert record.status == 'unverified' and record.reasons == ['no_lines']
+    assert record.lines_sum is None and record.delta is None
+
+
+def test__verify__lines_without_any_amount__incomplete_not_no_lines():
+    lines = [InvoiceLine(description='Airport transfer', quantity=None, unit_price=None, amount=None)]
+    record = _verify(_fields(lines=lines))
+    assert record.status == 'unverified' and record.reasons == ['lines_incomplete'] and record.lines_sum is None
+
+
+# --- ловушки сверки: подогнанные строки, подытог вместо итога, знак ------------------------
+
+WINE = 'KAKHETI WINE CELLARS\nInvoice No: WC-0931\nWine tasting 12 x 35.00 = 420.00\nLunch 12 x 40.00 = 480.00\nTotal: 1,000.00 GEL'
+
+
+def _line(amount: str, description: str = 'Item') -> InvoiceLine:
+    return InvoiceLine(description=description, quantity=None, unit_price=None, amount=amount)
+
+
+def test__verify__model_adjusts_a_line_so_lines_add_up__unverified_line_not_in_pdf():
+    # Напечатано 420 + 480 ≠ 1000. Модель «помогла»: 420 + 580 = 1000 — расхождение спрятано.
+    fields = _fields(invoice_number='WC-0931', total='1,000.00', tax=None, lines=[_line('420.00'), _line('580.00')])
+    record = _verify(fields, WINE)
+    assert record.status == 'unverified' and record.reasons == ['line_not_in_pdf']
+    faithful = _verify(msgspec.structs.replace(fields, lines=[_line('420.00'), _line('480.00')]), WINE)
+    assert faithful.reasons == ['lines_sum'] and faithful.delta == Decimal('100.00')
+
+
+@pytest.mark.parametrize('tax', ['216.00', None])
+def test__verify__subtotal_given_as_total__unverified_total_is_subtotal(tax):
+    # Регрессия: подытог 1 200 с налогом 216 проходил веткой «НДС внутри цен», а без налога —
+    # просто сходился со строками; к оплате же 1 416, и в таблицу шла заниженная сумма.
+    record = _verify(_fields(total='1,200.00', tax=tax))
+    assert record.status == 'unverified' and record.reasons == ['total_is_subtotal']
+    assert not record.tax_included
+
+
+def test__verify__shipping_line_missed_and_total_before_shipping__total_is_subtotal():
+    text = 'ACME\nWidgets 2 x 500.00 = 1,000.00\nTotal: 1,000.00\nShipping: 50.00\nAmount due: 1,050.00'
+    record = _verify(_fields(invoice_number=None, total='1,000.00', tax=None, lines=[_line('1,000.00')]), text)
+    assert record.status == 'unverified' and record.reasons == ['total_is_subtotal']
+
+
+def test__verify__unsigned_discount_line__lines_sum_not_subtotal():
+    # Скидка без минуса: 900 + 100 = 1 000 напечатано, но 1 000 — строка счёта, а не подытог.
+    text = 'ACME\nWidget 1,000.00\nDiscount 100.00\nTotal 900.00'
+    fields = _fields(invoice_number=None, total='900.00', tax=None, lines=[_line('1,000.00'), _line('100.00')])
+    record = _verify(fields, text)
+    assert record.status == 'unverified' and record.reasons == ['lines_sum']
+
+
+def test__verify__dates_and_numbers_add_up_to_total__not_mistaken_for_subtotal():
+    # 2026 = 2000 + 26: год и число месяца без копеек — не суммы, подытогом итог не становится.
+    text = 'ACME\nInvoice date: 2026-10-26\nService 2,000.00\nTotal: 2,000.00'
+    fields = _fields(invoice_number=None, invoice_date='2026-10-26', due_date=None, total='2,000.00', tax=None)
+    record = _verify(msgspec.structs.replace(fields, lines=[_line('2,000.00')]), text)
+    assert record.status == 'verified' and record.reasons == []
+
+
+def test__verify__credit_note__negative_total_verified_with_sign():
+    text = 'ACME LLC\nCredit note CN-7\nRefund for cancelled tour -500.00\nTotal: -500.00 GEL'
+    fields = _fields(vendor='ACME LLC', invoice_number='CN-7', total='-500.00', tax=None, lines=[_line('-500.00')])
+    record = _verify(fields, text)
+    assert record.status == 'verified' and record.total == Decimal('-500.00') and record.lines_sum == Decimal('-500.00')
+
+
+def test__verify__credit_note_sign_dropped_by_model__unverified():
+    # Регрессия: price-parser терял минус, и кредит-нота «сверялась» как счёт к оплате на +500.
+    text = 'ACME LLC\nCredit note CN-7\nRefund for cancelled tour -500.00\nTotal: -500.00 GEL'
+    fields = _fields(vendor='ACME LLC', invoice_number='CN-7', total='500.00', tax=None, lines=[_line('500.00')])
+    record = _verify(fields, text)
+    assert record.status == 'unverified' and record.reasons == ['total_not_in_pdf', 'line_not_in_pdf']
+
+
+def test__verify__discount_line__lines_add_up_verified():
+    # Регрессия: скидка «-100.00» читалась как +100, и честный счёт уходил «НЕ сверен» с delta −200.
+    text = 'ACME\nWidget 1,000.00\nDiscount -100.00\nTotal 900.00'
+    fields = _fields(invoice_number=None, total='900.00', tax=None, lines=[_line('1,000.00'), _line('-100.00')])
+    record = _verify(fields, text)
+    assert record.status == 'verified' and record.lines_sum == Decimal('900.00') and record.delta == Decimal('0.00')
 
 
 def test__verify__vendor_not_in_document__dropped_currency_sign_normalized():
@@ -172,15 +254,69 @@ def test__verify__vendor_not_in_document__dropped_currency_sign_normalized():
         (None, None),
         ('free', None),
         ('99999999999999999', None),
+        ('-500.00', Decimal('-500.00')),
+        ('\u2212500.00 GEL', Decimal('-500.00')),
+        ('GEL -1,416.00', Decimal('-1416.00')),
+        ('-$100', Decimal('-100')),
+        ('(1,200.00)', Decimal('-1200.00')),
+        ('100.00-', Decimal('-100.00')),
+        ('100.00 CR', Decimal('-100.00')),
+        ('-0.00', Decimal('0.00')),
+        ('KT-2026', Decimal('2026')),
+        ('- 100.00', Decimal('100.00')),
     ],
 )
-def test__parse_amount__formats_via_price_parser(value, expected):
-    assert parse_amount(value) == expected
+def test__parse_amount__formats_and_sign_markers(value, expected):
+    amount = parse_amount(value)
+    assert amount == expected
+    assert amount is None or amount.is_signed() == (expected is not None and expected < 0)
 
 
 def test__amounts_in__qty_and_price_not_glued():
+    # Регрессия: «2 925.00» склеивалось в фантомные 2 925, и такой «итог» модели проходил проверку.
     found = amounts_in('Transfer 2 925.00 = 1 850.00\nTotal 1,850.00')
     assert {Decimal('2'), Decimal('925.00'), Decimal('1850.00')} <= found
+    assert Decimal('2925.00') not in found
+    assert amounts_in('Kazbegi trip   2 450.00') == {Decimal('2'), Decimal('450.00')}
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        'Total due: 1 416,00 GEL',
+        'Total due: 1 416.00 GEL',
+        '₾1 416.00',
+        'GEL 1 416.00',
+        "Total: 1'416.00",
+        '= 1 416.00',
+    ],
+)
+def test__amounts_in__thousands_with_space_or_apostrophe__read_where_unambiguous(text):
+    assert Decimal('1416.00') in amounts_in(text)
+
+
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        ('Refund -500.00', Decimal('-500.00')),
+        ('Refund \u2212500.00', Decimal('-500.00')),
+        ('Refund -$500.00', Decimal('-500.00')),
+        ('Discount (100.00)', Decimal('-100.00')),
+        ('Discount ($100.00)', Decimal('-100.00')),
+        ('Balance 100.00-', Decimal('-100.00')),
+        ('Balance 50.00 CR', Decimal('-50.00')),
+        ('Total: 1 416,00', Decimal('1416.00')),
+    ],
+)
+def test__amounts_in__sign_markers__negative_amounts(text, expected):
+    found = amounts_in(text)
+    assert expected in found and -expected not in found
+
+
+def test__amounts_in__hyphen_inside_numbers_and_codes__not_a_minus():
+    found = amounts_in('Invoice KT-2026-117, date 2026-10-15, range 75.00-80.00, item x-75.00, --3.00')
+    assert all(amount >= 0 for amount in found)
+    assert {Decimal('2026'), Decimal('117'), Decimal('10'), Decimal('15'), Decimal('75.00'), Decimal('80.00')} <= found
 
 
 # --- вложения и PDF ------------------------------------------------------------------------

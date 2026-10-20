@@ -1,8 +1,11 @@
 """Книга поступлений ИП и месячные цифры для декларации малого бизнеса.
 
 Правила (бриф 6.2, всё — «не проверено», решает бухгалтер):
-- налог 1% с валового оборота за месяц, декларация нарастающим итогом до 15-го
-  следующего месяца;
+- налог 1% с валового оборота, декларация ежемесячно, нарастающим итогом, до 15-го
+  следующего месяца. Поэтому «к уплате за месяц» считается как 1% от оборота с начала
+  года минус 1% на конец прошлого месяца (каждое — до тетри): так суммы по месяцам
+  сходятся с налогом за год, а не расходятся на округлениях. Простой 1% от оборота
+  месяца показывается рядом, для сверки;
 - оборот — в лари по официальному курсу НБГ на дату получения;
 - консервативно: база — сумма ДО комиссии площадки (Upwork, Fiverr, PayPal), а дата —
   зачисление на баланс площадки или кошелька. Комиссия записывается отдельно, только
@@ -117,9 +120,11 @@ class MonthReport(msgspec.Struct, frozen=True, kw_only=True):
         month: Первое число отчётного месяца.
         receipts: Поступления месяца по дате.
         turnover_gel: Оборот месяца в лари.
-        tax_estimate_gel: Оценка налога 1% за месяц, до тетри.
+        tax_estimate_gel: 1% от оборота месяца, до тетри — для сверки.
         ytd_turnover_gel: Оборот с 1 января по конец месяца.
         ytd_tax_estimate_gel: Оценка налога нарастающим итогом.
+        prior_ytd_turnover_gel: Оборот с 1 января по конец прошлого месяца (0 для января).
+        tax_due_gel: К уплате за месяц: 1% нарастающим итогом минус 1% на конец прошлого месяца.
         vat_window: Пиковое 12-месячное окно по грузинским клиентам.
         deadline: Срок декларации и уплаты (15-е следующего месяца).
         fees: Комиссии площадок за месяц по валютам — для сведения.
@@ -131,6 +136,8 @@ class MonthReport(msgspec.Struct, frozen=True, kw_only=True):
     tax_estimate_gel: Decimal
     ytd_turnover_gel: Decimal
     ytd_tax_estimate_gel: Decimal
+    prior_ytd_turnover_gel: Decimal
+    tax_due_gel: Decimal
     vat_window: VatWindow
     deadline: dt.date
     fees: dict[str, Decimal]
@@ -237,6 +244,7 @@ def build_month_report(receipts: Sequence[Receipt], month: dt.date) -> MonthRepo
     year_start = first.replace(month=1)
     turnover = sum((r.gel_amount for r in in_month), Decimal(0))
     ytd = sum((r.gel_amount for r in receipts if year_start <= r.received_on <= last), Decimal(0))
+    prior_ytd = sum((r.gel_amount for r in receipts if year_start <= r.received_on < first), Decimal(0))
     fees: dict[str, Decimal] = {}
     for receipt in in_month:
         if receipt.platform_fee:
@@ -248,6 +256,8 @@ def build_month_report(receipts: Sequence[Receipt], month: dt.date) -> MonthRepo
         tax_estimate_gel=tax_estimate(turnover),
         ytd_turnover_gel=ytd,
         ytd_tax_estimate_gel=tax_estimate(ytd),
+        prior_ytd_turnover_gel=prior_ytd,
+        tax_due_gel=tax_estimate(ytd) - tax_estimate(prior_ytd),
         vat_window=peak_vat_window(receipts, first),
         deadline=declaration_deadline(first),
         fees=fees,
@@ -294,9 +304,14 @@ def render_month_report(report: MonthReport) -> str:
     lines += [
         '',
         f'- Оборот месяца: **{_gel(report.turnover_gel)} GEL**',
-        f'- Налог 1% (оценка): **{_gel(report.tax_estimate_gel)} GEL**',
-        f'- С начала года: {_gel(report.ytd_turnover_gel)} GEL ({_percent(report.ceiling_share)}% от потолка '
-        f'500 000 GEL), налог нарастающим итогом (оценка): {_gel(report.ytd_tax_estimate_gel)} GEL',
+        f'- С начала года (нарастающим итогом): **{_gel(report.ytd_turnover_gel)} GEL** '
+        f'({_percent(report.ceiling_share)}% от потолка 500 000 GEL); на конец прошлого месяца — '
+        f'{_gel(report.prior_ytd_turnover_gel)} GEL',
+        f'- Налог к уплате за месяц (оценка): **{_gel(report.tax_due_gel)} GEL** = 1% нарастающим итогом '
+        f'{_gel(report.ytd_tax_estimate_gel)} − 1% на конец прошлого месяца '
+        f'{_gel(tax_estimate(report.prior_ytd_turnover_gel))}',
+        f'- Для сверки: 1% от оборота месяца — {_gel(report.tax_estimate_gel)} GEL (расхождение на тетри — '
+        'округление; какую цифру вносить в форму rs.ge, решает бухгалтер)',
         f'- Порог НДС: {_gel(window.georgian_turnover_gel)} GEL с грузинскими клиентами за 12 месяцев '
         f'{window.start.isoformat()} — {window.end.isoformat()} ({_percent(report.vat_share)}% от 100 000 GEL; '
         'иностранные клиенты не считаются — уточните у бухгалтера)',

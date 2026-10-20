@@ -21,6 +21,16 @@
   (обычное или шаблон): месячный отчёт показывает объём, за который клиент платит Meta.
 - Бот — помощник записи и FAQ конкретного бизнеса (с 15.01.2026 Meta запрещает в WhatsApp
   ассистентов общего назначения): движок отвечает только по услугам, графику и FAQ.
+- **Ошибки Graph API делятся по тому, кто их чинит.** Перегрузка и 5xx — один повтор, затем
+  `DeliveryError`. Сбой всего канала (токен отозван, нет прав, шаблон отклонён) — тоже
+  `DeliveryError`: напоминание вернётся в очередь и уйдёт, когда оператор починит токен или
+  шаблон (сигнал ему — при первом сбое и «снова работает» — при первой удачной отправке).
+  `RecipientGoneError` — только то, что не лечится ни повтором, ни оператором: этот покупатель
+  недоступен или запрос неверен. Тело ошибки не от Graph (HTML прокси, пустой 503) кода не
+  имеет и сигнал «токен» не поднимает: код 0 у Graph — это AuthException, а не «нет кода».
+- **Неверная подпись вебхука** — сигнал оператору, если запрос похож на настоящий от Meta: при
+  чужом App Secret каждое сообщение покупателя получает 403, Meta повторяет его до 7 дней и
+  выбрасывает, а `check` этого не видит — секрет проверяет только настоящая доставка.
 
 HTTPS даёт обратный прокси (см. `server.py`): Meta шлёт вебхуки только на HTTPS.
 """
@@ -83,8 +93,19 @@ _PAGE_TTL: Final = dt.timedelta(minutes=30)
 # Коды Meta: перегрузка и лимиты (повторить позже) — пропускная способность номера,
 # пара «бизнес — пользователь» (одно сообщение в 6 секунд), временные сбои платформы.
 RETRYABLE_CODES: Final = frozenset({1, 2, 4, 80007, 130429, 131000, 131016, 131056})
-# Токен отозван или нет прав — чинит оператор, а не следующая попытка.
+# Токен отозван или нет прав (0 — AuthException Graph) — чинит оператор, а не следующая попытка.
 AUTH_CODES: Final = frozenset({0, 10, 190, 200})
+# Ошибки шаблона (нет такого, не одобрен, параметры не сходятся, приостановлен) — тоже оператор.
+TEMPLATE_CODES: Final = range(132000, 133000)
+ALARM_AUTH: Final = 'whatsapp_auth'
+ALARM_TEMPLATE: Final = 'whatsapp_template'
+ALARM_TEMPLATE_STATUS: Final = 'whatsapp_template_status'
+ALARM_SIGNATURE: Final = 'whatsapp_signature'
+WEBHOOK_OBJECT: Final = 'whatsapp_business_account'
+# Подпись Meta: `sha256=` и HMAC-SHA256 в нижнем hex (64 знака).
+_SIGNATURE_PREFIX: Final = 'sha256='
+_SIGNATURE_HEX_LEN: Final = 64
+_HEX_DIGITS: Final = frozenset('0123456789abcdef')
 STOP_WORDS: Final = frozenset({'stop', 'стоп', 'unsubscribe', 'отписаться'})
 START_WORDS: Final = frozenset({'start', 'старт', 'subscribe', 'подписаться'})
 
@@ -259,40 +280,79 @@ class WhatsAppSender:
                 continue
             if response.is_success:
                 self._events.record(PACKAGE, MESSAGE_EVENT, self._clock(), {'kind': kind, 'purpose': purpose})
+                await self._recovered(kind)
                 return
             code, text = _graph_error(response)
             retryable = response.status_code >= 500 or response.status_code == 429 or code in RETRYABLE_CODES
             if retryable and not attempt:
                 await asyncio.sleep(self._retry_delay)
                 continue
-            await self._failed(code, text, response.status_code, kind)
-            if retryable:
-                raise DeliveryError(f'WhatsApp {response.status_code} ({code}): {text}')
-            # Остальное (неверный параметр, получатель недоступен, шаблон отклонён) повтором
-            # не лечится: повтор напоминания каждую минуту был бы спамом и расходом.
-            raise RecipientGoneError(f'WhatsApp {response.status_code} ({code}): {text}')
+            shown = '—' if code is None else code
+            channel_down = await self._failed(code, text, response.status_code, kind)
+            if retryable or channel_down:
+                # Канал целиком (перегрузка, токен, шаблон): напоминание вернётся в очередь и уйдёт
+                # после восстановления — оператор о сбое уже знает.
+                raise DeliveryError(f'WhatsApp {response.status_code} ({shown}): {text}')
+            # Остальное (неверный параметр, этот получатель недоступен) повтором не лечится:
+            # повтор напоминания каждую минуту был бы спамом и расходом.
+            raise RecipientGoneError(f'WhatsApp {response.status_code} ({shown}): {text}')
 
-    async def _failed(self, code: int, text: str, status: int, kind: str) -> None:
-        if status in (401, 403) or code in AUTH_CODES:
+    async def _failed(self, code: int | None, text: str, status: int, kind: str) -> bool:
+        """Сигнал оператору о сбое всего канала; True, если сбой такой (а не у одного получателя)."""
+        shown = f'{code}: {text}' if code is not None else text
+        if status in (401, 403) or (code is not None and code in AUTH_CODES):
+            await self._alarm.raise_(ALARM_AUTH, f'WhatsApp отклонил токен ({shown}) — проверьте токен system user')
+            return True
+        if kind == 'template' and code is not None and code in TEMPLATE_CODES:
             await self._alarm.raise_(
-                'whatsapp_auth', f'WhatsApp отклонил токен ({code}: {text}) — проверьте токен system user'
+                ALARM_TEMPLATE,
+                f'шаблон {self._section.reminder_template} не отправлен ({shown}) — проверьте имя, язык, '
+                'статус одобрения и число параметров; напоминания ждут и уйдут после исправления',
             )
-        elif kind == 'template' and 132000 <= code < 133000:
-            await self._alarm.raise_(
-                'whatsapp_template',
-                f'шаблон {self._section.reminder_template} не отправлен ({code}: {text}) — проверьте имя, язык, '
-                'статус одобрения и число параметров',
-            )
+            return True
+        return False
+
+    async def _recovered(self, kind: str) -> None:
+        # Удачная отправка доказывает, что токен работает (а шаблонная — что и шаблон): сигнал
+        # снимается, и следующий сбой снова дойдёт до оператора.
+        await self._alarm.clear(ALARM_AUTH, 'WhatsApp снова принимает токен — сообщения уходят')
+        if kind == 'template':
+            await self._alarm.clear(ALARM_TEMPLATE, f'шаблон {self._section.reminder_template} снова отправляется')
 
 
-def _graph_error(response: httpx.Response) -> tuple[int, str]:
+def _graph_error(response: httpx.Response) -> tuple[int | None, str]:
+    """Код и текст ошибки Graph API; код None, если тело — не ошибка Graph (HTML прокси, пустой 503)."""
     try:
         error = msgspec.json.decode(response.content, type=_GraphResponse).error
     except msgspec.DecodeError:
-        return 0, f'HTTP {response.status_code}'
+        return None, f'HTTP {response.status_code}'
     if error is None:
-        return 0, f'HTTP {response.status_code}'
+        return None, f'HTTP {response.status_code}'
     return error.code, error.message[:200]
+
+
+def looks_like_meta(body: bytes, header: str | None) -> bool:
+    """Похож ли запрос с неверной подписью на настоящий вебхук Meta (а не на сканер).
+
+    Тело разбирается только чтобы решить, будить ли оператора: обработки по нему нет.
+
+    Args:
+        body: Сырое тело POST.
+        header: Значение `X-Hub-Signature-256` или None.
+
+    Returns:
+        True, если подпись оформлена как у Meta (`sha256=` и 64 hex), а тело — вебхук WhatsApp.
+    """
+    if header is None or not header.startswith(_SIGNATURE_PREFIX):
+        return False
+    digest = header.removeprefix(_SIGNATURE_PREFIX)
+    if len(digest) != _SIGNATURE_HEX_LEN or not set(digest) <= _HEX_DIGITS:
+        return False
+    try:
+        payload = msgspec.json.decode(body, type=WebhookPayload)
+    except msgspec.DecodeError:
+        return False
+    return payload.object == WEBHOOK_OBJECT
 
 
 class WhatsAppBot:
@@ -352,9 +412,20 @@ class WhatsAppBot:
     async def receive(self, request: web.Request) -> web.Response:
         """POST: подпись по сырому телу, затем разбор; обработка — в фоне, ответ 200 — сразу."""
         body = await request.read()
-        if not verify_signature(self._app_secret, body, request.headers.get(SIGNATURE_HEADER)):
+        header = request.headers.get(SIGNATURE_HEADER)
+        if not verify_signature(self._app_secret, body, header):
             logger.warning('вебхук WhatsApp с неверной подписью отброшен')
+            if looks_like_meta(body, header):
+                # Сканеры без подписи оператора не будят; сигнал — о переходе, не о каждом запросе.
+                await self._alarm.raise_(
+                    ALARM_SIGNATURE,
+                    'вебхук WhatsApp отвечает 403: подпись X-Hub-Signature-256 не сходится. Скорее всего, '
+                    'App Secret в .env не от того приложения Meta, на которое оформлена подписка вебхука, '
+                    'или его сменили в кабинете — сообщения покупателей не доходят (Meta повторяет их до '
+                    '7 дней). Если секрет верный — кто-то подделывает запросы',
+                )
             return web.Response(status=403)
+        await self._alarm.clear(ALARM_SIGNATURE, 'подпись вебхука WhatsApp снова сходится — сообщения доходят')
         try:
             payload = msgspec.json.decode(body, type=WebhookPayload)
         except msgspec.DecodeError:
@@ -374,9 +445,13 @@ class WhatsAppBot:
         messages, failures = parse_webhook(payload)
         for failure in failures:
             logger.warning('WhatsApp не доставил сообщение (%s: %s)', failure.code, failure.title)
-            if 132000 <= failure.code < 133000:
+            if failure.code in TEMPLATE_CODES:
+                # Статус приходит после ответа 200 на отправку: восстановление отсюда не видно,
+                # поэтому сигнал повторяется не чаще раза в час, пока шаблон отклоняют.
                 await self._alarm.raise_(
-                    'whatsapp_template', f'WhatsApp отклонил шаблон напоминания ({failure.code}: {failure.title})'
+                    ALARM_TEMPLATE_STATUS,
+                    f'WhatsApp отклонил шаблон напоминания ({failure.code}: {failure.title})',
+                    repeat=True,
                 )
         for message in messages:
             if self._duplicate(message.message_id) or message.ignored:

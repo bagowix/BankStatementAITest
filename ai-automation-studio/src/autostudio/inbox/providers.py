@@ -11,6 +11,7 @@ import httpx
 from dishka import Provider, Scope, from_context, provide
 
 from autostudio.clientconf import client_data_dir, events_path, require_env
+from autostudio.errors import ConfigError
 from autostudio.events import EventLog
 from autostudio.inbox.config import InboxConfig, InboxSection
 from autostudio.inbox.heuristics import make_fake_llm
@@ -64,14 +65,17 @@ def build_token_provider(
         Провайдер токена или None.
 
     Raises:
-        ConfigError: Не задана нужная переменная окружения.
+        ConfigError: Не задана нужная переменная окружения или для Google OAuth не установлен google-auth.
     """
     match section.auth:
         case 'password':
             return None
         case 'google_oauth':
             # Импорт здесь: google-auth стоит в extras `sheets` и нужен только этим клиентам.
-            from autostudio.inbox.google_oauth import GoogleRefreshTokenProvider
+            try:
+                from autostudio.inbox.google_oauth import GoogleRefreshTokenProvider
+            except ImportError:
+                raise ConfigError('для auth = "google_oauth" нужен google-auth: uv sync --extra sheets') from None
 
             return GoogleRefreshTokenProvider(
                 client_id=require_env(section.oauth_client_id_env, environ),

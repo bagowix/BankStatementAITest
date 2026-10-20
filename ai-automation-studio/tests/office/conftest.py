@@ -3,25 +3,19 @@ from pathlib import Path
 
 import pytest
 
-from autostudio.office.operator import OperatorProfile
+from autostudio.office.operator import Issuer, OperatorProfile
 from autostudio.office.store import OfficeStore
-from tests.office.helpers import OPERATOR_TOML, VALID_IBAN
+from tests.office.helpers import OPERATOR_TOML, make_profile
 
 
 @pytest.fixture
 def operator() -> OperatorProfile:
-    return OperatorProfile(
-        legal_name='Individual Entrepreneur Jane Example',
-        legal_name_ru='ИП Джейн Пример',
-        id_number='000000000',
-        address='Georgia, Batumi, Example Street 1',
-        bank_name='JSC Example Bank',
-        iban=VALID_IBAN,
-        swift='XXXXGE22',
-        email='jane@example.com',
-        telegram='jane_example',
-        contract_fields={'SERVER_LOCATION': 'Example Country'},
-    )
+    return make_profile()
+
+
+@pytest.fixture
+def issuer(operator: OperatorProfile) -> Issuer:
+    return operator.issuer()
 
 
 @pytest.fixture
@@ -33,7 +27,9 @@ def operator_file(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def store(tmp_path: Path) -> OfficeStore:
-    return OfficeStore(tmp_path / 'office' / 'office.sqlite')
+    office = OfficeStore(tmp_path / 'office' / 'office.sqlite')
+    office.init()
+    return office
 
 
 @pytest.fixture

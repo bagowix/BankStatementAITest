@@ -14,6 +14,7 @@
 
 import asyncio
 import contextlib
+import csv
 import datetime as dt
 import logging
 import os
@@ -45,10 +46,10 @@ from autostudio.booking.providers import (
 )
 from autostudio.booking.reminders import ReminderLoop
 from autostudio.booking.server import TELEGRAM_PATH, WHATSAPP_PATH, serve
-from autostudio.booking.service import BookingService
+from autostudio.booking.service import BOOKINGS_TAB, BookingService
 from autostudio.booking.store import BookingStore
 from autostudio.booking.telegram import BookingBot
-from autostudio.booking.texts import Texts
+from autostudio.booking.texts import BOOKINGS_HEADER, Texts
 from autostudio.booking.whatsapp import GRAPH_API
 from autostudio.cli import quiet_http_loggers
 from autostudio.clientconf import NotifyConfig, SinkConfig, client_data_dir, load_sibling_env, require_env
@@ -56,6 +57,7 @@ from autostudio.clock import system_now
 from autostudio.errors import ConfigError
 from autostudio.providers import CoreProvider
 from autostudio.settings import Settings
+from autostudio.sinks import CsvSink
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +215,9 @@ def describe(config: BookingConfig, settings: Settings, now: dt.datetime) -> lis
     problem = csv_dir_problem(sink.csv_dir) if sink.backend == 'csv' else None
     if problem is not None:
         warnings.append(f'CSV-выгрузка не сможет писать: {problem} (в контейнере писать можно только в /data)')
+    stale = stale_bookings_header(sink.csv_dir, BOOKINGS_HEADER[lang]) if sink.backend == 'csv' else None
+    if stale is not None:
+        warnings.append(stale)
     if not section.faq:
         warnings.append('FAQ пуст: все вопросы будут передаваться человеку')
     if not section.contact_phone:
@@ -221,6 +226,33 @@ def describe(config: BookingConfig, settings: Settings, now: dt.datetime) -> lis
         warnings.append('модель fake: свободный текст разбирается простыми правилами (тариф Basic)')
     warnings += _channel_warnings(config)
     return lines + [f'внимание: {item}' for item in warnings]
+
+
+def stale_bookings_header(csv_dir: Path, header: Sequence[str]) -> str | None:
+    """Предупреждение, если `Bookings.csv` начат с другим заголовком (прежняя версия пакета или язык).
+
+    Таблица пишет заголовок только в новую вкладку, а строки дописывает в конец: после смены
+    колонок (11 → 13: валюта отдельно, канал) строки нового формата съехали бы под чужие заголовки.
+
+    Args:
+        csv_dir: Каталог CSV-выгрузок.
+        header: Заголовок, с которым пишет текущая версия.
+
+    Returns:
+        Текст предупреждения или None (файла нет, он пуст или заголовок совпадает).
+    """
+    path = CsvSink(csv_dir).path_for(BOOKINGS_TAB)
+    try:
+        with path.open(encoding='utf-8', newline='') as fh:
+            first = next(csv.reader(fh), None)
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return None
+    if first is None or first == list(header):
+        return None
+    return (
+        f'{path}: заголовок от прежней версии или другого языка ({len(first)} колонок, сейчас {len(header)}) — '
+        'переименуйте файл в архивный до запуска, иначе новые строки съедут под чужие колонки'
+    )
 
 
 def _channel_lines(config: BookingConfig) -> list[str]:

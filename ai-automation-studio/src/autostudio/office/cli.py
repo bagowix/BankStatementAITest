@@ -1,8 +1,9 @@
 """Команды офиса оператора: `autostudio office invoice | ledger | contract`.
 
 Реквизиты — из `operator.toml` (флаг `--operator` или `AUTOSTUDIO_OPERATOR`), данные —
-в `var/office/` (флаг `--data-dir` или `AUTOSTUDIO_OFFICE_DIR`). Сеть нужна только для
-курса НБГ, и без неё всё работает с `--rate`.
+в `var/office/` (флаг `--data-dir` или `AUTOSTUDIO_OFFICE_DIR`). Пути по умолчанию
+считаются от корня репозитория, а не от текущего каталога, и реестр создаёт только
+`office init`. Сеть нужна только для курса НБГ, и без неё всё работает с `--rate`.
 """
 
 import datetime as dt
@@ -18,7 +19,6 @@ import msgspec
 from autostudio.clock import system_now
 from autostudio.errors import ConfigError
 from autostudio.office.contract import (
-    DEFAULT_TEMPLATES_DIR,
     AgreementInfo,
     ContractParty,
     ContractRequest,
@@ -55,6 +55,7 @@ from autostudio.office.ledger import (
 )
 from autostudio.office.money import (
     Language,
+    check_year,
     currency_code,
     format_money,
     invoice_currency,
@@ -63,11 +64,14 @@ from autostudio.office.money import (
     parse_month,
     tbilisi_today,
 )
-from autostudio.office.operator import OperatorProfile, load_operator, operator_path
+from autostudio.office.operator import Issuer, OperatorProfile, load_operator, operator_path
+from autostudio.office.paths import OFFICE_SUBDIR, TEMPLATES_SUBDIR, project_root
 from autostudio.office.rates import NBG_TIMEOUT_S, RateLookup, resolve_rate
 from autostudio.office.store import DB_NAME, InvoiceRecord, OfficeStore
 
-app = cyclopts.App(name='office', help='Бумаги оператора: счета, книга поступлений и налог 1%, договоры.')
+app = cyclopts.App(
+    name='office', help='Бумаги оператора: счета, книга поступлений и налог 1%, договоры; init — создать реестр.'
+)
 invoice_app = app.command(
     cyclopts.App(name='invoice', help='Счёт прямому клиенту; list, show, paid, void — реестр счетов.')
 )
@@ -79,7 +83,8 @@ contract_app = app.command(
 )
 
 OFFICE_DIR_ENV: Final = 'AUTOSTUDIO_OFFICE_DIR'
-DEFAULT_OFFICE_DIR: Final = Path('var/office')
+# Предоплата поддержки дольше двух лет — опечатка в --months, а не договорённость.
+MAX_SUPPORT_MONTHS: Final = 24
 _COUNTRY_LENGTH: Final = 2
 _USER_AGENT: Final = 'autostudio-office/1 (own bookkeeping: NBG official rate)'
 
@@ -87,15 +92,19 @@ type OutputFormat = Literal['html', 'md']
 
 
 def office_dir(explicit: Path | None) -> Path:
-    """Каталог данных офиса: флаг, `AUTOSTUDIO_OFFICE_DIR` или `var/office`."""
+    """Каталог данных офиса: флаг, `AUTOSTUDIO_OFFICE_DIR` или `var/office` в корне репозитория."""
     if explicit is not None:
         return explicit
     from_env = os.environ.get(OFFICE_DIR_ENV, '').strip()
-    return Path(from_env) if from_env else DEFAULT_OFFICE_DIR
+    return Path(from_env) if from_env else project_root() / OFFICE_SUBDIR
 
 
 def _store(data_dir: Path | None) -> OfficeStore:
     return OfficeStore(office_dir(data_dir) / DB_NAME)
+
+
+def _templates_dir(explicit: Path | None) -> Path:
+    return explicit if explicit is not None else project_root() / TEMPLATES_SUBDIR
 
 
 def _operator(path: Path | None) -> OperatorProfile:
@@ -121,14 +130,37 @@ def _country(text: str | None) -> str | None:
     return None if text is None else _country_code(text)
 
 
-def _write_invoice_files(invoice: Invoice, operator: OperatorProfile, record_dir: Path, record: InvoiceRecord) -> Path:
+def _issuer(invoice: Invoice, operator: Path | None) -> Issuer:
+    """Реквизиты, с которыми счёт выпущен; у счетов до снимков — текущий профиль с предупреждением."""
+    if invoice.issuer is not None:
+        return invoice.issuer
+    print(f'  внимание: у счёта {invoice.number} в реестре нет снимка реквизитов — печатаются текущие из operator.toml')
+    return _operator(operator).issuer()
+
+
+def _write_invoice_files(record: InvoiceRecord, issuer: Issuer, record_dir: Path) -> Path:
+    invoice = record.invoice
     record_dir.mkdir(parents=True, exist_ok=True)
     html_path = record_dir / f'{invoice.number}.html'
-    html_path.write_text(render_html(invoice, operator, status=record.status), encoding='utf-8')
+    html_path.write_text(render_html(invoice, issuer, status=record.status), encoding='utf-8')
     (record_dir / f'{invoice.number}.md').write_text(
-        render_markdown(invoice, operator, status=record.status), encoding='utf-8'
+        render_markdown(invoice, issuer, status=record.status), encoding='utf-8'
     )
     return html_path
+
+
+@app.command(name='init')
+def office_init(*, data_dir: Path | None = None) -> None:
+    """Создаёт реестр счетов и книгу поступлений (один раз); остальные команды пустой реестр не заводят.
+
+    Args:
+        data_dir: Каталог данных офиса; по умолчанию var/office в корне репозитория.
+    """
+    store = _store(data_dir)
+    if store.init():
+        print(f'реестр создан: {store.path}')
+    else:
+        print(f'реестр уже есть: {store.path} — ничего не изменено')
 
 
 def _invoice_from_flags(
@@ -140,8 +172,8 @@ def _invoice_from_flags(
     items: list[str],
     language: Language,
 ) -> list[LineItem]:
-    if months < 1:
-        raise ConfigError('--months: от 1')
+    if not 1 <= months <= MAX_SUPPORT_MONTHS:
+        raise ConfigError(f'--months: от 1 до {MAX_SUPPORT_MONTHS}')
     if support is None and (period is not None or months != 1):
         raise ConfigError('--period и --months относятся к позиции поддержки: добавьте --support <цена за месяц>')
     lines: list[LineItem] = []
@@ -151,7 +183,7 @@ def _invoice_from_flags(
         line = preset_item('support', support, language, quantity=Decimal(months))
         if period is not None:
             line = msgspec.structs.replace(
-                line, description=line.description + period_suffix(parse_month(period), language)
+                line, description=line.description + period_suffix(parse_month(period), language, months=months)
             )
         lines.append(line)
     lines += [parse_item(spec) for spec in items]
@@ -177,6 +209,7 @@ def invoice_new(
     lang: Language | None = None,
     notes: str | None = None,
     from_file: Path | None = None,
+    allow_date: bool = False,
     operator: Path | None = None,
     data_dir: Path | None = None,
 ) -> None:
@@ -191,7 +224,7 @@ def invoice_new(
         setup: Цена разработки и настройки — позиция со стандартной формулировкой.
         support: Цена месяца поддержки — позиция «Technical support and maintenance of software».
         months: Сколько месяцев поддержки в счёте.
-        period: Месяц поддержки ГГГГ-ММ — добавится к позиции («— November 2026»).
+        period: Первый месяц поддержки ГГГГ-ММ — добавится к позиции («— November 2026», с --months — диапазон).
         item: Своя позиция "описание;количество;цена" (можно несколько раз).
         currency: USD, EUR или GEL; по умолчанию — из operator.toml.
         date: Дата счёта; по умолчанию сегодня в Тбилиси.
@@ -199,10 +232,13 @@ def invoice_new(
         lang: Язык счёта: en или ru.
         notes: Примечание внизу счёта.
         from_file: Счёт из TOML-файла ([client], [[items]], currency, language, …).
+        allow_date: Выпустить с необычной датой: раньше последнего счёта серии, больше чем на 7 дней
+            вперёд или раньше прошлого года (номер расходуется навсегда).
         operator: Путь к operator.toml.
         data_dir: Каталог данных офиса.
     """
     profile = _operator(operator)
+    issuer = profile.issuer()
     now = _now()
     today = tbilisi_today(now)
     client_flags = [client_name, client_address, client_tax_id, client_email, client_country]
@@ -213,7 +249,7 @@ def invoice_new(
         request = load_invoice_request(from_file)
         if lang is not None:
             request = msgspec.structs.replace(request, language=lang)
-        draft = request.draft(default_currency=profile.default_currency, today=today)
+        draft = request.draft(default_currency=profile.default_currency, today=today, issuer=issuer)
         draft = msgspec.structs.replace(
             draft,
             currency=invoice_currency(currency) if currency else draft.currency,
@@ -245,18 +281,19 @@ def invoice_new(
             ),
             currency=invoice_currency(currency) if currency else profile.default_currency,
             issue_date=date or today,
+            issuer=issuer,
             due_days=DEFAULT_DUE_DAYS if due_days is None else due_days,
             language=language,
             notes=notes or '',
         )
     store = _store(data_dir)
-    invoice = store.issue_invoice(draft, prefix=profile.invoice_prefix, now=now)
+    invoice = store.issue_invoice(draft, prefix=profile.invoice_prefix, now=now, allow_date=allow_date)
     record = store.get_invoice(invoice.number)
-    html_path = _write_invoice_files(invoice, profile, office_dir(data_dir) / 'invoices', record)
+    html_path = _write_invoice_files(record, issuer, store.path.parent / 'invoices')
     print(
         f'счёт {invoice.number} выставлен: {invoice.client.name}, '
         f'{format_money(invoice.total, invoice.currency, "en")}, оплатить до {invoice.due_date.isoformat()}\n'
-        f'  для печати в PDF: {html_path}\n  сводка: {html_path.with_suffix(".md")}'
+        f'  для печати в PDF: {html_path}\n  сводка: {html_path.with_suffix(".md")}\n  реестр: {store.path}'
     )
     if invoice.client.country == 'GE' and invoice.currency != 'GEL':
         print('  заметка: местные клиенты платят в лари на счёт ИП (бриф 2.1) — валюту уточните у бухгалтера')
@@ -272,7 +309,7 @@ def invoice_list(*, year: int | None = None, data_dir: Path | None = None) -> No
         year: Только счета этого года.
         data_dir: Каталог данных офиса.
     """
-    records = _store(data_dir).list_invoices(year)
+    records = _store(data_dir).list_invoices(None if year is None else check_year(year))
     if not records:
         print('счетов нет')
         return
@@ -295,17 +332,20 @@ def invoice_show(
 ) -> None:
     """Показывает счёт из реестра; с --html заново пишет файлы для печати.
 
+    Реквизиты берутся из снимка, сохранённого при выпуске, а не из текущего operator.toml.
+
     Args:
         number: Номер счёта.
         html: Перезаписать HTML и Markdown в var/office/invoices (с отметкой, если счёт аннулирован).
-        operator: Путь к operator.toml.
+        operator: Путь к operator.toml — только для счетов, выпущенных до снимков реквизитов.
         data_dir: Каталог данных офиса.
     """
-    record = _store(data_dir).get_invoice(number)
-    profile = _operator(operator)
-    print(render_markdown(record.invoice, profile, status=record.status), end='')
+    store = _store(data_dir)
+    record = store.get_invoice(number)
+    issuer = _issuer(record.invoice, operator)
+    print(render_markdown(record.invoice, issuer, status=record.status), end='')
     if html:
-        path = _write_invoice_files(record.invoice, profile, office_dir(data_dir) / 'invoices', record)
+        path = _write_invoice_files(record, issuer, store.path.parent / 'invoices')
         print(f'\nфайл для печати: {path}')
 
 
@@ -316,13 +356,13 @@ def invoice_void(number: str, *, reason: str, operator: Path | None = None, data
     Args:
         number: Номер счёта.
         reason: Причина (видна в реестре).
-        operator: Путь к operator.toml.
+        operator: Путь к operator.toml — только для счетов, выпущенных до снимков реквизитов.
         data_dir: Каталог данных офиса.
     """
-    profile = _operator(operator)
-    record = _store(data_dir).void_invoice(number, reason=reason, now=_now())
-    path = _write_invoice_files(record.invoice, profile, office_dir(data_dir) / 'invoices', record)
-    print(f'счёт {number} аннулирован ({reason}); файл с отметкой: {path}')
+    store = _store(data_dir)
+    record = store.void_invoice(number, reason=reason, now=_now())
+    path = _write_invoice_files(record, _issuer(record.invoice, operator), store.path.parent / 'invoices')
+    print(f'счёт {number} аннулирован ({reason}); файл с отметкой (реквизиты — как при выпуске): {path}')
 
 
 def _lookup_rate(
@@ -350,6 +390,38 @@ def _describe(receipt: Receipt, lookup: RateLookup) -> str:
     )
 
 
+def _received_summary(invoice: Invoice, receipts: list[Receipt]) -> tuple[bool, str]:
+    """Сколько по счёту получено против суммы счёта.
+
+    Args:
+        invoice: Счёт.
+        receipts: Все поступления, записанные по этому счёту.
+
+    Returns:
+        Сходится ли полученное с суммой счёта и строка для вывода.
+    """
+    if any(r.currency != invoice.currency for r in receipts):
+        return False, 'часть оплаты в другой валюте — сверьте полученное с суммой счёта вручную'
+    received = sum((r.amount for r in receipts), Decimal(0))
+    if received == invoice.total:
+        return True, f'получено {received} {invoice.currency} — ровно сумма счёта ({len(receipts)} зап.)'
+    gap = (
+        f'не хватает {invoice.total - received}'
+        if received < invoice.total
+        else f'больше на {received - invoice.total} — проверьте, не записана ли оплата дважды'
+    )
+    return False, (
+        f'получено {received}, а в счёте {invoice.total} {invoice.currency}: {gap}; '
+        'в оборот идёт полученная сумма до комиссий'
+    )
+
+
+def _print_received(invoice: Invoice, receipts: list[Receipt]) -> None:
+    """Печатает полученное по счёту при каждой записи: повтор или недоплата видны сразу."""
+    matches, text = _received_summary(invoice, receipts)
+    print(f'  по счёту {invoice.number}: {text}' if matches else f'  внимание: {text}')
+
+
 @invoice_app.command(name='paid')
 def invoice_paid(
     number: str,
@@ -363,14 +435,20 @@ def invoice_paid(
     country: str | None = None,
     note: str = '',
     fetch: bool = True,
+    extra: bool = False,
     data_dir: Path | None = None,
 ) -> None:
-    """Отмечает счёт оплаченным и записывает поступление в книгу.
+    """Отмечает счёт оплаченным; поступление пишется в книгу один раз.
+
+    Если по счёту уже есть поступления (`ledger add --invoice`), команда без `--amount`
+    только меняет статус: вторая запись удвоила бы оборот и налог. С `--amount` — это
+    доплата остатка отдельной записью; доплата, с которой получено больше суммы счёта,
+    принимается только с `--extra`.
 
     Args:
         number: Номер счёта.
-        date: Дата получения денег; по умолчанию сегодня в Тбилиси.
-        amount: Полученная сумма ДО комиссий; по умолчанию — сумма счёта.
+        date: Дата получения денег; по умолчанию сегодня в Тбилиси (для уже записанной оплаты — её дата).
+        amount: Полученная сумма ДО комиссий; по умолчанию — сумма счёта. Обязательна, если валюта другая.
         currency: Валюта поступления; по умолчанию — валюта счёта.
         channel: Канал: bank, wise, paypal, payoneer, upwork, fiverr.
         rate: Курс НБГ вручную, лари за 1 единицу.
@@ -378,6 +456,8 @@ def invoice_paid(
         country: Страна клиента, если её нет в счёте.
         note: Заметка.
         fetch: Спросить курс у НБГ, если его нет в кэше.
+        extra: Деньги по счёту правда пришли ещё раз (повторный платёж, переплата): записать доплату,
+            даже если она похожа на повтор уже записанной оплаты.
         data_dir: Каталог данных офиса.
     """
     store = _store(data_dir)
@@ -387,12 +467,33 @@ def invoice_paid(
     if record.status != 'issued':
         raise ConfigError(f'счёт {number}: статус {record.status}, отметить оплату нельзя')
     invoice = record.invoice
+    if date is not None and date > today:
+        raise ConfigError(f'дата получения {date.isoformat()} в будущем — проверьте --date')
+    linked = store.receipts_for_invoice(invoice.number)
+    if linked and amount is None:
+        if extra or any(flag is not None for flag in (currency, rate, fee, country)):
+            raise ConfigError(
+                f'по счёту {invoice.number} в книге уже есть поступления: --currency, --rate, --fee, --country '
+                'и --extra относятся к новой записи — для доплаты остатка добавьте --amount, иначе уберите их'
+            )
+        updated = store.mark_paid(invoice.number, paid_on=date)
+        paid_on = updated.paid_on.isoformat() if updated.paid_on else '?'
+        print(f'счёт {invoice.number} отмечен оплаченным {paid_on}; поступления уже в книге, новой записи нет:')
+        for r in linked:
+            print(f'  #{r.id}: {r.received_on.isoformat()} {r.amount} {r.currency} = {r.gel_amount} GEL')
+        _print_received(invoice, linked)
+        return
     client_country = _country(country) or invoice.client.country
     if client_country is None:
         raise ConfigError('в счёте нет страны клиента: укажите --country (GE — грузинский клиент, порог НДС)')
     received_on = date or today
-    received = money(parse_amount(amount, what='--amount', places=2)) if amount is not None else invoice.total
     received_currency = currency_code(currency) if currency else invoice.currency
+    if amount is None and received_currency != invoice.currency:
+        raise ConfigError(
+            f'счёт {invoice.number} в {invoice.currency}, а оплата в {received_currency}: сумма счёта в '
+            f'{received_currency} не переводится — укажите --amount (сколько пришло в {received_currency} до комиссий)'
+        )
+    received = invoice.total if amount is None else money(parse_amount(amount, what='--amount', places=2))
     lookup = _lookup_rate(store, received_currency, received_on, today=today, rate=rate, fetch=fetch)
     receipt = Receipt(
         received_on=received_on,
@@ -403,17 +504,15 @@ def invoice_paid(
         channel=channel,
         counterparty=invoice.client.name,
         client_country=client_country,
-        invoice_number=number,
+        invoice_number=invoice.number,
         platform_fee=None if fee is None else money(parse_amount(fee, what='--fee', allow_zero=True, places=2)),
         note=note,
     )
-    _, saved = store.pay_invoice(number, receipt, now=now)
-    print(f'счёт {number} оплачен; в книге {_describe(saved, lookup)}')
-    if received_currency == invoice.currency and received != invoice.total:
-        print(
-            f'  внимание: получено {received}, а в счёте {invoice.total} {invoice.currency} — '
-            'в оборот идёт полученная сумма до комиссий'
-        )
+    # Доплата разрешена, только если поступления по счёту были видны до записи: запись,
+    # добавленная из другой консоли между чтением и транзакцией, не удвоится.
+    _, saved = store.pay_invoice(invoice.number, receipt, now=now, top_up=bool(linked), extra=extra)
+    print(f'счёт {invoice.number} оплачен; в книге {_describe(saved, lookup)}')
+    _print_received(invoice, store.receipts_for_invoice(invoice.number))
 
 
 @ledger_app.command(name='add')
@@ -430,9 +529,14 @@ def ledger_add(
     invoice: str | None = None,
     note: str = '',
     fetch: bool = True,
+    extra: bool = False,
     data_dir: Path | None = None,
 ) -> None:
     """Записывает поступление: сумма ДО комиссии площадки, курс НБГ на дату получения.
+
+    С `--invoice` команда всегда печатает, сколько по счёту получено против суммы счёта, и
+    не запишет то, что похоже на повтор уже записанной оплаты (`invoice paid` тоже пишет
+    поступление): ту же сумму и дату ещё раз или больше суммы счёта — без `--extra`.
 
     Args:
         amount: Сумма до комиссии площадки (Upwork, Fiverr, PayPal): консервативная база налога.
@@ -443,9 +547,13 @@ def ledger_add(
         date: Дата получения (зачисление на счёт или баланс площадки); по умолчанию сегодня.
         rate: Курс НБГ вручную, лари за 1 единицу; сохраняется с поступлением.
         fee: Комиссия площадки в той же валюте — только для сведения, из оборота не вычитается.
-        invoice: Номер счёта, если платили по счёту (отметить оплату: office invoice paid).
+        invoice: Номер счёта, если платили по счёту; потом `office invoice paid <номер>` без --amount
+            только отметит оплату — второй записи в книге не будет. Если счёт уже отмечен
+            оплаченным через `invoice paid`, его поступление уже в книге: здесь — только остаток.
         note: Заметка.
         fetch: Спросить курс у НБГ, если его нет в кэше.
+        extra: Деньги по счёту правда пришли ещё раз (повторный платёж, переплата): записать,
+            даже если запись похожа на повтор уже записанной оплаты. Только с --invoice.
         data_dir: Каталог данных офиса.
     """
     store = _store(data_dir)
@@ -456,6 +564,8 @@ def ledger_add(
     client_country = _country_code(country)
     if not counterparty.strip():
         raise ConfigError('--counterparty: кто заплатил (клиент или площадка)')
+    if extra and not invoice:
+        raise ConfigError('--extra относится к поступлению по счёту: добавьте --invoice <номер> или уберите --extra')
     lookup = _lookup_rate(store, code, received_on, today=today, rate=rate, fetch=fetch)
     receipt = Receipt(
         received_on=received_on,
@@ -470,10 +580,20 @@ def ledger_add(
         platform_fee=None if fee is None else money(parse_amount(fee, what='--fee', allow_zero=True, places=2)),
         note=note,
     )
-    saved = store.add_receipt(receipt, now=now)
-    print(f'записано {_describe(saved, lookup)}')
-    if invoice and store.get_invoice(invoice.strip()).status == 'issued':
-        print(f'  счёт {invoice} всё ещё «выставлен»: отметить оплату — autostudio office invoice paid {invoice}')
+    saved = store.add_receipt(receipt, now=now, extra=extra)
+    print(f'записано {_describe(saved, lookup)}\n  реестр: {store.path}')
+    if saved.invoice_number is None:
+        return
+    record = store.get_invoice(saved.invoice_number)
+    # Сводка при любом статусе: у оплаченного счёта поступление уже записал invoice paid,
+    # и именно здесь повтор той же оплаты должен быть виден сразу.
+    _print_received(record.invoice, store.receipts_for_invoice(saved.invoice_number))
+    if record.status == 'issued':
+        print(
+            f'  счёт {saved.invoice_number} ещё «выставлен». Оплачен целиком — '
+            f'autostudio office invoice paid {saved.invoice_number} (без --amount: только статус, '
+            'поступление уже в книге и второй раз не запишется)'
+        )
 
 
 @ledger_app.command(name='month')
@@ -485,8 +605,10 @@ def ledger_month(month: str, *, data_dir: Path | None = None) -> None:
         data_dir: Каталог данных офиса.
     """
     first = parse_month(month)
-    report = build_month_report(_store(data_dir).receipts(until=month_end(first)), first)
+    store = _store(data_dir)
+    report = build_month_report(store.receipts(until=month_end(first)), first)
     print(render_month_report(report), end='')
+    print(f'\nреестр: {store.path}')
     print(f'\nвыгрузка для бухгалтера: autostudio office ledger export --month {first:%Y-%m}')
 
 
@@ -509,9 +631,11 @@ def ledger_export(
         end = month_end(start)
         label = f'{start:%Y-%m}'
     else:
-        start, end, label = dt.date(year or 0, 1, 1), dt.date(year or 0, 12, 31), str(year)
-    receipts = [r for r in _store(data_dir).receipts(until=end) if r.received_on >= start]
-    path = out or office_dir(data_dir) / 'exports' / f'ledger-{label}.csv'
+        whole = check_year(year or 0)
+        start, end, label = dt.date(whole, 1, 1), dt.date(whole, 12, 31), str(whole)
+    store = _store(data_dir)
+    receipts = [r for r in store.receipts(until=end) if r.received_on >= start]
+    path = out or store.path.parent / 'exports' / f'ledger-{label}.csv'
     path.parent.mkdir(parents=True, exist_ok=True)
     # BOM: Excel у бухгалтера иначе показывает кириллицу и грузинский как кракозябры.
     path.write_text(receipts_csv(receipts), encoding='utf-8-sig', newline='')
@@ -553,8 +677,9 @@ def contract_render(
     set_: Annotated[list[str] | None, cyclopts.Parameter(name='--set')] = None,
     drop_review_notes: bool = False,
     fmt: Annotated[OutputFormat, cyclopts.Parameter(name='--format')] = 'html',
-    templates: Path = DEFAULT_TEMPLATES_DIR,
+    templates: Path | None = None,
     out: Path | None = None,
+    force: bool = False,
     operator: Path | None = None,
     data_dir: Path | None = None,
 ) -> None:
@@ -576,8 +701,9 @@ def contract_render(
         set_: Поле по точному тексту скобки: --set "14 / 30=14" (можно несколько раз).
         drop_review_notes: Снять пометки юриста и бухгалтера (после их проверки).
         fmt: html — для печати в PDF, md — для правок.
-        templates: Каталог шаблонов.
+        templates: Каталог шаблонов; по умолчанию docs/legal в корне репозитория.
         out: Куда записать; по умолчанию var/office/contracts/.
+        force: Перезаписать существующий файл договора.
         operator: Путь к operator.toml.
         data_dir: Каталог данных офиса.
     """
@@ -602,7 +728,13 @@ def contract_render(
     )
     request = merge_requests([*(load_contract_request(path) for path in client_file or []), flags])
     profile = _operator(operator)
-    path = template_path(templates, template, lang)
+    path = template_path(_templates_dir(templates), template, lang)
+    target = out or office_dir(data_dir) / 'contracts' / output_name(request, template, lang, fmt)
+    if target.exists() and not force:
+        raise ConfigError(
+            f'{target} уже существует — это может быть договор другого клиента или правки в нём. '
+            'Другой файл: --out или --number; перезаписать: --force'
+        )
     rendered = render_contract(
         load_template(path),
         template=template,
@@ -612,7 +744,6 @@ def contract_render(
         drop_review_notes=drop_review_notes,
         template_label=str(path),
     )
-    target = out or office_dir(data_dir) / 'contracts' / output_name(request, template, lang, fmt)
     target.parent.mkdir(parents=True, exist_ok=True)
     body = contract_html(rendered.text, language=lang) if fmt == 'html' else rendered.text
     target.write_text(body, encoding='utf-8')
@@ -625,17 +756,17 @@ def contract_render(
 
 @contract_app.command(name='fields')
 def contract_fields(
-    template: TemplateName, *, lang: Language = 'en', templates: Path = DEFAULT_TEMPLATES_DIR, out: Path | None = None
+    template: TemplateName, *, lang: Language = 'en', templates: Path | None = None, out: Path | None = None
 ) -> None:
     """Все поля шаблона заготовкой TOML для файла клиента (всё закомментировано).
 
     Args:
         template: service-agreement, support-sla или dpa.
         lang: Язык шаблона: en или ru.
-        templates: Каталог шаблонов.
+        templates: Каталог шаблонов; по умолчанию docs/legal в корне репозитория.
         out: Записать в файл (существующий не перезаписывается); по умолчанию — в stdout.
     """
-    path = template_path(templates, template, lang)
+    path = template_path(_templates_dir(templates), template, lang)
     skeleton = fields_skeleton(load_template(path), template=template, language=lang, label=str(path))
     if out is None:
         print(skeleton, end='')

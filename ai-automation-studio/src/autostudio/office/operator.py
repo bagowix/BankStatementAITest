@@ -2,7 +2,9 @@
 
 Файл с настоящими реквизитами лежит в корне репозитория и в .gitignore: репозиторий
 зеркалируется в публичный, а IBAN и адрес ИП туда попадать не должны. В git — только
-`operator.example.toml` с вымышленными данными.
+`operator.example.toml` с вымышленными данными. Значения-образцы из него («Example»,
+«Пример», example.com, ID из одних нулей, SWIFT `XXXX…`) профиль не принимает: иначе
+скопированный образец, где заменили только часть полей, печатал бы чужое имя в счетах.
 """
 
 import re
@@ -15,9 +17,9 @@ import msgspec
 
 from autostudio.errors import ConfigError
 from autostudio.office.money import InvoiceCurrency, Language
+from autostudio.office.paths import OPERATOR_FILE, project_root
 
 OPERATOR_ENV: Final = 'AUTOSTUDIO_OPERATOR'
-DEFAULT_OPERATOR_PATH: Final = Path('operator.toml')
 
 # Длины IBAN по реестру SWIFT для стран, откуда реально придут деньги; остальные
 # проверяются общим правилом ISO 13616 (15–34 символа) и контрольной суммой.
@@ -51,6 +53,12 @@ _PREFIX: Final = re.compile(r'^[A-Z0-9][A-Z0-9-]{0,11}$')
 _TELEGRAM: Final = re.compile(r'^[A-Za-z0-9_]{5,32}$')
 _FIELD_KEY: Final = re.compile(r'^[A-Z][A-Z0-9_]*$')
 _IE_PREFIXES: Final = ('Individual Entrepreneur ', 'Индивидуальный предприниматель ', 'ИП ')
+# Признаки образца из operator.example.toml: слово Example/Пример (и домены example.com/.org),
+# ID из одной повторяющейся цифры, SWIFT на XXXX, семь нулей подряд в телефоне.
+_PLACEHOLDER_WORD: Final = re.compile(r'\b(example|пример)\b', re.IGNORECASE)
+_REPEATED_DIGIT: Final = re.compile(r'^(\d)\1+$')
+_PLACEHOLDER_SWIFT: Final = 'XXXX'
+_ZERO_RUN: Final = re.compile(r'0{7,}')
 
 
 def compact_iban(raw: str) -> str:
@@ -120,6 +128,76 @@ class TaxNote(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=T
         return self.ru if language == 'ru' else self.en
 
 
+class PaymentNote(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """Дополнительные способы оплаты в блоке реквизитов (например, Wise ACH для клиентов из США).
+
+    Attributes:
+        en: Для счёта на английском; пусто — блок не печатается.
+        ru: Для счёта на русском; пусто — берётся `en`.
+    """
+
+    en: str = ''
+    ru: str = ''
+
+    def text(self, language: Language) -> str:
+        return (self.ru or self.en) if language == 'ru' else self.en
+
+
+class Issuer(msgspec.Struct, frozen=True, kw_only=True):
+    """Снимок реквизитов оператора на момент выпуска счёта.
+
+    Хранится в реестре вместе со счётом: после смены банка, адреса или регистрации НДС
+    повторная печать старого счёта показывает то, с чем он был выпущен, а не текущий профиль.
+
+    Attributes:
+        legal_name: Наименование ИП.
+        legal_name_ru: Наименование по-русски или None.
+        id_number: Идентификационный номер ИП.
+        address: Юридический адрес.
+        email: E-mail.
+        phone: Телефон или None.
+        website: Сайт или None.
+        bank_name: Банк.
+        bank_address: Адрес банка или None.
+        iban: IBAN без пробелов.
+        swift: SWIFT/BIC в верхнем регистре.
+        intermediary_bank: Банк-посредник для USD или None.
+        intermediary_swift: SWIFT банка-посредника или None.
+        tax_note: Строка о налогах.
+        payment_note: Дополнительные способы оплаты.
+    """
+
+    legal_name: str
+    legal_name_ru: str | None = None
+    id_number: str
+    address: str
+    email: str
+    phone: str | None = None
+    website: str | None = None
+    bank_name: str
+    bank_address: str | None = None
+    iban: str
+    swift: str
+    intermediary_bank: str | None = None
+    intermediary_swift: str | None = None
+    tax_note: TaxNote = msgspec.field(default_factory=TaxNote)
+    payment_note: PaymentNote = msgspec.field(default_factory=PaymentNote)
+
+    @property
+    def iban_grouped(self) -> str:
+        return group_iban(self.iban)
+
+    def display_name(self, language: Language) -> str:
+        """Наименование ИП для счёта на нужном языке."""
+        if language == 'ru' and self.legal_name_ru:
+            return self.legal_name_ru
+        return self.legal_name
+
+    def printed_texts(self) -> list[str]:
+        """Свободный текст оператора, который печатается в счёте: его проверяют на «консалтинг»."""
+        return [self.tax_note.en, self.tax_note.ru, self.payment_note.en, self.payment_note.ru]
+
+
 class OperatorProfile(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
     """Реквизиты ИП-оператора.
 
@@ -136,6 +214,10 @@ class OperatorProfile(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_
         phone: Телефон или None.
         website: Сайт или None.
         telegram: Telegram без @ для договоров (`{{TELEGRAM}}`) или None.
+        bank_address: Адрес банка — его часто спрашивает банк плательщика за границей.
+        intermediary_bank: Банк-посредник (корреспондент) для переводов в USD или None.
+        intermediary_swift: SWIFT/BIC банка-посредника или None.
+        payment_note: Другие способы оплаты (en/ru), например реквизиты Wise ACH.
         tax_note: Строка о налогах внизу счёта (en/ru).
         invoice_prefix: Префикс номера счёта: `AS-` даёт `AS-2026-001`.
         default_currency: Валюта счёта по умолчанию.
@@ -154,6 +236,10 @@ class OperatorProfile(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_
     phone: str | None = None
     website: str | None = None
     telegram: str | None = None
+    bank_address: str | None = None
+    intermediary_bank: str | None = None
+    intermediary_swift: str | None = None
+    payment_note: PaymentNote = msgspec.field(default_factory=PaymentNote)
     tax_note: TaxNote = msgspec.field(default_factory=TaxNote)
     invoice_prefix: str = 'AS-'
     default_currency: InvoiceCurrency = 'USD'
@@ -185,7 +271,43 @@ class OperatorProfile(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_
             if self.telegram is None or _TELEGRAM.match(self.telegram)
             else f'telegram {self.telegram!r}: имя пользователя без @, 5–32 символа',
             None if not bad_keys else f'contract_fields: ключи как в шаблоне, ЗАГЛАВНЫМИ ({", ".join(bad_keys)})',
+            None if self.intermediary_swift is None else swift_problem(self.intermediary_swift),
+            None
+            if self.intermediary_swift is None or self.intermediary_bank
+            else 'intermediary_swift без intermediary_bank: впишите и название банка-посредника',
+            *self._placeholder_problems(),
         ]
+
+    def _placeholder_problems(self) -> list[str]:
+        texts = {
+            'legal_name': self.legal_name,
+            'legal_name_ru': self.legal_name_ru,
+            'owner_name': self.owner_name,
+            'address': self.address,
+            'bank_name': self.bank_name,
+            'bank_address': self.bank_address,
+            'intermediary_bank': self.intermediary_bank,
+            'email': self.email,
+            'website': self.website,
+            'payment_note.en': self.payment_note.en,
+            'payment_note.ru': self.payment_note.ru,
+            **{f'contract_fields.{key}': value for key, value in self.contract_fields.items()},
+        }
+        found = [name for name, value in texts.items() if value and _PLACEHOLDER_WORD.search(value)]
+        if _REPEATED_DIGIT.match(self.id_number.strip()):
+            found.append('id_number')
+        if self.swift_code.startswith(_PLACEHOLDER_SWIFT):
+            found.append('swift')
+        if self.intermediary_swift is not None and self.intermediary_swift.strip().upper().startswith(
+            _PLACEHOLDER_SWIFT
+        ):
+            found.append('intermediary_swift')
+        if self.telegram is not None and 'example' in self.telegram.lower():
+            found.append('telegram')
+        if self.phone is not None and _ZERO_RUN.search(re.sub(r'\D', '', self.phone)):
+            found.append('phone')
+        hint = 'значение-образец из operator.example.toml — впишите свои данные или удалите строку'
+        return [f'{name}: {hint}' for name in found]
 
     @property
     def iban_compact(self) -> str:
@@ -205,6 +327,26 @@ class OperatorProfile(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_
             return self.legal_name_ru
         return self.legal_name
 
+    def issuer(self) -> Issuer:
+        """Снимок реквизитов для счёта: он сохраняется в реестре вместе со счётом."""
+        return Issuer(
+            legal_name=self.legal_name,
+            legal_name_ru=self.legal_name_ru,
+            id_number=self.id_number.strip(),
+            address=self.address,
+            email=self.email.strip(),
+            phone=self.phone,
+            website=self.website,
+            bank_name=self.bank_name,
+            bank_address=self.bank_address,
+            iban=self.iban_compact,
+            swift=self.swift_code,
+            intermediary_bank=self.intermediary_bank,
+            intermediary_swift=None if self.intermediary_swift is None else self.intermediary_swift.strip().upper(),
+            tax_note=self.tax_note,
+            payment_note=self.payment_note,
+        )
+
     def person_name(self, language: Language) -> str:
         """Имя человека для договора: `owner_name` или наименование без «Individual Entrepreneur»."""
         if self.owner_name:
@@ -219,6 +361,8 @@ class OperatorProfile(msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_
 def operator_path(explicit: Path | None, environ: Mapping[str, str]) -> Path:
     """Где искать `operator.toml`: флаг `--operator`, затем `AUTOSTUDIO_OPERATOR`, затем корень репозитория.
 
+    Корень ищется от исходников, а не от текущего каталога (`paths.project_root`).
+
     Args:
         explicit: Путь из флага или None.
         environ: Окружение процесса.
@@ -229,7 +373,7 @@ def operator_path(explicit: Path | None, environ: Mapping[str, str]) -> Path:
     if explicit is not None:
         return explicit
     from_env = environ.get(OPERATOR_ENV, '').strip()
-    return Path(from_env) if from_env else DEFAULT_OPERATOR_PATH
+    return Path(from_env) if from_env else project_root() / OPERATOR_FILE
 
 
 def load_operator(path: Path) -> OperatorProfile:

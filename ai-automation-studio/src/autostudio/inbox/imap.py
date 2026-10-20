@@ -275,7 +275,10 @@ class ImapMailBox:
         self._user = user
         self._password = password
         self._tokens = tokens
-        self._secrets: list[str] = [password] if password else []
+        self._password_secret: tuple[str, ...] = (password,) if password else ()
+        # Токен текущего сеанса — только он: ящик живёт весь цикл `run --every-minutes`, и
+        # история токенов росла бы без предела.
+        self._token: str | None = None
         self._timeout = timeout
         self._connector = connector or _default_connector
         self._conn: ImapConnection | None = None
@@ -286,7 +289,7 @@ class ImapMailBox:
 
     def _scrub(self, text: str) -> str:
         # Сервер иногда повторяет логин в тексте отказа; пароль и токен — тем более не должны утечь.
-        for secret in (*self._secrets, self._user):
+        for secret in (*self._password_secret, self._token, self._user):
             if secret:
                 text = text.replace(secret, '***')
         # imaplib кладёт ответ сервера в исключение как repr байтов: b'[ALERT] …'.
@@ -353,9 +356,8 @@ class ImapMailBox:
     async def _access_token(self) -> str | None:
         if self._tokens is None:
             return None
-        token = await self._tokens.access_token()
-        self._secrets.append(token)
-        return token
+        self._token = await self._tokens.access_token()
+        return self._token
 
     def _login_hint(self, reason: str, responder: XOAuth2Responder | None) -> str:
         if responder is None or self._tokens is None:
@@ -368,6 +370,7 @@ class ImapMailBox:
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
         conn, self._conn = self._conn, None
+        self._token = None
         if conn is not None:
             await asyncio.to_thread(_quiet_logout, conn)
 

@@ -13,6 +13,7 @@ from autostudio.office.invoice import (
     Invoice,
     InvoiceDraft,
     LineItem,
+    check_issue_date,
     load_invoice_request,
     md_text,
     parse_item,
@@ -22,7 +23,8 @@ from autostudio.office.invoice import (
     render_markdown,
     validate_draft,
 )
-from tests.office.helpers import make_draft
+from autostudio.office.operator import PaymentNote, TaxNote
+from tests.office.helpers import TEST_BANK, TEST_NAME_RU, TEST_SWIFT, make_draft, make_issuer, make_profile
 
 HOSTILE = '<script>alert("x")</script> & <b>Co</b>'
 
@@ -33,6 +35,7 @@ def _invoice(items: list[LineItem], **changes: object) -> Invoice:
         items=items,
         currency='USD',
         issue_date=dt.date(2026, 10, 20),
+        issuer=make_issuer(),
     ).numbered('AS-2026-001')
     return msgspec.structs.replace(base, **changes) if changes else base
 
@@ -71,6 +74,13 @@ def test__payload__json_roundtrip__money_as_strings_not_floats():
     assert msgspec.json.decode(raw, type=Invoice) == invoice
 
 
+def test__payload__before_issuer_snapshots__still_decodes():
+    invoice = _invoice([LineItem(description='x', unit_price=Decimal('1'))])
+    old = msgspec.json.encode(msgspec.structs.replace(invoice, issuer=None)).replace(b',"issuer":null', b'')
+    assert b'issuer' not in old
+    assert msgspec.json.decode(old, type=Invoice).issuer is None
+
+
 @pytest.mark.parametrize(
     'description',
     ['IT consulting', 'Consultancy services', 'Консультационные услуги', 'კონსულტაცია'],
@@ -97,6 +107,53 @@ def test__validate__consulting_wording__refused(description):
 def test__validate__bad_draft__config_error(changes, message):
     with pytest.raises(ConfigError, match=message):
         validate_draft(msgspec.structs.replace(make_draft(), **changes))
+
+
+@pytest.mark.parametrize(
+    'changes',
+    [
+        {'notes': 'IT consulting services as agreed'},
+        {'issuer': make_profile(tax_note=TaxNote(en='Consulting services, VAT exempt.')).issuer()},
+        {'issuer': make_profile(payment_note=PaymentNote(ru='Оплата консультаций — через Wise.')).issuer()},
+    ],
+)
+def test__validate__consulting_in_notes_or_operator_texts__refused(changes):
+    with pytest.raises(ConfigError, match='консалтинг'):
+        validate_draft(msgspec.structs.replace(make_draft(), **changes))
+
+
+def test__validate__client_named_consulting__allowed():
+    # Имя клиента — не описание наших услуг: «Acme Consulting LLC» счёт получить может.
+    validate_draft(msgspec.structs.replace(make_draft(), client=ClientParty(name='Acme Consulting LLC')))
+
+
+def test__validate__unit_price_beyond_cents__refused():
+    # 3 × 33.333 печаталось бы как «3 × 33.33 = 100.00» — клиент не сверит строку.
+    draft = msgspec.structs.replace(
+        make_draft(), items=[LineItem(description='Hours', quantity=Decimal(3), unit_price=Decimal('33.333'))]
+    )
+    with pytest.raises(ConfigError, match='2 знаков'):
+        validate_draft(draft)
+    with pytest.raises(ConfigError, match='2 знаков'):
+        parse_item('Hours;3;33.333')
+    with pytest.raises(ConfigError, match='2 знаков'):
+        preset_item('setup', '10.005', 'en')
+    huge = msgspec.structs.replace(make_draft(), items=[LineItem(description='x', unit_price=Decimal('1E+20'))])
+    with pytest.raises(ConfigError, match='12 цифр'):
+        validate_draft(huge)
+
+
+def test__check_issue_date__future_and_old__refused_unless_allowed():
+    today = dt.date(2026, 10, 20)
+    check_issue_date(dt.date(2026, 10, 27), today)
+    check_issue_date(dt.date(2025, 1, 1), today)
+    with pytest.raises(ConfigError, match='--allow-date'):
+        check_issue_date(dt.date(2026, 10, 28), today)
+    with pytest.raises(ConfigError, match='--allow-date'):
+        check_issue_date(dt.date(2062, 10, 10), today)
+    with pytest.raises(ConfigError, match='прошлого года'):
+        check_issue_date(dt.date(2024, 12, 31), today)
+    check_issue_date(dt.date(2062, 10, 10), today, allow=True)
 
 
 def test__preset_item__default_wording__never_consulting():
@@ -129,13 +186,19 @@ def test__period_suffix__en_and_ru():
     assert period_suffix(dt.date(2026, 11, 1), 'ru') == ' — ноябрь 2026'
 
 
-def test__render_html__client_text__escaped(operator):
+def test__period_suffix__several_months__range_across_year():
+    # 3 × 99 за «— November 2026» — неверное содержание счёта: месяцев три.
+    assert period_suffix(dt.date(2026, 11, 1), 'en', months=3) == ' — November 2026 – January 2027'
+    assert period_suffix(dt.date(2026, 11, 1), 'ru', months=2) == ' — ноябрь 2026 – декабрь 2026'
+
+
+def test__render_html__client_text__escaped(issuer):
     invoice = _invoice(
         [LineItem(description=HOSTILE, unit_price=Decimal('10'))],
         client=ClientParty(name=HOSTILE, address=HOSTILE, tax_id=HOSTILE, email=HOSTILE),
         notes=HOSTILE,
     )
-    page = render_html(invoice, operator)
+    page = render_html(invoice, issuer)
     assert '<script>' not in page
     assert '<b>Co</b>' not in page
     assert '&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; &lt;b&gt;Co&lt;/b&gt;' in page
@@ -143,14 +206,15 @@ def test__render_html__client_text__escaped(operator):
     assert not re.search(r'(src|href)=|@import|url\(', page)
 
 
-def test__render_html__payment_block_and_print_css(operator):
+def test__render_html__payment_block_and_print_css(issuer):
     invoice = _invoice([LineItem(description='x', unit_price=Decimal('1250.5'))])
-    page = render_html(invoice, operator)
+    page = render_html(invoice, issuer)
     assert page.startswith('<!doctype html>')
     assert '@page { size: A4' in page
     assert 'GE07 XX00 0000 0000 0000 00' in page
-    assert 'XXXXGE22' in page
-    assert 'JSC Example Bank' in page
+    assert TEST_SWIFT in page
+    assert TEST_BANK in page
+    assert 'Intermediary bank' not in page and 'Bank address' not in page
     assert 'Payment reference' in page and page.count('AS-2026-001') >= 3
     assert 'USD 1,250.50' in page
     assert 'Small Business status holder' in page
@@ -158,23 +222,40 @@ def test__render_html__payment_block_and_print_css(operator):
     assert 'class="stamp"' not in page
 
 
-def test__render_html__russian_and_void__labels_and_stamp(operator):
+def test__render_html__payment_extras__printed_when_set():
+    issuer = make_profile(
+        bank_address='Test Avenue 1, Tbilisi',
+        intermediary_bank='Test Correspondent Bank, New York',
+        intermediary_swift='TSTBUS33',
+        payment_note=PaymentNote(en='US clients: ACH <routing> via Wise.', ru='Клиентам из США: ACH через Wise.'),
+    ).issuer()
+    invoice = _invoice([LineItem(description='x', unit_price=Decimal('10'))])
+    page = render_html(invoice, issuer)
+    assert '<td>Bank address</td><td>Test Avenue 1, Tbilisi</td>' in page
+    assert 'Test Correspondent Bank, New York, SWIFT/BIC TSTBUS33' in page
+    assert 'ACH &lt;routing&gt; via Wise.' in page
+    summary = render_markdown(msgspec.structs.replace(invoice, language='ru'), issuer)
+    assert 'Банк-посредник (USD): Test Correspondent Bank, New York, SWIFT/BIC TSTBUS33' in summary
+    assert 'Клиентам из США: ACH через Wise.' in summary
+
+
+def test__render_html__russian_and_void__labels_and_stamp(issuer):
     invoice = _invoice([LineItem(description='x', unit_price=Decimal('1250.5'))], language='ru', currency='GEL')
-    page = render_html(invoice, operator, status='void')
+    page = render_html(invoice, issuer, status='void')
     assert 'Счёт на оплату' in page
-    assert 'ИП Джейн Пример' in page
+    assert f'ИП {TEST_NAME_RU}' in page
     assert '1 250,50 GEL' in page
     assert 'АННУЛИРОВАН' in page
     assert 'НДС не начисляется' in page
 
 
-def test__render_markdown__summary__escaped_and_complete(operator):
+def test__render_markdown__summary__escaped_and_complete(issuer):
     invoice = _invoice(
         [LineItem(description='Bot | texts', quantity=Decimal(2), unit_price=Decimal('10'))],
         client=ClientParty(name=HOSTILE),
         notes='Thanks',
     )
-    text = render_markdown(invoice, operator, status='void')
+    text = render_markdown(invoice, issuer, status='void')
     assert '<script>' not in text
     assert 'Bot \\| texts' in text
     assert '| 1 | Bot \\| texts | 2 | 10.00 | 20.00 |' in text
@@ -199,7 +280,7 @@ def test__load_invoice_request__presets_and_decimals(tmp_path):
         encoding='utf-8',
     )
     request = load_invoice_request(path)
-    draft = request.draft(default_currency='USD', today=dt.date(2026, 10, 20))
+    draft = request.draft(default_currency='USD', today=dt.date(2026, 10, 20), issuer=make_issuer())
     assert draft.currency == 'EUR'
     assert draft.issue_date == dt.date(2026, 11, 1)
     assert draft.items[0].description == PRESET_WORDING['ru']['setup']
@@ -213,7 +294,7 @@ def test__load_invoice_request__defaults_and_errors(tmp_path):
     path = tmp_path / 'invoice.toml'
     path.write_text('[client]\nname = "X"\n[[items]]\nunit_price = 5\n', encoding='utf-8')
     with pytest.raises(ConfigError, match='description или preset'):
-        load_invoice_request(path).draft(default_currency='GEL', today=dt.date(2026, 10, 20))
+        load_invoice_request(path).draft(default_currency='GEL', today=dt.date(2026, 10, 20), issuer=make_issuer())
     with pytest.raises(ConfigError, match='не найден'):
         load_invoice_request(tmp_path / 'missing.toml')
     path.write_text('[client\n', encoding='utf-8')
@@ -227,7 +308,7 @@ def test__load_invoice_request__defaults_and_errors(tmp_path):
 def test__load_invoice_request__default_currency_and_today(tmp_path: Path):
     path = tmp_path / 'invoice.toml'
     path.write_text('[client]\nname = "X"\n[[items]]\ndescription = "d"\nunit_price = 5\n', encoding='utf-8')
-    draft = load_invoice_request(path).draft(default_currency='GEL', today=dt.date(2026, 10, 20))
+    draft = load_invoice_request(path).draft(default_currency='GEL', today=dt.date(2026, 10, 20), issuer=make_issuer())
     assert draft.currency == 'GEL'
     assert draft.issue_date == dt.date(2026, 10, 20)
     assert draft.language == 'en'
