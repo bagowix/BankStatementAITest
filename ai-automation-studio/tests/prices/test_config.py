@@ -156,6 +156,33 @@ def test__product__invalid__rejected(kwargs, message):
         Product(**{'id': 'p1', 'name': 'Phone', **kwargs})
 
 
+def test__config__bad_offer_in_file__error_names_competitor_and_path(write_toml):
+    text = BASE.format(extra='', own_price='"1"', url='https://a.example/p') + '  selector = "div[class="\n'
+    with pytest.raises(ConfigError) as caught:
+        load_client_config(write_toml(text), PricesConfig)
+    message = str(caught.value)
+    assert 'offer «Shop A»' in message
+    assert '$.prices.products[0].offers[0]' in message
+    assert 'CSS' in message
+
+
+@pytest.mark.parametrize('own_price', ['"1e-99999"', '"12.123456"', '"1e12"'])
+def test__config__absurd_own_price__rejected(write_toml, own_price):
+    with pytest.raises(ConfigError, match='own_price'):
+        load_client_config(write(write_toml, own_price=own_price), PricesConfig)
+
+
+def test__config__own_price_trailing_zeros__accepted(write_toml):
+    config = load_client_config(write(write_toml, own_price='"12.500000"'), PricesConfig)
+    assert config.prices.products[0].own_price == Decimal('12.5')
+
+
+@pytest.mark.parametrize('minutes', ['0.5', '1000'])
+def test__config__max_run_minutes_out_of_range__rejected(write_toml, minutes):
+    with pytest.raises(ConfigError, match='max_run_minutes'):
+        load_client_config(write(write_toml, extra=f'max_run_minutes = {minutes}'), PricesConfig)
+
+
 def test__section__no_products_or_duplicate_ids__rejected():
     with pytest.raises(ConfigError, match='пуст'):
         PricesSection(products=[], contact_email='a@b.example')

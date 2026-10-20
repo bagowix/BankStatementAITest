@@ -52,3 +52,23 @@ def test__highlights__russian_and_unknown_language_fallback():
 def test__highlights__no_events__empty():
     assert highlights([], 'en') == []
     assert highlights([_event('inbox.failed')], 'en') == []
+
+
+def test__highlights__single_lead_draft_and_injection__singular_wording():
+    events = [
+        _event('inbox.triaged', needs_reply='yes'),
+        _event('inbox.draft_created'),
+        _event('inbox.lead_found', urgency='high'),
+        _event('inbox.injection_blocked'),
+    ]
+    en = highlights(events, 'en')
+    assert en[0] == '1 new lead found in the inbox (urgent).'
+    assert en[1] == 'A reply draft was ready for the one email that needed an answer (100%).'
+    assert en[-1] == '1 email with hidden instructions to the AI was blocked — no action was taken on it.'
+    ru = highlights(events, 'ru')
+    assert ru[0] == 'Найдено новых лидов: 1, срочный.'
+    assert ru[1] == 'Писем, ждавших ответа: 1; черновик был готов (100%).'
+
+
+def test__highlights__russian_drafts__no_plural_agreement_needed():
+    assert highlights(EVENTS, 'ru')[1] == 'Писем, ждавших ответа: 2; черновик был готов для 1 (50%).'

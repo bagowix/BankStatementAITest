@@ -264,7 +264,7 @@ def test__is_open_at__lunch_night_closed_date__closed(config):
     ('raw', 'expected'),
     [
         ('Anna', 'Anna'),
-        ('  anna   maria  ', 'anna maria'),
+        ('  anna   maria  ', 'Anna Maria'),
         ('Анна-Мария', 'Анна-Мария'),
         ("O'Brien", "O'Brien"),
         ('A', None),
@@ -274,6 +274,13 @@ def test__is_open_at__lunch_night_closed_date__closed(config):
         ('-Anna', None),
         ('a' * 61, None),
         ('A.', None),
+        ('Меня зовут Анна', 'Анна'),
+        ('my name is anna', 'Anna'),
+        ("I'm Bob", 'Bob'),
+        ('Это Олег.', 'Олег'),
+        ('Яна', 'Яна'),
+        ('Anna Maria Lopez Garcia', None),
+        ('запишите меня пожалуйста на завтра', None),
     ],
 )
 def test__clean_name__inputs__normalized_or_rejected(raw, expected):
@@ -289,6 +296,9 @@ def test__clean_name__inputs__normalized_or_rejected(raw, expected):
         ('8 912 345 67 89', 'RU', False, '+79123456789'),
         ('+49 30 12345678', 'GE', False, '+493012345678'),
         ('995555123456', 'GE', True, '+995555123456'),
+        ('995599123456', 'GE', False, '+995599123456'),  # международный номер без «+»
+        ('+1 000 000 0000', 'GE', True, '+10000000000'),  # свой номер из Telegram — по формату
+        ('+1 000 000 0000', 'GE', False, None),  # чужая карточка — строго
         ('2 34 56 78', 'GE', False, None),  # неполный городской номер — опечатка
         ('12345', 'GE', False, None),
         ('+1234567890123456', 'GE', False, None),
@@ -316,3 +326,31 @@ def test__helpers__minutes_until_and_day_bounds__utc_values():
     assert minutes_until(START + dt.timedelta(hours=1), START) == 60
     start, end = day_bounds(TUE, ZoneInfo('Asia/Tbilisi'))
     assert start == dt.datetime(2026, 10, 19, 20, tzinfo=dt.UTC) and end - start == dt.timedelta(days=1)
+
+
+def test__will_remind__visit_sooner_than_offsets_or_walk_in__false(config):
+    from msgspec.structs import replace
+
+    from autostudio.booking.domain import will_remind
+
+    visit = booking(local(WED, 12))
+    assert will_remind(config, visit, START)
+    assert not will_remind(config, visit, local(WED, 10, 30))  # до визита меньше 2 часов
+    assert not will_remind(config, replace(visit, source='admin'), START)
+
+
+def test__free_slots__day_index_with_buffer_across_midnight__neighbour_day_respected():
+    from autostudio.booking.domain import bookable_days, next_free_slots
+
+    config = make_config(
+        hours={day: ['00:00-24:00'] for day in ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')},
+        buffer_min=60,
+        min_lead_min=0,
+    )
+    # Запись до 23:45 вторника с паузой час задевает начало среды.
+    late = booking(local(TUE, 23))
+    slots = free_slots(config, 'haircut', WED, [late], START, staff_id='giorgi')
+    assert slots[0].start == local(WED, 0, 45)
+    following = next_free_slots(config, 'haircut', [late], local(TUE, 22), limit=5, staff_id='giorgi', start_day=WED)
+    assert following[0].start == local(WED, 0, 45)
+    assert WED in bookable_days(config, 'haircut', [late], START, staff_id='giorgi')

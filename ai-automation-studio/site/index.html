@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoStudio — inbox, booking and price automations for small business</title>
+<meta name="description" content="Fewer missed leads, fewer no-shows, no more checking competitor prices by hand. Three ready-made automations for small businesses, fixed setup price and monthly support. Based in Tbilisi, Georgia.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0a58a8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101318" media="(prefers-color-scheme: dark)">
+<link rel="canonical" href="https://{{DOMAIN}}/">
+<link rel="alternate" hreflang="en" href="https://{{DOMAIN}}/">
+<link rel="alternate" hreflang="ru" href="https://{{DOMAIN}}/ru/">
+<link rel="alternate" hreflang="x-default" href="https://{{DOMAIN}}/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a58a8'/%3E%3Cpath d='M17 47 32 15l15 32M23 36h18' fill='none' stroke='%23fff' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="AutoStudio">
+<meta property="og:title" content="AutoStudio — fewer missed leads, fewer no-shows">
+<meta property="og:description" content="Inbox assistant, Telegram booking bot and competitor price monitor for small businesses. Fixed setup price, monthly support, a report every month.">
+<meta property="og:url" content="https://{{DOMAIN}}/">
+<meta property="og:image" content="https://{{DOMAIN}}/{{PHOTO}}">
+<meta property="og:image:alt" content="Portrait of {{NAME}}">
+<meta property="og:locale" content="en_US">
+<meta property="og:locale:alternate" content="ru_RU">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "ProfessionalService",
+  "@id": "https://{{DOMAIN}}/#business",
+  "name": "AutoStudio",
+  "url": "https://{{DOMAIN}}/",
+  "description": "Ready-made automations for small businesses: inbox assistant, Telegram booking bot and competitor price monitor, with monthly support.",
+  "email": "{{EMAIL}}",
+  "image": "https://{{DOMAIN}}/{{PHOTO}}",
+  "priceRange": "$120–$950",
+  "address": {"@type": "PostalAddress", "addressLocality": "Tbilisi", "addressCountry": "GE"},
+  "founder": {"@type": "Person", "name": "{{NAME}}", "sameAs": ["{{GITHUB}}"]},
+  "sameAs": ["{{GITHUB}}", "https://t.me/{{TELEGRAM}}"],
+  "hasOfferCatalog": {
+    "@type": "OfferCatalog",
+    "name": "Packages",
+    "itemListElement": [
+      {"@type": "Offer", "price": "150", "priceCurrency": "USD", "itemOffered": {"@type": "Service", "name": "Inbox assistant: emails and invoices sorted into Google Sheets"}},
+      {"@type": "Offer", "price": "200", "priceCurrency": "USD", "itemOffered": {"@type": "Service", "name": "Booking bot with reminders"}},
+      {"@type": "Offer", "price": "120", "priceCurrency": "USD", "itemOffered": {"@type": "Service", "name": "Competitor price monitor"}}
+    ]
+  }
+}
+</script>
+<style>
+:root{--bg:#fff;--surface:#f3f5f8;--text:#16191f;--muted:#4b5361;--line:#d5dbe3;--accent:#0a58a8;--on-accent:#fff;--soft:#e7f0fb;--radius:.75rem}
+@media (prefers-color-scheme:dark){:root{--bg:#101318;--surface:#181c23;--text:#e9ecf1;--muted:#b3bac6;--line:#323946;--accent:#7ab8ff;--on-accent:#0b1422;--soft:#16263a}}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{margin:0;background:var(--bg);color:var(--text);font:1.0625rem/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;overflow-wrap:break-word}
+a{color:var(--accent);text-underline-offset:.15em}
+:focus-visible{outline:3px solid var(--accent);outline-offset:3px;border-radius:.25rem}
+img{max-width:100%;height:auto}
+h1,h2,h3{line-height:1.2;margin:0 0 .6rem}
+h1{font-size:clamp(1.9rem,4.2vw + 1rem,3.1rem);letter-spacing:-.02em}
+h2{font-size:clamp(1.5rem,2vw + 1rem,2.1rem);letter-spacing:-.01em}
+h3{font-size:1.2rem}
+p{margin:0 0 1rem}
+ul,ol{margin:0 0 1rem;padding-left:1.2rem}
+li{margin:.3rem 0}
+.wrap{max-width:68rem;margin:0 auto;padding:0 1rem}
+@media (min-width:48rem){.wrap{padding:0 1.5rem}}
+.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.skip{position:absolute;left:-999px;top:.5rem;background:var(--accent);color:var(--on-accent);padding:.6rem 1rem;border-radius:.4rem;z-index:10}
+.skip:focus{left:1rem}
+header.top{border-bottom:1px solid var(--line)}
+.bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5rem 1rem;padding-top:.75rem;padding-bottom:.75rem}
+.brand{display:inline-flex;align-items:center;gap:.5rem;font-weight:700;font-size:1.15rem;color:var(--text);text-decoration:none}
+.links{display:flex;flex-wrap:wrap;gap:.25rem 1rem;list-style:none;margin:0;padding:0}
+.links a{display:inline-block;padding:.5rem 0;color:var(--text);text-decoration:none}
+.links a:hover{text-decoration:underline}
+.lang{display:flex;gap:.25rem;list-style:none;margin:0;padding:0}
+.lang a{display:inline-block;min-width:2.75rem;min-height:2.75rem;line-height:2.75rem;text-align:center;border:1px solid var(--line);border-radius:.5rem;color:var(--text);text-decoration:none;font-weight:600}
+.lang a[aria-current]{background:var(--text);color:var(--bg);border-color:var(--text)}
+section{padding:3rem 0;border-bottom:1px solid var(--line)}
+.hero{padding:3.5rem 0 3rem}
+.lead{font-size:1.2rem;color:var(--muted);max-width:42rem}
+.cta{display:flex;flex-wrap:wrap;gap:.75rem;margin:1.5rem 0 1rem}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:2.9rem;padding:.65rem 1.2rem;border-radius:.6rem;border:2px solid var(--accent);font-weight:650;text-decoration:none}
+.btn-main{background:var(--accent);color:var(--on-accent)}
+.btn-alt{color:var(--accent)}
+.btn:hover{text-decoration:underline}
+.note{font-size:.95rem;color:var(--muted)}
+.ticks{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;list-style:none;padding:0;margin:1.5rem 0 0}
+.ticks li::before{content:"✓ ";color:var(--accent);font-weight:700}
+.grid{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(min(100%,18rem),1fr))}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:1.25rem;display:flex;flex-direction:column}
+.card h3{font-size:1.3rem;margin-bottom:.2rem}
+.tag{color:var(--muted);font-size:.95rem;margin-bottom:1rem}
+.label{font-weight:700;margin:.5rem 0 .25rem}
+.card ul{padding-left:1.1rem}
+.price{margin-top:auto;padding-top:1rem;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline}
+.price strong{font-size:1.25rem}
+.steps{list-style:none;padding:0;counter-reset:s;display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr))}
+.steps li{counter-increment:s;margin:0;padding:1.1rem;border:1px solid var(--line);border-radius:var(--radius)}
+.steps li::before{content:counter(s);display:inline-grid;place-items:center;width:2rem;height:2rem;border-radius:50%;background:var(--soft);color:var(--accent);font-weight:700;margin-bottom:.5rem}
+.steps h3{font-size:1.1rem}
+.steps p{margin:0}
+.me{display:flex;flex-wrap:wrap;gap:1.25rem;align-items:flex-start}
+.me img{width:7rem;height:7rem;object-fit:cover;border-radius:50%;background:var(--surface);border:1px solid var(--line)}
+.me>div{flex:1 1 18rem}
+.proof{background:var(--soft);border-radius:var(--radius);padding:1.25rem;margin:1.5rem 0}
+.formula{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.95rem;background:var(--bg);border:1px solid var(--line);border-radius:.5rem;padding:.6rem .8rem}
+.tw{overflow-x:auto;margin:0 0 1.5rem}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+caption{text-align:left;font-weight:700;padding:0 0 .5rem}
+th,td{padding:.6rem .5rem;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+thead th{border-bottom:2px solid var(--text)}
+td{white-space:nowrap}
+@media (max-width:30rem){th,td{padding:.45rem .2rem;font-size:.9rem}td{white-space:normal}}
+.tiers{margin-bottom:1.5rem}
+.tiers dt{font-weight:700;margin-top:.6rem}
+.tiers dd{margin:0 0 .3rem}
+details{border:1px solid var(--line);border-radius:var(--radius);padding:0 1rem;margin:0 0 .75rem;background:var(--surface)}
+summary{cursor:pointer;font-weight:650;padding:.8rem 0;min-height:2.75rem}
+details[open] summary{border-bottom:1px solid var(--line);margin-bottom:.75rem}
+.contact{list-style:none;padding:0}
+footer{padding:1rem 0 2rem;color:var(--muted);font-size:.95rem}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+<div class="wrap bar">
+<a class="brand" href="./" aria-label="AutoStudio, home">
+<svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><rect width="64" height="64" rx="14" fill="#0a58a8"/><path d="M17 47 32 15l15 32M23 36h18" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+AutoStudio
+</a>
+<nav aria-label="Sections">
+<ul class="links">
+<li><a href="#packages">Packages</a></li>
+<li><a href="#how">How it works</a></li>
+<li><a href="#pricing">Prices</a></li>
+<li><a href="#faq">FAQ</a></li>
+</ul>
+</nav>
+<nav aria-label="Language">
+<ul class="lang">
+<li><a href="./" hreflang="en" aria-current="page">EN<span class="sr"> — English</span></a></li>
+<li><a href="ru/" hreflang="ru">RU<span class="sr" lang="ru"> — Русская версия</span></a></li>
+</ul>
+</nav>
+</div>
+</header>
+
+<main id="main">
+<section class="hero">
+<div class="wrap">
+<h1>Fewer missed leads. Fewer no-shows. No more checking prices by hand.</h1>
+<p class="lead">I set up ready-made automations for small businesses and keep them running for a fixed monthly fee.</p>
+<div class="cta">
+<a class="btn btn-main" href="{{CALENDAR_LINK}}">Book a 15-min call</a>
+<a class="btn btn-alt" href="https://t.me/{{TELEGRAM}}">Write on Telegram</a>
+</div>
+<p class="note">The call is free. If none of the packages fits your business, I will say so.</p>
+<ul class="ticks">
+<li>Fixed price, fixed scope</li>
+<li>Email replies stay drafts until you press Send</li>
+<li>Your accounts and data stay yours</li>
+</ul>
+</div>
+</section>
+
+<section id="packages" aria-labelledby="packages-h">
+<div class="wrap">
+<h2 id="packages-h">Three packages</h2>
+<p class="lead">Each one solves one problem. You pay once for setup, then a monthly plan keeps it running.</p>
+<div class="grid">
+<article class="card">
+<h3>Inbox assistant</h3>
+<p class="tag">Emails and invoices sorted into a Google Sheet</p>
+<p class="label">The problem</p>
+<p>Leads, invoices and customer questions land in one inbox. Some get a late answer. Some get none.</p>
+<p class="label">What you get</p>
+<ul>
+<li>New emails are checked every 10–15 minutes and sorted: lead, support, invoice, newsletter.</li>
+<li>Name, phone, request and budget in your sheet, but only if they are really in the email.</li>
+<li>From Standard: a reply draft in your Drafts folder, in the sender's language. You decide whether to send it.</li>
+<!-- CHECK: PDF invoice extraction is being added. If it is not in the code when you publish, delete "and PDF invoice details" here and in the Standard tier below. -->
+<li>From Standard: a Telegram alert for hot leads, and PDF invoice details (supplier, number, date, total) in an "Invoices" tab.</li>
+</ul>
+<p class="price"><strong>Setup from $150</strong> <a href="#tiers-inbox">See the tiers</a></p>
+</article>
+<article class="card">
+<h3>Booking bot</h3>
+<p class="tag">Bookings around the clock in Telegram</p>
+<p class="label">The problem</p>
+<p>Customers write when you are busy or closed. Some book elsewhere. Some forget and don't come.</p>
+<p class="label">What you get</p>
+<ul>
+<li>Booking with buttons, 24/7: service, staff, day, time, confirm.</li>
+<li>Reminders 24 hours and 2 hours before the visit.</li>
+<li>Customers cancel or move a booking themselves, within your rules.</li>
+<li>A message to you for every booking, cancellation and change.</li>
+<!-- CHECK: Google Calendar and WhatsApp are being added. If they are not in the code when you publish, remove them here and in the tiers below. -->
+<li>From Standard: answers from your own FAQ, a Google Sheets log and Google Calendar. Premium adds WhatsApp on your own business account.</li>
+</ul>
+<p class="price"><strong>Setup from $200</strong> <a href="#tiers-booking">See the tiers</a></p>
+</article>
+<article class="card">
+<h3>Price monitor</h3>
+<p class="tag">Competitor prices in your Google Sheet</p>
+<p class="label">The problem</p>
+<p>You check competitor prices by hand, in dozens of browser tabs. By the time you see a change, it is old news.</p>
+<p class="label">What you get</p>
+<ul>
+<li>Competitor prices next to yours in one sheet, updated on a schedule.</li>
+<li>A Telegram message only when a price moves or a competitor gets cheaper than you.</li>
+<li>Price history, with the page text each price was read from.</li>
+<li>No invented numbers. If a page can't be read, you see the last known price, marked as such.</li>
+<li>Public pages only. Each site's robots.txt rules are respected.</li>
+</ul>
+<p class="price"><strong>Setup from $120</strong> <a href="#tiers-prices">See the tiers</a></p>
+</article>
+</div>
+</div>
+</section>
+
+<section id="how" aria-labelledby="how-h">
+<div class="wrap">
+<h2 id="how-h">How it works</h2>
+<ol class="steps">
+<li><h3>A 15-minute call</h3><p>You tell me where your time goes. I suggest a package and a tier, or tell you honestly that it isn't a fit.</p></li>
+<li><h3>Setup in 3–14 business days</h3><p>You share access and the facts the system may use. I set it up and test it on your real data. You pay 50% to start. The days count from when I have both the access and the payment.</p></li>
+<li><h3>Go-live</h3><p>I show it working on your data. You have 5 business days to check it. The other 50% is due on acceptance. Free fixes for 14 days, 30 on Premium.</p></li>
+<li><h3>Monthly support and a report</h3><p>I host it, watch it and keep it up to date. On the 1st of each month you get a report on what it did.</p></li>
+</ol>
+</div>
+</section>
+
+<section id="support" aria-labelledby="support-h">
+<div class="wrap">
+<h2 id="support-h">What monthly support includes</h2>
+<p class="lead">Support is work you can see, not a "just in case" fee. Every plan includes:</p>
+<div class="grid">
+<div class="card"><h3>I notice failures first</h3><p>Every scheduled run is monitored. If a run fails or the system stops responding, the alert comes to me, not to you.</p></div>
+<div class="card"><h3>A monthly report</h3><p>Built from the system's own log: emails sorted, bookings taken, prices checked, how reliably it ran, and an estimate of hours saved with the method shown.</p></div>
+<div class="card"><h3>Small changes</h3><p>New prices, services, opening hours, FAQ answers, competitors or email categories, within your plan's hours.</p></div>
+<div class="card"><h3>Repairs after outside changes</h3><p>A competitor redesigns their site, a password changes, a provider changes its service. I fix the system so it keeps working. On Care, this counts toward the plan's 1 hour.</p></div>
+<div class="card"><h3>Hosting, backups, updates</h3><p>Hosting on my server, a daily backup of your data, and monthly security updates that are tested before they go live.</p></div>
+<div class="card"><h3>My bugs are on me</h3><p>While you are on a plan, anything I built that doesn't work as described is fixed for free.</p></div>
+</div>
+<p class="note" style="margin-top:1rem">Not included: new features, new integrations or channels, WhatsApp message fees (Meta bills your card directly) and other services' subscriptions.</p>
+</div>
+</section>
+
+<section id="trust" aria-labelledby="trust-h">
+<div class="wrap">
+<h2 id="trust-h">Why trust me with your numbers</h2>
+<div class="me">
+<img src="{{PHOTO}}" alt="Portrait of {{NAME}}" width="112" height="112" loading="lazy" decoding="async">
+<div>
+<p>I'm {{NAME}}, a Python developer with {{YEARS}} years of experience, based in Tbilisi, Georgia. AutoStudio is one person. The person on the call is the person who builds and runs your system.</p>
+<p>My rule is simple: AI suggests, code checks. I use AI models from OpenAI or Anthropic, and my code checks their answers before you see them.</p>
+</div>
+</div>
+<div class="proof">
+<h3>Proof: an agent that checks its own numbers</h3>
+<p>I built an agent that reads bank statements from PDF files, including scans. It extracts every transaction and checks each period against the balances printed in the statement:</p>
+<p class="formula">opening balance + deposits − withdrawals = closing balance</p>
+<p>If the numbers don't add up to the cent, the period is marked "not verified", with the size of the gap and a likely cause. It is never passed off as correct.</p>
+<p>I tested it on real statements from four different banks. Three were fully reconciled without any paid AI. The fourth was a 99-page bundle of ten poorly scanned statements. All ten were reconciled with two AI models, for under $1 in total.</p>
+<p>The inbox package follows the same rule: a phone number or budget that isn't in the email never reaches your sheet.</p>
+<p>Code and write-up: <a href="{{GITHUB}}">{{GITHUB}}</a></p>
+</div>
+<h3>No client reviews here yet</h3>
+<p>I'd rather show you than quote someone you can't check. Before you pay:</p>
+<ul>
+<li>Booking bot: ask for the demo bot link and make a test booking yourself.</li>
+<li>Inbox: with your written permission, I sort your last 20 emails without changing anything in the mailbox and show you the result. You can withdraw access right after.</li>
+<li>Price monitor: send me up to 3 competitor pages. I tell you for free whether the price can be read.</li>
+</ul>
+</div>
+</section>
+
+<section id="pricing" aria-labelledby="pricing-h">
+<div class="wrap">
+<h2 id="pricing-h">Prices</h2>
+<p>Prices are in US dollars, valid from October 2026. Setup is paid once. A support plan is required while I host your system.</p>
+<div class="tw" role="region" aria-labelledby="setup-cap" tabindex="0">
+<table>
+<caption id="setup-cap">One-time setup</caption>
+<thead><tr><th scope="col">Package</th><th scope="col">Basic</th><th scope="col">Standard</th><th scope="col">Premium</th></tr></thead>
+<tbody>
+<tr><th scope="row">Inbox assistant</th><td>$150</td><td>$400</td><td>$900</td></tr>
+<tr><th scope="row">Booking bot</th><td>$200</td><td>$450</td><td>$950</td></tr>
+<tr><th scope="row">Price monitor</th><td>$120</td><td>$300</td><td>$700</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="tiers-inbox">Inbox assistant tiers</h3>
+<dl class="tiers">
+<dt>Basic, $150 · 3 business days</dt><dd>1 mailbox, 5 standard categories, key details in a Google Sheet, newsletters filtered out without AI, monthly report.</dd>
+<dt>Standard, $400 · 6 business days</dt><dd>Up to 8 categories of your own, reply drafts that are never sent automatically, hot-lead alerts in Telegram, PDF invoice details.</dd>
+<dt>Premium, $900 · 12 business days</dt><dd>Up to 3 mailboxes, as many categories as you need, one custom addition of up to 6 hours, 30 days of free fixes.</dd>
+</dl>
+<p class="note">Works with mailboxes that allow IMAP access, such as Gmail, Zoho or Yandex. I check that yours connects before you pay. For Google Workspace, your admin may need to allow access. Outlook and Microsoft 365 work through forwarding to a separate mailbox.</p>
+
+<h3 id="tiers-booking">Booking bot tiers</h3>
+<dl class="tiers">
+<dt>Basic, $200 · 4 business days</dt><dd>Telegram bot, 1 staff member, reminders, self-service cancel and move, a message to you for every booking. Understands simple typed requests like "tomorrow after 5".</dd>
+<dt>Standard, $450 · 7 business days</dt><dd>Up to 3 staff, AI that understands free-form messages, answers from your FAQ, Google Sheets log and Google Calendar.</dd>
+<dt>Premium, $950 · 14 business days plus Meta's review time</dt><dd>Up to 10 staff, WhatsApp on your own WhatsApp Business account, your own wording for every message, a shared chat for your staff.</dd>
+</dl>
+<p class="note">The bot speaks English and Russian. A booking is made only when the customer presses "Confirm". Customer names and phone numbers are not sent to the AI.</p>
+
+<h3 id="tiers-prices">Price monitor tiers</h3>
+<dl class="tiers">
+<dt>Basic, $120 · 3 business days</dt><dd>Up to 3 competitor sites and 200 links, checked once a day.</dd>
+<dt>Standard, $300 · 5 business days</dt><dd>Up to 10 sites and 1,000 links, checked every 6 hours.</dd>
+<dt>Premium, $700 · 10 business days</dt><dd>Up to 20 sites and 2,000 links, checked up to once an hour. AI reads pages without price markup, and a price is accepted only if its quote is found on the page.</dd>
+</dl>
+<p class="note">A link is one product on one competitor's site. The monitor sends at most one request every 5 seconds to each site, so before you order I check that your links fit the schedule. Sites behind a login, a CAPTCHA or bot protection are left out of the quote before you pay. If a site owner asks me to stop, I stop the same day.</p>
+
+<div class="tw" role="region" aria-labelledby="plans-cap" tabindex="0">
+<table>
+<caption id="plans-cap">Monthly support plans</caption>
+<thead><tr><th scope="col"><span class="note">Plan</span></th><th scope="col">Care</th><th scope="col">Pro</th><th scope="col">Business</th></tr></thead>
+<tbody>
+<tr><th scope="row">Per month</th><td>$49</td><td>$149</td><td>$349</td></tr>
+<tr><th scope="row">I reply within</th><td>2 business days</td><td>1 business day</td><td>4 business hours</td></tr>
+<tr><th scope="row">Hours for changes</th><td>1</td><td>4</td><td>10</td></tr>
+<tr><th scope="row">AI operations</th><td>2,000</td><td>10,000</td><td>30,000</td></tr>
+<tr><th scope="row">New small automation</th><td>—</td><td>—</td><td>1 per quarter</td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">An AI operation is one request to the AI model: one email sorted, one typed customer message understood, one page read by AI. Buttons and reminders don't count. Business hours: Monday to Friday, 10:00–19:00 Tbilisi time (UTC+4).</p>
+<p class="note">Custom work is quoted per client before I start: export to QuickBooks, Xero or HubSpot, Instagram or Messenger for the bot, sites that need a full browser, dashboards. I don't build voice assistants, general-purpose chatbots, cold outreach or scraped lead lists.</p>
+<p class="note">Businesses in Georgia can pay in lari. Ask me for the lari price list and the pilot offer for the first three local businesses.</p>
+</div>
+</section>
+
+<section id="faq" aria-labelledby="faq-h">
+<div class="wrap">
+<h2 id="faq-h">Questions</h2>
+<details>
+<summary>What happens to my data?</summary>
+<p>The Google Sheet, the Telegram bot and the WhatsApp account belong to you, and you can withdraw my access at any time. I keep only what the work needs: for bookings, the customer's name, phone, service and time; for the inbox, the sorting results, not your email texts. The AI provider (OpenAI or Anthropic) receives only what each task needs, under its API terms. I sign a data processing agreement with you and share the provider's current terms with it. A clinic's bot keeps only the name, phone, service and time, with no medical details.</p>
+</details>
+<details>
+<summary>What if the AI gets something wrong?</summary>
+<p>It can, so nothing important depends on the AI alone. Email drafts are never sent on their own, and a draft that mentions a figure missing from your facts starts with a warning. A phone number or budget is saved only if it is really in the email. The bot books only when the customer presses "Confirm". A competitor price read by AI is accepted only if its quote is found on the page. Emails that try to give orders to the AI are flagged, and nothing is done with them.</p>
+</details>
+<details>
+<summary>Do I need to install new software?</summary>
+<p>No. You keep your mailbox, Telegram and Google Sheets. Your customers book in Telegram, or also in WhatsApp on Premium, with no extra app. The system runs on my server as part of the support plan.</p>
+</details>
+<details>
+<summary>Can I cancel?</summary>
+<p>Yes. Plans are monthly, and you can cancel any time. The service runs to the end of the paid month, then stops. The Google Sheet, the Telegram bot and the WhatsApp account stay yours. On request, I export your bookings or price history as CSV files. Then I delete your data from my server within 30 days.</p>
+</details>
+<details>
+<summary>What else will I pay for?</summary>
+<p>Only things outside my control. If you use WhatsApp, Meta charges for messages and bills your card directly. I don't resell messages or add a margin. If you go over your plan's AI operations, I warn you at 80%. By default everything keeps working, and the extra costs $2 per 1,000 operations on the next invoice. Or you choose a hard cap: until the 1st the AI pauses, the bot falls back to simple rules, and new emails wait to be sorted.</p>
+</details>
+<details>
+<summary>How do I pay?</summary>
+<p>For setup, 50% before I start and 50% after you accept the work. Support is invoiced on the 1st of each month, in advance. If you found me on Upwork or Fiverr, every payment goes through that platform.</p>
+</details>
+<details>
+<summary>Do you guarantee results?</summary>
+<p>I don't promise more revenue, a set number of bookings or a set drop in no-shows: these depend on your customers. I promise that the system works as described here, and if it doesn't, I fix it.</p>
+</details>
+</div>
+</section>
+
+<section id="contact" aria-labelledby="contact-h">
+<div class="wrap">
+<h2 id="contact-h">Let's talk</h2>
+<p>Tell me which problem costs you the most time. In 15 minutes we'll know whether a package fits.</p>
+<div class="cta">
+<a class="btn btn-main" href="{{CALENDAR_LINK}}">Book a 15-min call</a>
+<a class="btn btn-alt" href="https://t.me/{{TELEGRAM}}">Write on Telegram</a>
+</div>
+<ul class="contact">
+<li>Email: <a href="mailto:{{EMAIL}}">{{EMAIL}}</a></li>
+<li>WhatsApp: <a href="https://wa.me/{{WHATSAPP}}">+{{WHATSAPP}}</a></li>
+<li>I reply in {{LANGUAGES}}.</li>
+</ul>
+</div>
+</section>
+</main>
+
+<footer>
+<div class="wrap bar">
+<p>© 2026 AutoStudio · {{NAME}} · Tbilisi, Georgia · <a href="mailto:{{EMAIL}}">{{EMAIL}}</a></p>
+<nav aria-label="Language (footer)">
+<ul class="lang">
+<li><a href="./" hreflang="en" aria-current="page">EN<span class="sr"> — English</span></a></li>
+<li><a href="ru/" hreflang="ru">RU<span class="sr" lang="ru"> — Русская версия</span></a></li>
+</ul>
+</nav>
+</div>
+</footer>
+</body>
+</html>

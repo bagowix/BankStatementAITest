@@ -24,7 +24,8 @@ async def test__book__sheet_down__booking_still_created_and_logged(app: App, cap
         service_id='haircut', staff_id=None, start=local(WED, 12), customer=ANNA, language='en', source='ai', now=START
     )
     assert app.store.get(booking.id) is not None
-    assert 'не попала в таблицу' in caplog.text
+    await service.drain()
+    assert 'строки не попали во вкладку Bookings' in caplog.text
     assert app.events_of('booking.created')[0].payload['lead_days'] == '1'
 
 

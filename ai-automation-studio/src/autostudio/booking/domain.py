@@ -10,7 +10,9 @@
   раннему толкованию, чтобы услуга точно уложилась до закрытия.
 """
 
+import bisect
 import datetime as dt
+import itertools
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
@@ -244,10 +246,23 @@ def working_intervals(section: BookingSection, member: Staff, weekday: int) -> t
     return _intersect(business, member.hours.for_weekday(weekday))
 
 
-def _clashes(
-    busy: Iterable[tuple[dt.datetime, dt.datetime]], start: dt.datetime, end: dt.datetime, buffer: dt.timedelta
-) -> bool:
-    return any(start < busy_end + buffer and busy_start < end + buffer for busy_start, busy_end in busy)
+class _Busy:
+    """Занятые промежутки одного мастера, отсортированные для поиска делением пополам.
+
+    Проверка «пересекается ли [start, end) с чем-то, с учётом паузы» — это: среди записей,
+    начавшихся раньше `end + buffer`, самая поздно заканчивающаяся кончается позже
+    `start - buffer`. Префиксный максимум концов делает её O(log n) на начало слота даже
+    для пересекающихся записей (их не бывает, но код на это не полагается).
+    """
+
+    def __init__(self, intervals: Iterable[tuple[dt.datetime, dt.datetime]]) -> None:
+        ordered = sorted(intervals)
+        self._starts = [start for start, _ in ordered]
+        self._reach = list(itertools.accumulate((end for _, end in ordered), max))
+
+    def clashes(self, start: dt.datetime, end: dt.datetime, buffer: dt.timedelta) -> bool:
+        index = bisect.bisect_left(self._starts, end + buffer)
+        return index > 0 and self._reach[index - 1] + buffer > start
 
 
 def free_slots(
@@ -293,15 +308,16 @@ def free_slots(
     # Сюда приходят записи на весь горизонт, а функцию зовут на каждый день и каждое нажатие:
     # без отсева по дню проверка каждого начала шла бы по всем записям мастера, и полный
     # календарь большой команды считался бы секундами в цикле событий.
-    busy: dict[str, list[tuple[dt.datetime, dt.datetime]]] = {}
+    intervals: dict[str, list[tuple[dt.datetime, dt.datetime]]] = {}
     load: Counter[str] = Counter()
     for booking in bookings:
         if not booking.active or booking.id == ignore_booking:
             continue
         if booking.end + buffer > day_start and booking.start < day_end + buffer:
-            busy.setdefault(booking.staff_id, []).append((booking.start, booking.end))
+            intervals.setdefault(booking.staff_id, []).append((booking.start, booking.end))
         if day_start <= booking.start < day_end:
             load[booking.staff_id] += 1
+    busy = {member.id: _Busy(intervals.get(member.id, ())) for member in candidates}
     order = {member.id: index for index, member in enumerate(section.staff)}
     step = section.slot_step_min
     offers: dict[dt.datetime, Staff] = {}
@@ -312,7 +328,7 @@ def free_slots(
                 start = wall_to_utc(day, minute, zone)
                 if start is None or start < earliest:
                     continue
-                if start + duration > limit or _clashes(busy.get(member.id, ()), start, start + duration, buffer):
+                if start + duration > limit or busy[member.id].clashes(start, start + duration, buffer):
                     continue
                 current = offers.get(start)
                 if current is None or (load[member.id], order[member.id]) < (load[current.id], order[current.id]):
@@ -321,6 +337,24 @@ def free_slots(
         Slot(service_id=service.id, staff_id=offers[start].id, start=start, end=start + duration)
         for start in sorted(offers)
     ]
+
+
+def _by_day(config: BookingConfig, bookings: Sequence[Booking]) -> dict[dt.date, list[Booking]]:
+    # Многодневный перебор (дни для кнопок, ближайшие слоты) иначе фильтровал бы весь
+    # горизонт записей заново на каждый день. Запись кладётся во все местные дни, которых
+    # касается вместе с паузой мастера: этого достаточно для проверки пересечений в `free_slots`.
+    zone = config.client.zone
+    buffer = dt.timedelta(minutes=config.booking.buffer_min)
+    out: dict[dt.date, list[Booking]] = {}
+    for booking in bookings:
+        if not booking.active:
+            continue
+        day = (booking.start - buffer).astimezone(zone).date()
+        last = (booking.end + buffer).astimezone(zone).date()
+        while day <= last:
+            out.setdefault(day, []).append(booking)
+            day += dt.timedelta(days=1)
+    return out
 
 
 def find_slot(
@@ -379,10 +413,12 @@ def bookable_days(
         Даты по возрастанию.
     """
     out: list[dt.date] = []
+    by_day = _by_day(config, bookings)
     for day in horizon_days(config, now):
         if start_day is not None and day < start_day:
             continue
-        if free_slots(config, service_id, day, bookings, now, staff_id=staff_id, ignore_booking=ignore_booking):
+        around = by_day.get(day, [])
+        if free_slots(config, service_id, day, around, now, staff_id=staff_id, ignore_booking=ignore_booking):
             out.append(day)
             if limit is not None and len(out) >= limit:
                 break
@@ -419,12 +455,12 @@ def next_free_slots(
     """
     zone = config.client.zone
     out: list[Slot] = []
+    by_day = _by_day(config, bookings)
     for day in horizon_days(config, now):
         if start_day is not None and day < start_day:
             continue
-        for slot in free_slots(
-            config, service_id, day, bookings, now, staff_id=staff_id, ignore_booking=ignore_booking
-        ):
+        around = by_day.get(day, [])
+        for slot in free_slots(config, service_id, day, around, now, staff_id=staff_id, ignore_booking=ignore_booking):
             if window is None or window.contains(minute_of_day(slot.start, zone)):
                 out.append(slot)
                 if len(out) >= limit:
@@ -503,7 +539,7 @@ NAME_MAX_WORDS: Final = 3
 # Вводные слова, с которых люди начинают ответ на «как вас записать?»: «Меня зовут Анна»
 # должно стать «Анна», а не именем записи, которое владелец увидит в расписании.
 _NAME_LEAD_IN: Final = re.compile(
-    r"^(?:меня\s+зовут|зовут|мо[её]\s+имя|имя\s*:|запишите\s+(?:на|как)|это|я|"
+    r'^(?:меня\s+зовут|зовут|мо[её]\s+имя|имя\s*:|запишите\s+(?:на|как)|это|я|'
     r"my\s+name\s+is|my\s+name'?s|name\s*:|i\s*['’]\s*m|i\s+am|this\s+is|it\s*['’]\s*s|it\s+is)\s+",
     re.IGNORECASE,
 )

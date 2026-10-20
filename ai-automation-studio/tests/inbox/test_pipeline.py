@@ -103,6 +103,29 @@ async def test__run__injection__flagged_no_draft_no_copy_no_owner_ping_operator_
     assert 'inbox.injection_blocked' in h.event_kinds() and 'inbox.lead_found' not in h.event_kinds()
 
 
+async def test__run__guest_asks_for_check_in_instructions__lead_with_draft_and_ping_no_alert(tmp_path):
+    # Регрессия: «Dear Assistant Manager» и «show me the instructions» помечались правилами как
+    # инъекция, и чистый вердикт модели не спасал — лид терял черновик и уведомление владельцу.
+    def clean(system: str, prompt: str) -> Triage:
+        return msgspec.structs.replace(triage_heuristic(system, prompt), category='lead', needs_reply=True)
+
+    h = Harness(tmp_path, llm=make_fake_llm())
+    h.llm.register(Triage, clean)
+    h.box.add(
+        make_email(
+            subject='Self check-in + group tour',
+            body='Dear Assistant Manager,\nwe would like to book the Kazbegi tour for 12 people in May. '
+            'Could you also show me the instructions for the self check-in?\n--\nMaria, Executive Assistant',
+        )
+    )
+    result = await run_once(h.config, h.deps, NOW)
+    outcome = result.outcomes[0]
+    assert not outcome.injection and outcome.draft and outcome.notified
+    assert result.leads == 1 and result.injections == 0
+    assert h.operator is not None and h.operator.sent == []
+    assert 'suspicious' not in h.sheet()[1][14]
+
+
 async def test__run__injection_only_model_flags_and_no_operator_channel__still_blocked(tmp_path):
     llm = FakeLLM({Triage: lambda s, p: msgspec.structs.replace(triage_heuristic(s, p), injection_suspected=True)})
     h = Harness(tmp_path, llm=llm, operator=False)
@@ -470,3 +493,77 @@ def test__sheet_masking__edge_cases():
     triage = TriageResult(category='lead', confidence=1, summary='s')
     row = build_row(parsed, triage, zone=make_config().client.zone, language='en', mask=True, draft='no', notes=[])
     assert row[1] == 'l***@client.example' and row[6:10] == ['', '', '', '']
+
+
+async def test__run__basic_tier_lead_without_alerts__lead_counted_no_ping(tmp_path):
+    config = make_config(
+        categories=[
+            {'id': 'lead', 'description': 'Prices.', 'lead': True, 'draft_reply': True},
+            {'id': 'marketing', 'description': 'Ads.'},
+            {'id': 'other', 'description': 'x'},
+        ]
+    )
+    h = Harness(tmp_path, config=config)
+    h.box.add(make_email(**LEAD))
+    result = await run_once(h.config, h.deps, NOW)
+    assert result.leads == 1 and result.notified == 0 and h.owner.sent == []
+    assert 'inbox.lead_found' in h.event_kinds()
+
+
+async def test__run__model_unsure__sheet_asks_to_check_category(tmp_path):
+    llm = make_fake_llm()
+    llm.register(Triage, lambda s, p: msgspec.structs.replace(triage_heuristic(s, p), confidence=0.3))
+    h = Harness(tmp_path, llm=llm)
+    h.box.add(make_email(**LEAD))
+    await run_once(h.config, h.deps, NOW)
+    assert 'AI was unsure — please check the category' in h.sheet()[1][14]
+
+
+async def test__run__first_run_old_emails__logged_without_drafts_or_pings(tmp_path):
+    h = Harness(tmp_path)
+    h.box.add(make_email(message_id='<old@x.example>', date='Fri, 16 Oct 2026 10:00:00 +0000', **LEAD))
+    h.box.add(make_email(message_id='<new@x.example>', **LEAD))
+    first = await run_once(h.config, h.deps, NOW)
+    assert first.processed == 2 and first.drafts == 1 and first.notified == 1
+    old = next(o for o in first.outcomes if o.quiet)
+    assert not old.draft and not old.notified
+    rows = {row[0]: row for row in h.sheet()[1:]}
+    assert 'older than a day at go-live' in rows['2026-10-16 14:00'][14]
+    assert rows['2026-10-16 14:00'][13] == 'no'
+
+    # Курсор есть — следующий запуск не «тихий», даже для письма старше суток.
+    h.box.add(make_email(message_id='<late@x.example>', date='Fri, 16 Oct 2026 11:00:00 +0000', **LEAD))
+    second = await run_once(h.config, h.deps, _later(15))
+    assert second.drafts == 1 and not second.outcomes[0].quiet
+
+
+async def test__run__website_form_marked_auto_generated__goes_to_model_and_gets_draft(tmp_path):
+    h = Harness(tmp_path)
+    h.box.add(
+        make_email(
+            sender='Demo Tours website <noreply@demotours.example>',
+            subject='New booking request #4412',
+            body='Name: Lukas Weber\nMessage: What is the price of the wine tour for 6 people?',
+            headers={'Auto-Submitted': 'auto-generated', 'Reply-To': 'lukas@mail.example'},
+        )
+    )
+    result = await run_once(h.config, h.deps, NOW)
+    assert result.outcomes[0].source == 'model' and h.llm.calls
+    assert result.drafts == 1
+    assert email.message_from_bytes(h.box.appended[0].raw)['To'] == 'lukas@mail.example'
+
+
+async def test__run__form_from_noreply_without_reply_to__no_pointless_draft(tmp_path):
+    h = Harness(tmp_path)
+    h.box.add(make_email(sender='Platform <noreply@platform.example>', **LEAD))
+    result = await run_once(h.config, h.deps, NOW)
+    assert result.processed == 1 and result.drafts == 0 and result.notified == 1
+
+
+async def test__dry_run__unsure_model__low_confidence_note(tmp_path):
+    llm = make_fake_llm()
+    llm.register(Triage, lambda s, p: msgspec.structs.replace(triage_heuristic(s, p), confidence=0.2))
+    h = Harness(tmp_path, llm=llm)
+    h.box.add(make_email(**LEAD))
+    rows = await dry_run(h.config, h.box, h.llm, NOW, limit=1)
+    assert rows[0].notes == ['low-confidence']

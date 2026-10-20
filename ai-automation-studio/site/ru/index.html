@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoStudio — автоматизация почты, записи и цен для малого бизнеса</title>
+<meta name="description" content="Меньше потерянных заявок и неявок, цены конкурентов без ручных проверок. Три готовые автоматизации для малого бизнеса: фиксированная цена настройки и поддержка. Тбилиси, Грузия.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0a58a8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101318" media="(prefers-color-scheme: dark)">
+<link rel="canonical" href="https://{{DOMAIN}}/ru/">
+<link rel="alternate" hreflang="en" href="https://{{DOMAIN}}/">
+<link rel="alternate" hreflang="ru" href="https://{{DOMAIN}}/ru/">
+<link rel="alternate" hreflang="x-default" href="https://{{DOMAIN}}/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a58a8'/%3E%3Cpath d='M17 47 32 15l15 32M23 36h18' fill='none' stroke='%23fff' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="AutoStudio">
+<meta property="og:title" content="AutoStudio — меньше потерянных заявок и неявок">
+<meta property="og:description" content="Разбор почты, бот записи в Telegram и монитор цен конкурентов для малого бизнеса. Фиксированная цена настройки, поддержка и отчёт каждый месяц.">
+<meta property="og:url" content="https://{{DOMAIN}}/ru/">
+<meta property="og:image" content="https://{{DOMAIN}}/{{PHOTO}}">
+<meta property="og:image:alt" content="Фото: {{NAME}}">
+<meta property="og:locale" content="ru_RU">
+<meta property="og:locale:alternate" content="en_US">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "ProfessionalService",
+  "@id": "https://{{DOMAIN}}/#business",
+  "name": "AutoStudio",
+  "url": "https://{{DOMAIN}}/ru/",
+  "description": "Готовые автоматизации для малого бизнеса: разбор почты, бот записи в Telegram и монитор цен конкурентов, с ежемесячной поддержкой.",
+  "email": "{{EMAIL}}",
+  "image": "https://{{DOMAIN}}/{{PHOTO}}",
+  "priceRange": "$120–$950",
+  "address": {"@type": "PostalAddress", "addressLocality": "Tbilisi", "addressCountry": "GE"},
+  "founder": {"@type": "Person", "name": "{{NAME}}", "sameAs": ["{{GITHUB}}"]},
+  "sameAs": ["{{GITHUB}}", "https://t.me/{{TELEGRAM}}"],
+  "hasOfferCatalog": {
+    "@type": "OfferCatalog",
+    "name": "Пакеты",
+    "itemListElement": [
+      {"@type": "Offer", "price": "150", "priceCurrency": "USD", "itemOffered": {"@type": "Service", "name": "Разбор почты и счетов в Google-таблицу"}},
+      {"@type": "Offer", "price": "200", "priceCurrency": "USD", "itemOffered": {"@type": "Service", "name": "Бот записи с напоминаниями"}},
+      {"@type": "Offer", "price": "120", "priceCurrency": "USD", "itemOffered": {"@type": "Service", "name": "Монитор цен конкурентов"}}
+    ]
+  }
+}
+</script>
+<style>
+:root{--bg:#fff;--surface:#f3f5f8;--text:#16191f;--muted:#4b5361;--line:#d5dbe3;--accent:#0a58a8;--on-accent:#fff;--soft:#e7f0fb;--radius:.75rem}
+@media (prefers-color-scheme:dark){:root{--bg:#101318;--surface:#181c23;--text:#e9ecf1;--muted:#b3bac6;--line:#323946;--accent:#7ab8ff;--on-accent:#0b1422;--soft:#16263a}}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{margin:0;background:var(--bg);color:var(--text);font:1.0625rem/1.6 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;overflow-wrap:break-word;hyphens:auto}
+a{color:var(--accent);text-underline-offset:.15em}
+:focus-visible{outline:3px solid var(--accent);outline-offset:3px;border-radius:.25rem}
+img{max-width:100%;height:auto}
+h1,h2,h3{line-height:1.2;margin:0 0 .6rem;hyphens:manual}
+h1{font-size:clamp(1.8rem,4vw + 1rem,3rem);letter-spacing:-.02em}
+h2{font-size:clamp(1.5rem,2vw + 1rem,2.1rem);letter-spacing:-.01em}
+h3{font-size:1.2rem}
+p{margin:0 0 1rem}
+ul,ol{margin:0 0 1rem;padding-left:1.2rem}
+li{margin:.3rem 0}
+.wrap{max-width:68rem;margin:0 auto;padding:0 1rem}
+@media (min-width:48rem){.wrap{padding:0 1.5rem}}
+.sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.skip{position:absolute;left:-999px;top:.5rem;background:var(--accent);color:var(--on-accent);padding:.6rem 1rem;border-radius:.4rem;z-index:10}
+.skip:focus{left:1rem}
+header.top{border-bottom:1px solid var(--line)}
+.bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5rem 1rem;padding-top:.75rem;padding-bottom:.75rem}
+.brand{display:inline-flex;align-items:center;gap:.5rem;font-weight:700;font-size:1.15rem;color:var(--text);text-decoration:none}
+.links{display:flex;flex-wrap:wrap;gap:.25rem 1rem;list-style:none;margin:0;padding:0}
+.links a{display:inline-block;padding:.5rem 0;color:var(--text);text-decoration:none}
+.links a:hover{text-decoration:underline}
+.lang{display:flex;gap:.25rem;list-style:none;margin:0;padding:0}
+.lang a{display:inline-block;min-width:2.75rem;min-height:2.75rem;line-height:2.75rem;text-align:center;border:1px solid var(--line);border-radius:.5rem;color:var(--text);text-decoration:none;font-weight:600}
+.lang a[aria-current]{background:var(--text);color:var(--bg);border-color:var(--text)}
+section{padding:3rem 0;border-bottom:1px solid var(--line)}
+.hero{padding:3.5rem 0 3rem}
+.lead{font-size:1.2rem;color:var(--muted);max-width:42rem}
+.cta{display:flex;flex-wrap:wrap;gap:.75rem;margin:1.5rem 0 1rem}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:2.9rem;padding:.65rem 1.2rem;border-radius:.6rem;border:2px solid var(--accent);font-weight:650;text-decoration:none}
+.btn-main{background:var(--accent);color:var(--on-accent)}
+.btn-alt{color:var(--accent)}
+.btn:hover{text-decoration:underline}
+.note{font-size:.95rem;color:var(--muted)}
+.ticks{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;list-style:none;padding:0;margin:1.5rem 0 0}
+.ticks li::before{content:"✓ ";color:var(--accent);font-weight:700}
+.grid{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(min(100%,18rem),1fr))}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:1.25rem;display:flex;flex-direction:column}
+.card h3{font-size:1.3rem;margin-bottom:.2rem}
+.tag{color:var(--muted);font-size:.95rem;margin-bottom:1rem}
+.label{font-weight:700;margin:.5rem 0 .25rem}
+.card ul{padding-left:1.1rem}
+.price{margin-top:auto;padding-top:1rem;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;justify-content:space-between;gap:.5rem;align-items:baseline}
+.price strong{font-size:1.25rem}
+.steps{list-style:none;padding:0;counter-reset:s;display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr))}
+.steps li{counter-increment:s;margin:0;padding:1.1rem;border:1px solid var(--line);border-radius:var(--radius)}
+.steps li::before{content:counter(s);display:inline-grid;place-items:center;width:2rem;height:2rem;border-radius:50%;background:var(--soft);color:var(--accent);font-weight:700;margin-bottom:.5rem}
+.steps h3{font-size:1.1rem}
+.steps p{margin:0}
+.me{display:flex;flex-wrap:wrap;gap:1.25rem;align-items:flex-start}
+.me img{width:7rem;height:7rem;object-fit:cover;border-radius:50%;background:var(--surface);border:1px solid var(--line)}
+.me>div{flex:1 1 18rem}
+.proof{background:var(--soft);border-radius:var(--radius);padding:1.25rem;margin:1.5rem 0}
+.formula{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.95rem;background:var(--bg);border:1px solid var(--line);border-radius:.5rem;padding:.6rem .8rem}
+.tw{overflow-x:auto;margin:0 0 1.5rem}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+caption{text-align:left;font-weight:700;padding:0 0 .5rem}
+th,td{padding:.6rem .5rem;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+thead th{border-bottom:2px solid var(--text)}
+td{white-space:nowrap}
+@media (max-width:30rem){th,td{padding:.45rem .2rem;font-size:.9rem}td{white-space:normal}}
+.tiers{margin-bottom:1.5rem}
+.tiers dt{font-weight:700;margin-top:.6rem}
+.tiers dd{margin:0 0 .3rem}
+.pilot{border:2px solid var(--accent);border-radius:var(--radius);padding:1.25rem;margin:0 0 1.5rem}
+details{border:1px solid var(--line);border-radius:var(--radius);padding:0 1rem;margin:0 0 .75rem;background:var(--surface)}
+summary{cursor:pointer;font-weight:650;padding:.8rem 0;min-height:2.75rem}
+details[open] summary{border-bottom:1px solid var(--line);margin-bottom:.75rem}
+.contact{list-style:none;padding:0}
+footer{padding:1rem 0 2rem;color:var(--muted);font-size:.95rem}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Перейти к содержанию</a>
+<header class="top">
+<div class="wrap bar">
+<a class="brand" href="./" aria-label="AutoStudio, главная">
+<svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><rect width="64" height="64" rx="14" fill="#0a58a8"/><path d="M17 47 32 15l15 32M23 36h18" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+AutoStudio
+</a>
+<nav aria-label="Разделы">
+<ul class="links">
+<li><a href="#packages">Пакеты</a></li>
+<li><a href="#how">Как это работает</a></li>
+<li><a href="#pricing">Цены</a></li>
+<li><a href="#faq">Вопросы</a></li>
+</ul>
+</nav>
+<nav aria-label="Язык">
+<ul class="lang">
+<li><a href="../" hreflang="en">EN<span class="sr" lang="en"> — English version</span></a></li>
+<li><a href="./" hreflang="ru" aria-current="page">RU<span class="sr"> — русская версия</span></a></li>
+</ul>
+</nav>
+</div>
+</header>
+
+<main id="main">
+<section class="hero">
+<div class="wrap">
+<h1>Меньше потерянных заявок. Меньше неявок. Цены конкурентов — без ручных проверок.</h1>
+<p class="lead">Настраиваю готовые автоматизации для малого бизнеса и слежу, чтобы они работали, за фиксированную плату в месяц.</p>
+<div class="cta">
+<a class="btn btn-main" href="{{CALENDAR_LINK}}">Созвониться на 15 минут</a>
+<a class="btn btn-alt" href="https://t.me/{{TELEGRAM}}">Написать в Telegram</a>
+</div>
+<p class="note">Звонок бесплатный. Если ни один пакет вам не подходит, я так и скажу.</p>
+<ul class="ticks">
+<li>Фиксированная цена и объём работ</li>
+<li>Ответы на письма — черновики, отправляете вы</li>
+<li>Аккаунты и данные остаются вашими</li>
+</ul>
+</div>
+</section>
+
+<section id="packages" aria-labelledby="packages-h">
+<div class="wrap">
+<h2 id="packages-h">Три пакета</h2>
+<p class="lead">Каждый решает одну задачу. Настройку вы оплачиваете один раз, дальше систему поддерживает абонентский тариф.</p>
+<div class="grid">
+<article class="card">
+<h3>Разбор почты</h3>
+<p class="tag">Письма и счета — в Google-таблицу</p>
+<p class="label">Проблема</p>
+<p>Заявки, счета и вопросы клиентов приходят в один ящик. На часть отвечают поздно, на часть — никогда.</p>
+<p class="label">Что вы получаете</p>
+<ul>
+<li>Новые письма проверяются каждые 10–15 минут и разбираются: заявка, поддержка, счёт, рассылка.</li>
+<li>Имя, телефон, запрос и бюджет — в таблице, но только если они действительно есть в письме.</li>
+<li>От Standard: черновик ответа в папке «Черновики» на языке отправителя. Отправлять или нет, решаете вы.</li>
+<!-- CHECK: извлечение PDF-счетов дописывается. Если его нет в коде на момент публикации, уберите «и данные PDF-счетов…» здесь и в тарифе Standard ниже. -->
+<li>От Standard: сообщение в Telegram о горячей заявке и данные PDF-счетов (поставщик, номер, дата, сумма) на отдельной вкладке.</li>
+</ul>
+<p class="price"><strong>Настройка от $150</strong> <a href="#tiers-inbox">Тарифы</a></p>
+<p class="note">В Грузии — от 390 ₾</p>
+</article>
+<article class="card">
+<h3>Бот записи</h3>
+<p class="tag">Запись круглосуточно в Telegram</p>
+<p class="label">Проблема</p>
+<p>Клиенты пишут, когда вы заняты или закрыты. Часть записывается к другим. Часть забывает о визите и не приходит.</p>
+<p class="label">Что вы получаете</p>
+<ul>
+<li>Запись кнопками 24/7: услуга, мастер, день, время, подтверждение.</li>
+<li>Напоминания за 24 часа и за 2 часа до визита.</li>
+<li>Клиент сам отменяет или переносит запись — в пределах ваших правил.</li>
+<li>Вам — сообщение о каждой записи, отмене и переносе.</li>
+<!-- CHECK: Google Календарь и WhatsApp дописываются. Если их нет в коде на момент публикации, уберите их здесь и в тарифах ниже. -->
+<li>От Standard: ответы по вашему FAQ, журнал в Google Sheets и Google Календарь. В Premium — WhatsApp на вашем бизнес-аккаунте.</li>
+</ul>
+<p class="price"><strong>Настройка от $200</strong> <a href="#tiers-booking">Тарифы</a></p>
+<p class="note">В Грузии — от 390 ₾</p>
+</article>
+<article class="card">
+<h3>Монитор цен</h3>
+<p class="tag">Цены конкурентов — в вашей Google-таблице</p>
+<p class="label">Проблема</p>
+<p>Вы проверяете цены конкурентов вручную, в десятках вкладок. Когда замечаете изменение, оно уже не новость.</p>
+<p class="label">Что вы получаете</p>
+<ul>
+<li>Цены конкурентов рядом с вашими в одной таблице, по расписанию.</li>
+<li>Сообщение в Telegram — только когда цена изменилась или конкурент стал дешевле вас.</li>
+<li>История цен с текстом со страницы, из которого прочитана каждая цена.</li>
+<li>Никаких выдуманных цифр: если страница не читается, видна последняя известная цена с пометкой.</li>
+<li>Только публичные страницы. Правила robots.txt каждого сайта соблюдаются.</li>
+</ul>
+<p class="price"><strong>Настройка от $120</strong> <a href="#tiers-prices">Тарифы</a></p>
+<p class="note">В Грузии — от 290 ₾</p>
+</article>
+</div>
+</div>
+</section>
+
+<section id="how" aria-labelledby="how-h">
+<div class="wrap">
+<h2 id="how-h">Как это работает</h2>
+<ol class="steps">
+<li><h3>Звонок на 15 минут</h3><p>Вы рассказываете, куда уходит время. Я предлагаю пакет и тариф или честно говорю, что он не подойдёт.</p></li>
+<li><h3>Настройка за 3–14 рабочих дней</h3><p>Вы даёте доступы и факты, которыми система может пользоваться. Я настраиваю и проверяю её на ваших реальных данных. Предоплата 50%. Срок считается с момента, когда у меня есть доступы и оплата.</p></li>
+<li><h3>Запуск</h3><p>Показываю работу на ваших данных. У вас 5 рабочих дней на проверку, затем оплата остальных 50%. Бесплатные исправления 14 дней, в Premium — 30.</p></li>
+<li><h3>Поддержка и отчёт каждый месяц</h3><p>Система работает на моём сервере, я слежу за ней и обновляю. 1-го числа вы получаете отчёт о том, что она сделала.</p></li>
+</ol>
+</div>
+</section>
+
+<section id="support" aria-labelledby="support-h">
+<div class="wrap">
+<h2 id="support-h">Что входит в поддержку</h2>
+<p class="lead">Абонентская плата — это работа, которую видно. В каждом тарифе:</p>
+<div class="grid">
+<div class="card"><h3>Сбой замечаю я, а не вы</h3><p>Каждый плановый запуск под наблюдением. Если запуск упал или система не отвечает, сигнал приходит мне.</p></div>
+<div class="card"><h3>Отчёт раз в месяц</h3><p>Из журнала самой системы: сколько писем разобрано, записей принято, цен проверено, насколько стабильно всё работало и сколько часов сэкономлено — с методикой оценки.</p></div>
+<div class="card"><h3>Мелкие правки</h3><p>Новые цены, услуги, часы работы, ответы FAQ, конкуренты, категории писем — в пределах часов тарифа.</p></div>
+<div class="card"><h3>Ремонт после внешних изменений</h3><p>Конкурент переделал сайт, сменился пароль, сервис изменил условия — чиню, чтобы всё работало. В Care это входит в 1 час тарифа.</p></div>
+<div class="card"><h3>Хостинг, копии, обновления</h3><p>Сервер, ежедневная резервная копия ваших данных и ежемесячные обновления безопасности, проверенные перед выкладкой.</p></div>
+<div class="card"><h3>Мои ошибки — за мой счёт</h3><p>Пока действует тариф, всё, что я сделал и что работает не так, как описано, исправляю бесплатно.</p></div>
+</div>
+<p class="note" style="margin-top:1rem">Не входит: новые функции, интеграции и каналы, оплата сообщений WhatsApp (Meta списывает её с вашей карты напрямую) и подписки на сторонние сервисы.</p>
+</div>
+</section>
+
+<section id="trust" aria-labelledby="trust-h">
+<div class="wrap">
+<h2 id="trust-h">Почему мне можно доверить ваши цифры</h2>
+<div class="me">
+<img src="../{{PHOTO}}" alt="Фото: {{NAME}}" width="112" height="112" loading="lazy" decoding="async">
+<div>
+<p>Я {{NAME}}, Python-разработчик, опыт — {{YEARS}} лет. Живу и работаю в Тбилиси. AutoStudio — это один человек: тот, с кем вы говорите на звонке, и строит, и поддерживает вашу систему.</p>
+<p>Мой принцип: ИИ предлагает, код проверяет. Я использую модели OpenAI или Anthropic, а код проверяет их ответы до того, как вы их увидите.</p>
+</div>
+</div>
+<div class="proof">
+<h3>Доказательство: агент, который сам проверяет свои цифры</h3>
+<p>Я сделал агента, который читает банковские выписки из PDF, включая сканы. Он извлекает все операции и сверяет каждый период с остатками, напечатанными в выписке:</p>
+<p class="formula">остаток на начало + приход − расход = остаток на конец</p>
+<p>Если цифры не сошлись до цента, период помечается «не подтверждено» — с размером расхождения и вероятной причиной. За верный он не выдаётся никогда.</p>
+<p>Проверил на реальных выписках четырёх разных банков. Три сведены полностью без платного ИИ. Четвёртая — подшивка из десяти плохо отсканированных выписок на 99 страницах: все десять сведены с помощью двух ИИ-моделей меньше чем за $1.</p>
+<p>Разбор почты работает по тому же правилу: телефона или бюджета, которых нет в письме, в вашей таблице не будет.</p>
+<p>Код и описание: <a href="{{GITHUB}}">{{GITHUB}}</a></p>
+</div>
+<h3>Отзывов клиентов здесь пока нет</h3>
+<p>Лучше покажу, чем процитирую того, кого вы не сможете проверить. До оплаты:</p>
+<ul>
+<li>Бот записи: попросите ссылку на демо-бота и запишитесь сами.</li>
+<li>Почта: с вашего письменного согласия разберу последние 20 писем, ничего не меняя в ящике, и покажу результат. Доступ можно сразу отозвать.</li>
+<li>Монитор цен: пришлите до 3 страниц конкурентов — бесплатно скажу, читается ли цена.</li>
+</ul>
+</div>
+</section>
+
+<section id="pricing" aria-labelledby="pricing-h">
+<div class="wrap">
+<h2 id="pricing-h">Цены</h2>
+<p>Цены в долларах США, действуют с октября 2026 года. Настройка оплачивается один раз. Пока система работает на моём сервере, нужен тариф поддержки. Для бизнеса в Грузии — <a href="#gel">цены в лари</a>.</p>
+<div class="tw" role="region" aria-labelledby="setup-cap" tabindex="0">
+<table>
+<caption id="setup-cap">Настройка, разово</caption>
+<thead><tr><th scope="col">Пакет</th><th scope="col">Basic</th><th scope="col">Standard</th><th scope="col">Premium</th></tr></thead>
+<tbody>
+<tr><th scope="row">Разбор почты</th><td>$150</td><td>$400</td><td>$900</td></tr>
+<tr><th scope="row">Бот записи</th><td>$200</td><td>$450</td><td>$950</td></tr>
+<tr><th scope="row">Монитор цен</th><td>$120</td><td>$300</td><td>$700</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="tiers-inbox">Разбор почты: тарифы</h3>
+<dl class="tiers">
+<dt>Basic, $150 · 3 рабочих дня</dt><dd>1 ящик, 5 стандартных категорий, ключевые данные в Google-таблице, рассылки отсеиваются без ИИ, месячный отчёт.</dd>
+<dt>Standard, $400 · 6 рабочих дней</dt><dd>До 8 своих категорий, черновики ответов (сами никогда не отправляются), сигналы о горячих заявках в Telegram, данные PDF-счетов.</dd>
+<dt>Premium, $900 · 12 рабочих дней</dt><dd>До 3 ящиков, категорий сколько нужно, одна доработка под вас до 6 часов, 30 дней бесплатных исправлений.</dd>
+</dl>
+<p class="note">Подходят ящики с доступом по IMAP, например Gmail, Яндекс или Zoho; ваш я проверю до оплаты. Для Google Workspace может понадобиться разрешение администратора. Outlook и Microsoft 365 — через пересылку в отдельный ящик.</p>
+
+<h3 id="tiers-booking">Бот записи: тарифы</h3>
+<dl class="tiers">
+<dt>Basic, $200 · 4 рабочих дня</dt><dd>Бот в Telegram, 1 мастер, напоминания, отмена и перенос самим клиентом, сообщение вам о каждой записи. Понимает простые фразы вроде «завтра после 5».</dd>
+<dt>Standard, $450 · 7 рабочих дней</dt><dd>До 3 мастеров, ИИ понимает сообщения, написанные своими словами, ответы по вашему FAQ, журнал в Google Sheets и Google Календарь.</dd>
+<dt>Premium, $950 · 14 рабочих дней + проверка Meta</dt><dd>До 10 мастеров, WhatsApp на вашем аккаунте WhatsApp Business, свои тексты всех сообщений, общий чат сотрудников.</dd>
+</dl>
+<p class="note">Бот говорит по-русски и по-английски. Запись создаётся, только когда клиент нажал «Подтвердить». Имена и телефоны клиентов в ИИ не передаются.</p>
+
+<h3 id="tiers-prices">Монитор цен: тарифы</h3>
+<dl class="tiers">
+<dt>Basic, $120 · 3 рабочих дня</dt><dd>До 3 сайтов конкурентов и 200 ссылок, проверка раз в день.</dd>
+<dt>Standard, $300 · 5 рабочих дней</dt><dd>До 10 сайтов и 1 000 ссылок, проверка каждые 6 часов.</dd>
+<dt>Premium, $700 · 10 рабочих дней</dt><dd>До 20 сайтов и 2 000 ссылок, проверка до раза в час. ИИ читает страницы без разметки цены, и цена принимается, только если её цитата найдена на странице.</dd>
+</dl>
+<p class="note">Ссылка — один товар на сайте одного конкурента. К одному сайту — не чаще запроса в 5 секунд, поэтому до заказа я проверяю, что ссылки укладываются в расписание. Сайты за логином, капчей или защитой от ботов исключаются из сметы до оплаты. Если владелец сайта просит прекратить, прекращаю в тот же день.</p>
+
+<div class="tw" role="region" aria-labelledby="plans-cap" tabindex="0">
+<table>
+<caption id="plans-cap">Тарифы поддержки, в месяц</caption>
+<thead><tr><th scope="col"><span class="note">Тариф</span></th><th scope="col">Care</th><th scope="col">Pro</th><th scope="col">Business</th></tr></thead>
+<tbody>
+<tr><th scope="row">В месяц</th><td>$49</td><td>$149</td><td>$349</td></tr>
+<tr><th scope="row">Отвечаю в течение</th><td>2 рабочих дней</td><td>1 рабочего дня</td><td>4 рабочих часов</td></tr>
+<tr><th scope="row">Часы на правки</th><td>1</td><td>4</td><td>10</td></tr>
+<tr><th scope="row">ИИ-операции</th><td>2 000</td><td>10 000</td><td>30 000</td></tr>
+<tr><th scope="row">Новая доработка</th><td>—</td><td>—</td><td>1 в квартал</td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">ИИ-операция — один запрос к модели: разобранное письмо, понятое сообщение клиента, страница, прочитанная ИИ. Кнопки и напоминания не считаются. Рабочее время: пн–пт, 10:00–19:00 по Тбилиси (UTC+4).</p>
+<p class="note">Доработки вне пакетов оцениваю до начала работы: выгрузка в QuickBooks, Xero или HubSpot, Instagram или Messenger для бота, сайты, которым нужен полноценный браузер, дашборды, бот на грузинском. Не делаю голосовых ассистентов, чат-ботов общего назначения, холодных рассылок и баз контактов, собранных с сайтов.</p>
+
+<h3 id="gel">Для бизнеса в Грузии — в лари</h3>
+<p>Те же пакеты и тарифы. Оплата переводом в лари на счёт в грузинском банке.</p>
+<div class="tw" role="region" aria-labelledby="gel-cap" tabindex="0">
+<table>
+<caption id="gel-cap">Цены в лари</caption>
+<thead><tr><th scope="col">Пакет</th><th scope="col">Basic</th><th scope="col">Standard</th><th scope="col">Premium</th></tr></thead>
+<tbody>
+<tr><th scope="row">Разбор почты</th><td>390 ₾</td><td>990 ₾</td><td>1 990 ₾</td></tr>
+<tr><th scope="row">Бот записи</th><td>390 ₾</td><td>890 ₾</td><td>1 690 ₾</td></tr>
+<tr><th scope="row">Монитор цен</th><td>290 ₾</td><td>690 ₾</td><td>1 490 ₾</td></tr>
+<tr><th scope="row">Поддержка в месяц: Care, Pro, Business</th><td>99 ₾</td><td>249 ₾</td><td>590 ₾</td></tr>
+</tbody>
+</table>
+</div>
+<div class="pilot">
+<h3>Пилот для первых трёх бизнесов в Грузии</h3>
+<p>Скидка 50% на настройку в обмен на кейс. Через два месяца работы я публикую ваши результаты из месячного отчёта, а вы даёте 20-минутное интервью. Текст вы утверждаете до публикации, имя и логотип — только с вашего согласия.</p>
+<p class="note">Оценок и отзывов на Google Maps и других площадках я не прошу. В кейсе будет сказано, что вы получили скидку. Поддержка — по обычной цене.</p>
+</div>
+</div>
+</section>
+
+<section id="faq" aria-labelledby="faq-h">
+<div class="wrap">
+<h2 id="faq-h">Вопросы</h2>
+<details>
+<summary>Что будет с моими данными?</summary>
+<p>Google-таблица, бот в Telegram и аккаунт WhatsApp принадлежат вам, мой доступ можно отозвать в любой момент. Я храню только то, что нужно для работы: для записи — имя, телефон, услугу и время; для почты — результаты разбора, а не тексты писем. Провайдер ИИ (OpenAI или Anthropic) получает только то, что нужно для конкретной задачи, по своим условиям API. Я подписываю с вами соглашение об обработке данных и прикладываю актуальные условия провайдера. Бот клиники хранит только имя, телефон, услугу и время, без медицинских сведений.</p>
+</details>
+<details>
+<summary>Что, если ИИ ошибётся?</summary>
+<p>Такое возможно, поэтому ничего важного не зависит только от ИИ. Черновики писем никогда не отправляются сами, а черновик с цифрой, которой нет в ваших фактах, начинается с предупреждения. Телефон или бюджет сохраняются, только если они действительно есть в письме. Бот записывает, только когда клиент нажал «Подтвердить». Цена конкурента, прочитанная ИИ, принимается, только если её цитата найдена на странице. Письма, которые пытаются командовать ИИ, помечаются, и по ним ничего не делается.</p>
+</details>
+<details>
+<summary>Нужно ли ставить новые программы?</summary>
+<p>Нет. Вы остаётесь в своей почте, Telegram и Google Sheets. Ваши клиенты записываются в Telegram, а в Premium — и в WhatsApp, без отдельного приложения. Система работает на моём сервере и входит в тариф поддержки.</p>
+</details>
+<details>
+<summary>Можно ли отказаться?</summary>
+<p>Да. Тарифы помесячные, отказаться можно в любой момент. Сервис работает до конца оплаченного месяца и затем останавливается. Google-таблица, бот и аккаунт WhatsApp остаются вашими. По запросу выгружу записи или историю цен в CSV, затем удалю ваши данные со своего сервера в течение 30 дней.</p>
+</details>
+<details>
+<summary>За что ещё придётся платить?</summary>
+<p>Только за то, что от меня не зависит. Если вы используете WhatsApp, сообщения оплачиваются Meta напрямую с вашей карты. Я не перепродаю сообщения и не делаю наценку. Если вы выходите за лимит ИИ-операций, я предупрежу на 80%. По умолчанию всё продолжает работать, а сверхлимит стоит $2 за 1 000 операций в следующем счёте. Или вы выбираете жёсткий лимит: до 1-го числа ИИ отключается, бот переходит на простые правила, а новые письма ждут разбора.</p>
+</details>
+<details>
+<summary>Как оплачивать?</summary>
+<p>Настройка: 50% до начала работы, 50% после приёмки. Поддержка: счёт 1-го числа за месяц вперёд. В Грузии — переводом в лари. Если вы нашли меня на Upwork или Fiverr, все платежи идут через площадку.</p>
+</details>
+<details>
+<summary>С кем вы работаете?</summary>
+<p>С малым бизнесом в Грузии и в других странах. Проекты для бизнеса в России и Беларуси не беру.</p>
+</details>
+<details>
+<summary>Вы гарантируете результат?</summary>
+<p>Я не обещаю рост выручки, определённое число записей или процент снижения неявок: это зависит от ваших клиентов. Я обещаю, что система работает так, как описано здесь, а если нет — исправлю.</p>
+</details>
+</div>
+</section>
+
+<section id="contact" aria-labelledby="contact-h">
+<div class="wrap">
+<h2 id="contact-h">Давайте обсудим</h2>
+<p>Расскажите, какая задача отнимает у вас больше всего времени. За 15 минут поймём, подходит ли пакет.</p>
+<div class="cta">
+<a class="btn btn-main" href="{{CALENDAR_LINK}}">Созвониться на 15 минут</a>
+<a class="btn btn-alt" href="https://t.me/{{TELEGRAM}}">Написать в Telegram</a>
+</div>
+<ul class="contact">
+<li>Почта: <a href="mailto:{{EMAIL}}">{{EMAIL}}</a></li>
+<li>WhatsApp: <a href="https://wa.me/{{WHATSAPP}}">+{{WHATSAPP}}</a></li>
+</ul>
+</div>
+</section>
+</main>
+
+<footer>
+<div class="wrap bar">
+<p>© 2026 AutoStudio · {{NAME}} · Тбилиси, Грузия · <a href="mailto:{{EMAIL}}">{{EMAIL}}</a></p>
+<nav aria-label="Язык (подвал)">
+<ul class="lang">
+<li><a href="../" hreflang="en">EN<span class="sr" lang="en"> — English version</span></a></li>
+<li><a href="./" hreflang="ru" aria-current="page">RU<span class="sr"> — русская версия</span></a></li>
+</ul>
+</nav>
+</div>
+</footer>
+</body>
+</html>

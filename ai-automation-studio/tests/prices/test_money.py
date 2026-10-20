@@ -229,6 +229,20 @@ def test__find_price_mentions__symbol_on_next_line_owned_by_its_line__not_stolen
     assert (mentions[1].number_start, mentions[1].number_end) == (11, 14)
 
 
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        ('iPhone 15 $799', [(Decimal(15), None), (Decimal(799), 'USD')]),  # «$» ближе к 799
+        ('Pixel 8\n$\n649', [(Decimal(8), None), (Decimal(649), 'USD')]),  # «$» — знак перед числом
+        ('729\nლ\n2', [(Decimal(729), 'GEL'), (Decimal(2), None)]),  # «ლ» — после числа
+        ('iPhone 15\n₾\n1,299.00', [(Decimal(15), None), (Decimal('1299.00'), None)]),  # неясно — ничей
+        ('1 499 ₾ 1 299 ₾', [(Decimal(1499), 'GEL'), (Decimal(1299), 'GEL')]),
+    ],
+)
+def test__find_price_mentions__sign_between_two_numbers__one_owner(text, expected):
+    assert [(m.amount, m.currency) for m in find_price_mentions(text)] == expected
+
+
 def test__find_price_mentions__dense_page__linear_time():
     # Раньше каждый знак валюты сравнивался с каждым числом: 8000 цен — 80 секунд.
     started = time.perf_counter()
@@ -284,4 +298,3 @@ def test__parse_schema_amount__exponent_string__strict_decimal():
 
 def test__normalize_currency__long_text__none():
     assert normalize_currency('GEL ' * 100) is None
-

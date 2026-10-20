@@ -450,7 +450,9 @@ def test__parse__outlook_like_lines_of_digits__parse_stays_fast():
 
 
 def test__compose_reply__non_ascii_message_id__built_without_threading_ids():
-    original = parse_email(make_email(message_id='<прайс@cust.example>', headers={'References': '<root@x.example>'}), now=NOW)
+    original = parse_email(
+        make_email(message_id='<прайс@cust.example>', headers={'References': '<root@x.example>'}), now=NOW
+    )
     draft = compose_reply(
         original, body='Hi', from_addr='info@acme.example', from_name='Acme', now=NOW, language='en', zone=TBILISI
     )

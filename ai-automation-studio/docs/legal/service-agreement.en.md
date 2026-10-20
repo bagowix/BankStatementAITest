@@ -59,10 +59,10 @@ excluded from the small business regime.]
 |---|---|
 | **Business Day** | Monday to Friday, except public holidays in Georgia. Business hours are 10:00–19:00 Tbilisi time (UTC+4). |
 | **Client Accounts** | Accounts that belong to the Client and that the system uses. For example: the Telegram bot, the Google Sheet, the Google Calendar, the mailbox, the WhatsApp Business account, the Meta business portfolio. |
-| **Client Data** | Data that the Client or its customers put into the system, and data that the system produces for the Client: bookings, fields taken from emails, price history, reports. |
+| **Client Data** | Data that the system receives from the Client, its customers and the people who write to it, and data that the system produces for the Client: bookings, fields taken from emails, price history, reports. |
 | **Configuration** | The settings made for the Client: services, staff, opening hours, FAQ, company facts, email categories, products and competitor links, bot texts, alert rules. |
 | **Framework** | The Developer's reusable software: source code, templates, tools and documentation. It was made before this agreement, or it is made for use with more than one client. |
-| **Launch** | The day the system starts working on the Client's real data. |
+| **Launch** | The day the work is accepted (section 4). From this day the system works for the Client's business, and free fixes and support start. |
 | **Third-Party Services** | Services of other companies that the system depends on. For example: the AI model provider (Anthropic or OpenAI), Telegram, Meta (WhatsApp), Google, the mailbox provider and the hosting provider. |
 
 ## 3. What the Client provides
@@ -224,7 +224,8 @@ change request adds a general feature, that feature becomes part of the Framewor
 Configuration and Client Data never do.
 
 10.3. **Licence.** The Developer grants the Client a perpetual, worldwide, non-exclusive licence to
-use the Framework, as delivered under this agreement, for the Client's own business.
+use the Framework, as delivered under this agreement (including updates delivered during support),
+for the Client's own business.
 - The licence is included in the fees for the Services. There is no separate licence fee.
 - The licence continues after this agreement ends.
 - The Client may let its contractors run the software for the Client.
@@ -236,7 +237,7 @@ business regime? If yes, discuss with the lawyer whether to state the licence as
 result instead.]
 
 10.4. **A copy of the software.** While the Developer hosts the system, the Client does not need a
-copy. When the Services end, and the Client asks:
+copy. When the Services end, and the Client asks within 30 days:
 - the Developer gives the Client its Configuration and Client Data, free of charge;
 - the Developer gives the Client a copy of the software as it was deployed for the Client, with
   instructions to run it.
@@ -308,8 +309,8 @@ Form.
 12.2. The Developer has the right to grant the licence in 10.3. As far as the Developer knows, the
 Framework does not infringe anyone else's rights.
 
-12.3. The Developer follows the DPA. Passwords, keys and tokens are kept only on the server. They are
-never put in code repositories, logs or messages.
+12.3. The Developer follows the DPA. Passwords, keys and tokens are kept only on the server and in the
+Developer's encrypted password manager. They are never put in code repositories, logs or messages.
 
 12.4. The Developer uses access to Client Accounts only to provide the Services.
 
@@ -476,7 +477,7 @@ clients outside Georgia, arbitration may be easier to enforce.]
 | 12 | Hourly rate for change requests and extra hours | [USD 40 / GEL 100] per hour, in 30-minute steps |
 | 13 | How long booking records are kept | [While this agreement is in force / Bookings older than [12] months are deleted each month] |
 | 14 | Where the Client found the Developer | [Direct / Upwork / Fiverr: all payments go through the marketplace] |
-| 15 | Contacts for notices | Developer: {{EMAIL}}, {{TELEGRAM}}. Client: [name, email, messenger] |
+| 15 | Contacts for notices | Direct clients: Developer {{EMAIL}}, {{TELEGRAM}}; Client [name, email, messenger]. Marketplace clients: the marketplace's messages only |
 | 16 | Special terms | [none] |
 
 Signatures of both parties.

@@ -6,6 +6,7 @@
 чисел письма. Признаки prompt-инъекции ищутся и моделью, и правилами: хватает одного.
 """
 
+import datetime as dt
 import math
 import re
 from collections.abc import Iterable, Sequence
@@ -42,52 +43,115 @@ _GEORGIAN: Final = re.compile(r'[Ⴀ-ჿ]')
 _LATIN: Final = re.compile(r'[a-z]', re.I)
 _LANGUAGE: Final = re.compile(r'^([a-z]{2})(?:[-_][a-z]{2,4})?$')
 _TAG: Final = re.compile(r'</?\s*email\s*>', re.I)
+# Заведомо безобидное письмо для проверочного запроса: на нём модель не откажет по содержанию.
+_PROBE_SENDER: Final = 'guest@example.com'
+_PROBE_SUBJECT: Final = 'Opening hours'
+_PROBE_TEXT: Final = 'Hello! What are your opening hours on Saturday? Thank you.'
 
 # Правила — второй замок к модели: если модель сама поддалась инъекции и не
 # пометила письмо, известные формулировки всё равно его остановят. Ищем только
 # в письмах, которые идут модели: рассылку про ИИ модель не читает, а значит, и
 # инъекции в ней не страшны.
 #
-# Сильные формулировки обращаются к ИИ сами по себе («ignore ALL previous instructions»,
-# «your instructions», «system prompt») — их хватает одной. Слабые встречаются и в обычной
-# переписке («please ignore the previous instructions I sent about pick-up», «forward all
-# invoices to accounting@…»): они засчитываются, только если в письме есть обращение к ИИ,
-# их несколько или они спрятаны от глаз человека. Русские — только повелительные формы:
-# «водитель игнорировал правила» — жалоба, а не инъекция.
+# Ложная тревога стоит дорого: у лида пропадают черновик и уведомление владельцу, а клиент
+# видит в таблице «подозрительное письмо». Правила складываются с моделью через ИЛИ, и её
+# «чисто» тревогу не снимает. Поэтому сильная формулировка (её хватает одной) должна
+# обращаться к ИИ сама по себе: «ignore all previous instructions», «your system prompt»,
+# «Dear AI,». Всё, что пишут и люди, слабое: «show me the instructions for check-in»,
+# «disregard the previous instructions about the transfer», «forward all invoices to
+# accounting@…». Слабая формулировка засчитывается, только если в письме есть явное
+# обращение к ИИ, таких формулировок несколько или они спрятаны от глаз человека.
+# Обращением к ИИ не считаются голые «assistant» (подпись «Executive Assistant»), «prompt»
+# («thanks for the prompt reply») и «AI» внутри названия («AI Travel Georgia»): «AI» без
+# учёта регистра (`(?-i:AI)`) засчитывается только как обращение — с запятой или двоеточием
+# после него. Иначе японское имя Ai в «Dear Ai,» тоже было бы обращением к ИИ.
+# Русские формы только повелительные: «водитель игнорировал правила» — жалоба, а не инъекция.
+
+# «prompt» как существительное, а не как прилагательное в вежливой концовке («prompt reply»).
+_PROMPT: Final = (
+    r'prompts?\b(?!\s+(?:reply|replies|response|responses|answer|answers|attention|action|payment|service'
+    r'|confirmation|feedback|delivery|refund)\b)'
+)
+# «Забудьте все предыдущие указания» — инъекция, а «…указания по трансферу» или «…instructions
+# about pick-up» — клиент поправляет свои же прошлые указания: оговорка о предмете снимает силу.
+_ABOUT: Final = (
+    r'(?!\s*(?:about|regarding|re\b|concerning|on\b|for\b|from\b|i\b|we\b|that\s+(?:i|we)\b|sent\b|given\b'
+    r'|in\s+(?:my|our)\b|to\s+the\b))'
+)
+_ABOUT_RU: Final = r'(?!\s*(?:по|про|о|об|насч[её]т|касательно|относительно|для|которые|что)\b)'
+# Кому адресовано: «AI» с учётом регистра, остальное — однозначные названия моделей.
+_AI_ADDRESSEE: Final = (
+    r'(?:(?-i:AI)|A\.I\.|ai\s+(?:assistant|model|agent|system)s?|chat\s?bot|chat\s?gpt|llms?|language\s+models?)'
+)
+# «you are now …» — только если речь о роли модели, а не «assistant manager» или «AI partner programme».
+_AI_ROLE: Final = (
+    r'(?:(?-i:AI)|ai\s+(?:assistant|model|agent|bot)|chat\s?bot|language\s+model|llm|assistant)'
+    r'(?=\s*(?:[,.:;!)]|$)|\s+(?:that|who|which|with|without|and|named|called)\b)'
+)
 _STRONG_INJECTION: Final = re.compile(
     r"""
-    system\s+prompt
+    \bsystem\s+prompts?\b
     |(?:ignore|disregard|forget)\s+all\s+(?:of\s+)?(?:the\s+|your\s+)?(?:previous|prior|above|earlier|preceding)\s+
-        (?:instructions|prompts?|rules)
+        (?:instructions|prompts?|rules)\b"""
+    + _ABOUT
+    + r"""
     |(?:ignore|disregard|forget|override)\s+(?:all\s+|any\s+)?(?:of\s+)?your\s+(?:previous\s+|prior\s+|current\s+)?
-        (?:instructions|rules|programming|guidelines|prompt)
-    |(?:reveal|print|show|repeat|output|leak)\s+(?:me\s+)?(?:your|the)\s+(?:system\s+|hidden\s+|initial\s+)?
-        (?:prompt|instructions)
-    |you\s+are\s+now\s+(?:an?\s+)?(?:\w+\s+){0,2}?(?:ai|assistant|chatbot|language\s+model|llm)\b
-    |(?:dear|attention|note\s+(?:for|to))\s+(?:the\s+)?(?:ai|assistant|llm|language\s+model|chatbot)\b
-    |(?:to|for)\s+(?:the\s+)?(?:ai|llm)\s+(?:assistant|model|system)\b
+        (?:(?:instructions|guidelines)\b"""
+    + _ABOUT
+    + r'|programming\b|'
+    + _PROMPT
+    + r""")
+    |(?:reveal|output|leak|dump)\s+(?:me\s+)?(?:your|the)\s+(?:(?:system|hidden|secret|initial|original|full)\s+)?
+        (?:instructions\b|"""
+    + _PROMPT
+    + r""")
+    |(?:show|print|repeat|display|tell)\s+(?:me\s+)?(?:your|the)\s+(?:system|hidden|secret)\s+(?:instructions\b|"""
+    + _PROMPT
+    + r""")
+    |(?:show|print|repeat|display)\s+(?:me\s+)?your\s+(?:(?:initial|original|full)\s+)?"""
+    + _PROMPT
+    + r"""
+    |you\s+are\s+now\s+(?:an?\s+|the\s+)?(?:[\w-]+\s+){0,2}?"""
+    + _AI_ROLE
+    + r"""
+    |(?:dear|attention|note\s+(?:for|to))\s+(?:the\s+|any\s+|all\s+)?"""
+    + _AI_ADDRESSEE
+    + r"""(?:\s+(?:processing|reading|handling|summari[sz]ing)\b[^,:!\n]{0,40})?\s*[,:!]
+    |(?:to|for)\s+(?:the\s+)?(?:ai|llm)\s+(?:assistant|model|system|agent)\s*:
     |<\|im_start\|>|\[/?inst\]
     |системн\w*\s+(?:промпт|инструкци\w*)
-    |(?:игнорируй|забудь)(?:те)?\s+(?:все\s+(?:предыдущие\s+|прошлые\s+|прежние\s+)?|свои\s+|твои\s+)
-        (?:инструкции|указания|правила)
+    |(?:игнорируй|забудь)(?:те)?\s+(?:все\s+(?:предыдущие\s+|прошлые\s+|прежние\s+)?(?:инструкции|указания|правила)"""
+    + _ABOUT_RU
+    + r"""|(?:свои|твои)\s+(?:инструкции|указания))
     """,
     re.IGNORECASE | re.VERBOSE,
 )
 _WEAK_INJECTION: Final = re.compile(
     r"""
-    (?:ignore|disregard|forget)\s+(?:any\s+)?(?:the\s+)?(?:previous|prior|above|earlier|preceding)\s+
-        (?:instructions|prompts?|rules)
+    (?:ignore|disregard|forget)\s+(?:all\s+(?:of\s+)?)?(?:any\s+)?(?:the\s+|your\s+)?
+        (?:previous|prior|above|earlier|preceding)\s+(?:instructions|prompts?|rules)
+    |(?:ignore|disregard|forget|override)\s+(?:all\s+|any\s+)?(?:of\s+)?your\s+(?:previous\s+|prior\s+|current\s+)?
+        (?:instructions|guidelines|rules)
+    |(?:reveal|show|print|repeat|output)\s+(?:me\s+)?your\s+(?:instructions|rules)
     |new\s+instructions\s*:
     |(?:forward|send)\s+(?:all|every)\s+(?:the\s+)?(?:e-?mails?|messages|invoices|correspondence|attachments|passwords?)
-    |(?:игнорируй|забудь)(?:те)?\s+(?:предыдущие\s+|прошлые\s+|прежние\s+)?(?:инструкции|указания|правила)
+    |(?:игнорируй|забудь)(?:те)?\s+(?:все\s+)?(?:предыдущие\s+|прошлые\s+|прежние\s+)?(?:инструкции|указания|правила)
+    |(?:игнорируй|забудь)(?:те)?\s+(?:свои|твои)\s+правила
     |перешли(?:те)?\s+(?:все|всю)\s+(?:письма|сч[её]та|переписку|вложения)
     """,
     re.IGNORECASE | re.VERBOSE,
 )
 _AI_CONTEXT: Final = re.compile(
-    r'\b(?:ai|a\.i\.|assistant|chat\s?gpt|gpt-?\d*|llm|language\s+model|chatbot|prompt|automated\s+system)\b'
-    r'|\bии\b|ассистент|нейросет|чат-?бот|промпт',
-    re.IGNORECASE,
+    r"""
+    \bai[\s-]+(?:assistant|model|agent|bot)s?\b
+    |\b(?:dear|hey|hi|hello|attention)\s+(?-i:AI|A\.I\.)(?=\s*[,:!])
+    |(?:^|[\n.!?]\s*)(?-i:AI|A\.I\.)\s*[,:]
+    |\bas\s+an\s+(?:ai|language\s+model)\b
+    |\byou\s+are\s+(?:an?\s+)?(?:ai|language\s+model|llm|chatbot)\b
+    |\blanguage\s+models?\b|\bchat\s?gpt\b|\bgpt-?\d|\bllms?\b
+    |\bии[\s-]+(?:ассистент|модел|агент|бот)|нейросет|языков\w*\s+модел|промпт
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 _LANGUAGE_NAMES: Final[dict[str, str]] = {
@@ -534,6 +598,36 @@ async def triage_email(email: ParsedEmail, section: InboxSection, owner_language
         schema=Triage,
     )
     return validate_triage(raw, email, section, detect_injection(email))
+
+
+async def probe_model(section: InboxSection, owner_language: str, llm: LLMClient, now: dt.datetime) -> None:
+    """Проверочный запрос: тот же промпт и та же схема, но заведомо безобидное письмо.
+
+    Отказ модели на письме (HTTP 400, ответ не по схеме) сам по себе не говорит, кто виноват:
+    письмо или настройка. Неверная модель или effort в `.env` дают такой же отказ на любой
+    запрос. Ответ на безобидное письмо — доказательство, что настройка жива.
+
+    Args:
+        section: Секция `[inbox]`.
+        owner_language: Язык владельца.
+        llm: Модель.
+        now: Текущий момент (дата письма).
+
+    Raises:
+        LLMError: Модель не ответила и на безобидное письмо.
+    """
+    email = ParsedEmail(
+        message_id=f'<probe@{_PROBE_SENDER.split("@")[1]}>',
+        message_id_generated=True,
+        from_name='Guest',
+        from_addr=_PROBE_SENDER,
+        subject=_PROBE_SUBJECT,
+        date=now,
+        text=_PROBE_TEXT,
+    )
+    await llm.extract(
+        system=build_triage_system(section, owner_language), prompt=build_email_block(email), schema=Triage
+    )
 
 
 # --- черновик -------------------------------------------------------------------------

@@ -15,6 +15,16 @@
   (имя, телефон, язык) и записи — в SQLite и переживают перезапуск.
 - Сообщения одного покупателя обрабатываются по очереди (замок на пользователя):
   двойное нажатие «Подтвердить» не создаст две записи.
+- **Бот публичный, поэтому всё ограничено:** у покупателя не больше
+  `max_active_per_customer` предстоящих записей, свободный текст (вызов модели) — не
+  чаще `MODEL_CALLS` за `MODEL_WINDOW`, уведомление администраторам «позовите человека» —
+  не больше `HANDOFFS` разных текстов за `HANDOFF_WINDOW` и `HANDOFFS_PER_DAY` за сутки от
+  одного покупателя; повтор уже переданного текста владельца не будит. Сверх лимита текст не
+  теряется молча: покупатель слышит, что сообщение не передано, и получает телефон, а в
+  журнал пишется `booking.handoff_throttled`. Ответ администратора покупателю обнуляет его
+  счёт. Счётчики — в памяти.
+- **Администратор записывает гостя «с улицы»** тем же сценарием: бот спрашивает имя и
+  телефон гостя каждый раз и не сохраняет их в профиль администратора.
 """
 
 import asyncio
@@ -36,13 +46,18 @@ from autostudio.booking.domain import (
     BookingError,
     CancellationTooLateError,
     Customer,
+    Slot,
     SlotTakenError,
+    Source,
     TimeWindow,
+    TooManyBookingsError,
     clean_name,
     clean_phone,
     local_today,
     wall_to_utc,
+    will_remind,
 )
+from autostudio.booking.limits import Handoff, HandoffGate, RateLimiter
 from autostudio.booking.messages import ADMINS, Button, Incoming, Outgoing
 from autostudio.booking.prompts import (
     BookingIntent,
@@ -65,6 +80,18 @@ logger = logging.getLogger(__name__)
 
 _ALERT_EVERY: Final = dt.timedelta(hours=1)
 _ALTERNATIVES: Final = 6
+# Живой человек не пишет боту записи больше пары сообщений в минуту; поток — это спам
+# или зацикленный бот, и каждый его вызов модели оплачивает оператор.
+MODEL_CALLS: Final = 8
+MODEL_WINDOW: Final = dt.timedelta(minutes=10)
+# Несколько разных вопросов подряд — обычный покупатель (адрес, оплата, метро); десяток за
+# минуты — поток, который не должен становиться потоком уведомлений владельцу. Суточный
+# предел держит поток «по чуть-чуть» весь день; ответ администратора обнуляет счёт.
+HANDOFFS: Final = 4
+HANDOFF_WINDOW: Final = dt.timedelta(minutes=10)
+HANDOFFS_PER_DAY: Final = 12
+# Тот же текст в течение часа — это «вы получили?», а не новый вопрос.
+HANDOFF_REPEAT_WINDOW: Final = dt.timedelta(hours=1)
 
 
 class Step(StrEnum):
@@ -87,6 +114,8 @@ class Conversation(msgspec.Struct, frozen=True, kw_only=True):
         name: Введённое имя (на шаге телефона).
         pref_day: День из свободного текста, пока покупатель выбирает услугу.
         pref_window: Окно времени из свободного текста.
+        walk_in: Администратор записывает гостя (имя и телефон — гостя, не профиль).
+        guest: Имя и телефон гостя на шаге подтверждения записи администратором.
         expires_at: Когда состояние забывается.
     """
 
@@ -96,6 +125,8 @@ class Conversation(msgspec.Struct, frozen=True, kw_only=True):
     name: str | None = None
     pref_day: dt.date | None = None
     pref_window: TimeWindow | None = None
+    walk_in: bool = False
+    guest: Customer | None = None
     expires_at: dt.datetime
 
     def reset(self) -> 'Conversation':
@@ -172,6 +203,10 @@ class Engine:
         self._conversations = Conversations(dt.timedelta(minutes=config.booking.state_ttl_min))
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._last_alert: dt.datetime | None = None
+        self._model_budget = RateLimiter(MODEL_CALLS, MODEL_WINDOW)
+        self._handoffs = HandoffGate(
+            burst=HANDOFFS, burst_window=HANDOFF_WINDOW, daily=HANDOFFS_PER_DAY, repeat_window=HANDOFF_REPEAT_WINDOW
+        )
 
     @property
     def conversations(self) -> Conversations:
@@ -201,6 +236,7 @@ class Engine:
         if message.is_admin:
             reply = await self._admin.handle(message, now)
             if reply is not None:
+                self._release_answered(reply)
                 return reply
         before = conversation.step
         outgoing, after = await self._route(message, conversation, now)
@@ -208,6 +244,13 @@ class Engine:
             outgoing = self._close_contact_keyboard(outgoing, after.language)
         self._conversations.put(message.user, after, now)
         return outgoing
+
+    def _release_answered(self, outgoing: Sequence[Outgoing]) -> None:
+        # Администратор написал покупателю (`/reply`, извинение за отмену): разговор живой, и
+        # ответы покупателя должны доходить до владельца, а не упираться в лимит передачи.
+        for item in outgoing:
+            if item.to is not None and item.to != ADMINS:
+                self._handoffs.release(item.to)
 
     def _language_for(self, message: Incoming) -> str:
         profile = self._store.customer(message.user)
@@ -227,7 +270,10 @@ class Engine:
         if message.data is not None:
             return await self._on_button(message, conversation, now)
         if message.phone is not None:
-            return self._on_phone(message.phone, message, conversation, now, international=True)
+            # «Свой» номер — только если адаптер сверил владельца карточки с отправителем;
+            # чужой контакт проверяется так же строго, как набранный руками.
+            own = message.phone_verified and not conversation.walk_in
+            return self._on_phone(message.phone, message, conversation, now, international=own)
         text = (message.text or '').strip()
         lang = conversation.language
         if text.startswith('/'):
@@ -240,10 +286,12 @@ class Engine:
             return self._on_phone(text, message, conversation, now, international=False)
         if not text:
             return self._views.notice_and_menu(lang, 'not_understood'), conversation.reset()
-        if conversation.step == Step.QUESTION:
-            return await self._answer_question(text, message, conversation.reset(), now)
         if conversation.step == Step.HUMAN:
             return self._forward_to_human(text, message, conversation.reset(), now)
+        if not message.is_admin and not self._model_budget.allow(message.user, now):
+            return self._views.notice_and_menu(lang, 'slow_down'), conversation.reset()
+        if conversation.step == Step.QUESTION:
+            return await self._answer_question(text, message, conversation.reset(), now)
         return await self._on_free_text(text, message, conversation, now)
 
     def _abort_labels(self) -> set[str]:
@@ -304,8 +352,11 @@ class Engine:
                 return self._day_picker(args[0], cb.staff_from_code(args[1]), None, lang, now), fresh
             case cb.DAYS_FROM if len(args) == 3:
                 return self._day_picker(args[0], cb.staff_from_code(args[1]), cb.decode_day(args[2]), lang, now), fresh
-            case cb.DAY if len(args) in (3, 4):
-                page = int(args[3]) if len(args) == 4 and args[3].isdigit() else 0
+            case cb.DAY if len(args) == 3:
+                return self._time_picker(args[0], cb.staff_from_code(args[1]), args[2], 0, lang, now), fresh
+            case cb.DAY if len(args) == 4 and args[3].isascii() and args[3].isdecimal():
+                # `isdecimal` без `isascii` пропустил бы «٣» и подобное: кнопку можно подделать.
+                page = int(args[3])
                 return self._time_picker(args[0], cb.staff_from_code(args[1]), args[2], page, lang, now), fresh
             case cb.TIME:
                 return self._on_slot(cb.parse_slot(args), message, conversation, now)
@@ -431,6 +482,12 @@ class Engine:
         slot = self._service.find(ref.service_id, ref.staff_id, ref.start, now)
         if slot is None:
             return self._taken(ref, lang, now), fresh
+        if message.is_admin:
+            return self._ask_walk_in(ref, slot, fresh, lang)
+        count = self._store.active_count(message.user, now)
+        if count >= self._config.booking.max_active_per_customer:
+            # Сразу, а не после имени и телефона: иначе покупатель зря пройдёт три шага.
+            return self._views.too_many(count, lang), fresh
         profile = self._store.customer(message.user)
         if profile is not None and profile.complete:
             return [self._views.confirm(ref, slot, profile, lang)], fresh
@@ -445,8 +502,16 @@ class Engine:
         slot = self._service.find(ref.service_id, ref.staff_id, ref.start, now)
         if slot is None:
             return self._taken(ref, lang, now), fresh
+        if message.is_admin:
+            return self._ask_walk_in(ref, slot, fresh, lang)
         ask = self._views.ask_name(slot, clean_name(message.name), lang)
         return [ask], msgspec.structs.replace(fresh, step=Step.NAME, ref=ref)
+
+    def _ask_walk_in(self, ref: SlotRef, slot: Slot, conversation: Conversation, language: str) -> Reply:
+        # Администратор записывает гостя: имя и телефон спрашиваются каждый раз и не
+        # сохраняются в его профиль, иначе следующий гость унаследовал бы данные предыдущего.
+        ask = self._views.ask_walkin_name(slot, language)
+        return [ask], msgspec.structs.replace(conversation, step=Step.NAME, ref=ref, walk_in=True)
 
     def _taken(self, ref: SlotRef, language: str, now: dt.datetime) -> list[Outgoing]:
         alternatives = self._service.nearest(ref.service_id, ref.start, now, limit=_ALTERNATIVES, staff_id=ref.staff_id)
@@ -468,8 +533,10 @@ class Engine:
         lang = conversation.language
         name = clean_name(raw)
         if name is None:
-            return [self._views.bad_name(clean_name(message.name), lang)], conversation
-        return [self._views.ask_phone(name, lang)], msgspec.structs.replace(conversation, step=Step.PHONE, name=name)
+            hint = None if conversation.walk_in else clean_name(message.name)
+            return [self._views.bad_name(hint, lang)], conversation
+        ask = self._views.ask_walkin_phone(lang) if conversation.walk_in else self._views.ask_phone(name, lang)
+        return [ask], msgspec.structs.replace(conversation, step=Step.PHONE, name=name)
 
     def _on_phone(
         self, raw: str, message: Incoming, conversation: Conversation, now: dt.datetime, *, international: bool
@@ -484,17 +551,21 @@ class Engine:
         phone = clean_phone(raw, region=self._config.booking.phone_region, shared=international)
         if phone is None:
             # Клавиатура «Отправить номер» ещё на экране: достаточно подсказки с примером.
-            return [Outgoing(text=self._texts.get(lang, 'bad_phone'))], conversation
-        name = conversation.name or clean_name(message.name)
+            return [self._views.bad_phone(lang)], conversation
+        name = conversation.name or (None if conversation.walk_in else clean_name(message.name))
         if name is None:
             return [self._views.bad_name(None, lang)], conversation
         customer = Customer(key=message.user, name=name, phone=phone, language=lang)
-        self._store.save_customer(customer, now)
+        after = conversation.reset()
+        if conversation.walk_in:
+            after = msgspec.structs.replace(after, ref=ref, guest=customer)
+        else:
+            self._store.save_customer(customer, now)
         slot = self._service.find(ref.service_id, ref.staff_id, ref.start, now)
         done = Outgoing(text=self._texts.get(lang, 'got_contact'), remove_keyboard=True)
         if slot is None:
             return [done, *self._taken(ref, lang, now)], conversation.reset()
-        return [done, self._views.confirm(ref, slot, customer, lang)], conversation.reset()
+        return [done, self._views.confirm(ref, slot, customer, lang)], after
 
     async def _on_confirm(
         self, ref: SlotRef | None, message: Incoming, conversation: Conversation, now: dt.datetime
@@ -503,6 +574,12 @@ class Engine:
         fresh = conversation.reset()
         if ref is None or not self._valid_ref(ref):
             return self._stale(lang), fresh
+        if message.is_admin:
+            guest = conversation.guest if conversation.ref == ref else None
+            if guest is None:
+                # Данные гостя забыты (истёк разговор, повторное нажатие): спрашиваем заново.
+                return self._on_slot(ref, message, conversation, now)
+            return await self._book(ref, guest, lang, now, source='admin', max_active=None)
         profile = self._store.customer(message.user)
         if profile is None or not profile.complete:
             # Профиль потерян (или кнопка чужая): спрашиваем данные заново для этого же слота.
@@ -511,19 +588,38 @@ class Engine:
         if duplicate is not None:
             when = self._texts.when(duplicate.start, lang)
             return [Outgoing(text=self._texts.get(lang, 'already_booked', id=duplicate.id, when=when))], fresh
+        return await self._book(
+            ref, profile, lang, now, source=ref.source, max_active=self._config.booking.max_active_per_customer
+        )
+
+    async def _book(
+        self,
+        ref: SlotRef,
+        customer: Customer,
+        language: str,
+        now: dt.datetime,
+        *,
+        source: Source,
+        max_active: int | None,
+    ) -> Reply:
+        fresh = Conversation(language=language, expires_at=now)
         try:
             booking = await self._service.book(
                 service_id=ref.service_id,
                 staff_id=ref.staff_id,
                 start=ref.start,
-                customer=profile,
-                language=lang,
-                source=ref.source,
+                customer=customer,
+                language=language,
+                source=source,
                 now=now,
+                max_active=max_active,
             )
         except SlotTakenError:
-            return self._taken(ref, lang, now), fresh
-        return [self._views.booked(booking, lang), self._views.admin_new(booking)], fresh
+            return self._taken(ref, language, now), fresh
+        except TooManyBookingsError:
+            return self._views.too_many(self._store.active_count(customer.key, now), language), fresh
+        booked = self._views.booked(booking, language, remind=will_remind(self._config, booking, now))
+        return [booked, self._views.admin_new(booking)], fresh
 
     def _existing(self, user: str, ref: SlotRef, now: dt.datetime) -> Booking | None:
         return next(
@@ -543,8 +639,9 @@ class Engine:
             return None
         return booking
 
-    def _too_late(self, booking: Booking, now: dt.datetime) -> bool:
-        return booking.start - now < self._service.notice
+    def _too_late(self, booking: Booking, message: Incoming, now: dt.datetime) -> bool:
+        # Политика отмены — для покупателей; администратор правит и свои записи гостей.
+        return not message.is_admin and booking.start - now < self._service.notice
 
     def _too_late_reply(self, language: str) -> list[Outgoing]:
         limit = self._texts.duration(self._config.booking.cancellation_min_before, language)
@@ -564,7 +661,7 @@ class Engine:
         booking = self._own(booking_id, message, now)
         if booking is None:
             return self._views.notice_and_menu(language, 'not_active', id=booking_id)
-        if self._too_late(booking, now):
+        if self._too_late(booking, message, now):
             return self._too_late_reply(language)
         text = self._texts.get(
             language, 'confirm_cancel', id=booking.id, when=self._texts.when(booking.start, language)
@@ -577,7 +674,7 @@ class Engine:
 
     async def _cancel_yes(self, booking_id: str, message: Incoming, language: str, now: dt.datetime) -> list[Outgoing]:
         try:
-            booking = await self._service.cancel(booking_id, now=now, by_admin=False, customer=message.user)
+            booking = await self._service.cancel(booking_id, now=now, by_admin=message.is_admin, customer=message.user)
         except CancellationTooLateError:
             return self._too_late_reply(language)
         except BookingError:
@@ -585,14 +682,14 @@ class Engine:
         return [
             Outgoing(text=self._texts.get(language, 'cancelled', id=booking.id)),
             self._views.menu(language),
-            self._views.admin_cancelled(booking, by_admin=False),
+            self._views.admin_cancelled(booking, by_admin=message.is_admin),
         ]
 
     def _move_days(self, booking_id: str, message: Incoming, language: str, now: dt.datetime) -> list[Outgoing]:
         booking = self._own(booking_id, message, now)
         if booking is None:
             return self._views.notice_and_menu(language, 'not_active', id=booking_id)
-        if self._too_late(booking, now):
+        if self._too_late(booking, message, now):
             return self._too_late_reply(language)
         days = self._service.bookable_days(
             booking.service_id, now, staff_id=booking.staff_id, limit=DAYS_PER_PAGE, ignore=booking.id
@@ -689,7 +786,9 @@ class Engine:
         if start is None:
             return self._stale(language)
         try:
-            old, new = await self._service.reschedule(booking_id, start, now=now, by_admin=False, customer=message.user)
+            old, new = await self._service.reschedule(
+                booking_id, start, now=now, by_admin=message.is_admin, customer=message.user
+            )
         except CancellationTooLateError:
             return self._too_late_reply(language)
         except SlotTakenError:
@@ -711,7 +810,7 @@ class Engine:
                 text=text,
                 buttons=[[Button(self._texts.get(language, 'btn_my'), cb.MY), self._views.menu_button(language)]],
             ),
-            self._views.admin_rescheduled(old, new, by_admin=False),
+            self._views.admin_rescheduled(old, new, by_admin=message.is_admin),
         ]
 
     # Свободный текст: модель предлагает, код проверяет
@@ -742,6 +841,12 @@ class Engine:
                 return self._forward_to_human(text, message, fresh, now)
             case 'greeting':
                 return self._views.greeting(lang, clean_name(message.name) or ''), fresh
+            case 'thanks':
+                # «Спасибо» после записи — самое частое сообщение; меню целиком тут лишнее.
+                welcome = Outgoing(
+                    text=self._texts.get(lang, 'you_are_welcome'), buttons=[[self._views.menu_button(lang)]]
+                )
+                return [welcome], fresh
             case _:
                 return self._views.notice_and_menu(lang, 'not_understood'), fresh
 
@@ -782,7 +887,8 @@ class Engine:
             key = 'ai_nearest'
             if day is not None and window is not None and window.start is not None:
                 target = wall_to_utc(day, window.start, zone)
-                slots = [] if target is None else self._service.nearest(service.id, target, now, limit=_ALTERNATIVES)
+                if target is not None:
+                    slots = self._service.nearest(service.id, target, now, limit=_ALTERNATIVES)
             if not slots:
                 slots = self._service.next_slots(service.id, now, limit=_ALTERNATIVES, start_day=day, window=window)
             if not slots:
@@ -822,18 +928,43 @@ class Engine:
             self._service.record('booking.question_answered', now, {'faq': ','.join(faq_ids), 'language': lang})
             rows = [[Button(self._texts.get(lang, 'btn_book'), cb.BOOK), self._views.menu_button(lang)]]
             return [Outgoing(text=answer, buttons=rows)], conversation
-        self._service.record('booking.handoff', now, {'reason': 'unanswered', 'language': lang})
-        return [
-            Outgoing(text=self._texts.get(lang, 'handoff')),
-            self._admin_alert('admin_question', text, message),
-        ], conversation
+        return self._handoff('unanswered', 'handoff', 'admin_question', text, message, lang, now), conversation
 
     def _forward_to_human(self, text: str, message: Incoming, conversation: Conversation, now: dt.datetime) -> Reply:
-        self._service.record('booking.handoff', now, {'reason': 'requested', 'language': conversation.language})
-        return [
-            Outgoing(text=self._texts.get(conversation.language, 'human_sent')),
-            self._admin_alert('admin_human', text, message),
-        ], conversation
+        lang = conversation.language
+        return self._handoff('requested', 'human_sent', 'admin_human', text, message, lang, now), conversation
+
+    def _handoff(
+        self,
+        reason: str,
+        reply_key: str,
+        alert_key: str,
+        text: str,
+        message: Incoming,
+        lang: str,
+        now: dt.datetime,
+    ) -> list[Outgoing]:
+        verdict = self._handoffs.decide(message.user, text, now)
+        if verdict == Handoff.REPEAT:
+            # Этот текст у владельца уже есть: «уже передали» — правда, второе уведомление — шум.
+            return [Outgoing(text=self._texts.get(lang, 'handoff_pending'))]
+        if verdict == Handoff.LIMITED:
+            return self._handoff_refused(reason, message, lang, now)
+        # Язык покупателя запоминается: ответ владельца через /reply придёт на нём.
+        self._store.save_customer(Customer(key=message.user, language=lang), now)
+        self._service.record('booking.handoff', now, {'reason': reason, 'language': lang})
+        return [Outgoing(text=self._texts.get(lang, reply_key)), self._admin_alert(alert_key, text, message)]
+
+    def _handoff_refused(self, reason: str, message: Incoming, lang: str, now: dt.datetime) -> list[Outgoing]:
+        # Поток просьб не становится потоком уведомлений, но и вопрос не теряется молча:
+        # покупатель знает, что это сообщение не передано, и может позвонить.
+        logger.info('просьба позвать человека от %s не передана: лимит уведомлений', message.user)
+        self._service.record('booking.handoff_throttled', now, {'reason': reason, 'language': lang})
+        text = self._texts.get(lang, 'handoff_limit')
+        phone = self._config.booking.contact_phone
+        if phone:
+            text = f'{text}\n{self._texts.get(lang, "call_us", phone=phone)}'
+        return [Outgoing(text=text, buttons=[[self._views.menu_button(lang)]])]
 
     def _admin_alert(self, key: str, text: str, message: Incoming) -> Outgoing:
         customer = message.name or message.user

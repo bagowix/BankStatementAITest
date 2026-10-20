@@ -11,7 +11,7 @@ from autostudio.prices import texts
 from autostudio.prices.extract import Availability, Method, PriceReading
 from autostudio.prices.metrics import METRICS, highlights
 from autostudio.prices.money import Qualifier
-from autostudio.prices.store import OfferKey, OfferState, PriceStore
+from autostudio.prices.store import OfferKey, OfferState, OutboxEntry, PriceStore
 from autostudio.prices.urls import ip_is_public, origin, redact, url_problem
 
 T0 = dt.datetime(2026, 10, 20, 6, 0, tzinfo=dt.UTC)
@@ -66,6 +66,77 @@ def test__store__naive_time__rejected(tmp_path):
         PriceStore(tmp_path / 'p.sqlite').commit(dt.datetime(2026, 1, 1), [], [])  # noqa: DTZ001
 
 
+def test__store__own_price_and_pending__round_trip(tmp_path):
+    store = PriceStore(tmp_path / 'p.sqlite')
+    state = OfferState(failures=0, warning='selector_not_found,multiple_products', pending='30.00 GEL')
+    store.commit(T0, [(KEY, reading('95.00'))], [(KEY, state)], own_prices={KEY: Decimal('100.00')})
+    stored = store.last_reading(KEY)
+    assert stored is not None
+    assert stored.own_price == Decimal('100.00')
+    assert store.state(KEY) == state
+    assert store.state(KEY).warnings == {'selector_not_found', 'multiple_products'}
+
+
+def test__store__database_from_first_release__columns_added_rows_kept(tmp_path):
+    path = tmp_path / 'p.sqlite'
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.executescript(
+            'CREATE TABLE readings (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, product_id TEXT NOT NULL, '
+            'competitor TEXT NOT NULL, url TEXT NOT NULL, amount TEXT NOT NULL, currency TEXT, method TEXT NOT NULL, '
+            'availability TEXT NOT NULL, qualifier TEXT NOT NULL, raw TEXT NOT NULL);'
+            'CREATE TABLE offer_state (product_id TEXT NOT NULL, competitor TEXT NOT NULL, url TEXT NOT NULL, '
+            'failures INTEGER NOT NULL DEFAULT 0, last_reason TEXT, warning TEXT, '
+            'PRIMARY KEY (product_id, competitor, url));'
+        )
+        conn.execute(
+            'INSERT INTO readings (at, product_id, competitor, url, amount, currency, method, availability, '
+            "qualifier, raw) VALUES (?, 'p1', 'Shop A', ?, '10.00', 'GEL', 'json_ld', 'unknown', 'exact', 'x')",
+            (T0.isoformat(), KEY.url),
+        )
+    store = PriceStore(path)
+    old = store.last_reading(KEY)
+    assert old is not None
+    assert (old.amount, old.own_price) == (Decimal('10.00'), None)
+    store.commit(T0, [], [(KEY, OfferState(pending='1 GEL'))])
+    assert store.state(KEY).pending == '1 GEL'
+
+
+def test__store__outbox__fifo_until_delivered(tmp_path):
+    store = PriceStore(tmp_path / 'p.sqlite')
+    rows = [
+        OutboxEntry(channel='sheet', tab='History', header=['a'], rows=[['1']]),
+        OutboxEntry(channel='owner', text='hi'),
+    ]
+    store.commit(T0, [], [], outbox=rows)
+    pending = store.pending()
+    assert [(e.channel, e.tab, e.rows, e.text) for e in pending] == [
+        ('sheet', 'History', [['1']], ''),
+        ('owner', '', [], 'hi'),
+    ]
+    store.delivered(pending[0].id)
+    assert [e.text for e in store.pending()] == ['hi']
+
+
+def test__store__flags__set_and_cleared(tmp_path):
+    store = PriceStore(tmp_path / 'p.sqlite')
+    assert store.flag('x') is None
+    store.set_flag('x', '1')
+    store.set_flag('x', '2')
+    assert store.flag('x') == '2'
+    store.set_flag('x', None)
+    assert store.flag('x') is None
+
+
+def test__store__exclusive__second_holder_refused_then_released(tmp_path):
+    first, second = PriceStore(tmp_path / 'p.sqlite'), PriceStore(tmp_path / 'p.sqlite')
+    with first.exclusive() as taken:
+        assert taken
+        with second.exclusive() as again:
+            assert not again
+    with second.exclusive() as after:
+        assert after
+
+
 # --- metrics -------------------------------------------------------------------------------
 
 
@@ -103,8 +174,22 @@ def test__highlights__month__changes_competitor_expensive():
     assert highlights(events, 'en') == [
         'Price changes caught: 3',
         'Most active competitor: B — price cuts: 1, cheaper than you: 1 times',
-        'You were the most expensive for: iPhone (−3.0%)',
+        'Where you were the most expensive: iPhone (the cheapest competitor is 3.0% below you)',
     ]
+
+
+def test__highlights__one_comparable_competitor__not_most_expensive():
+    # Один конкурент дешевле — это «дороже конкурента», а не «дороже всех».
+    events = [event('prices.checked', product='AirPods', competitor='B', diff_vs_own_pct='-6.7')]
+    assert highlights(events, 'en') == []
+
+
+def test__highlights__russian__comma_decimal_and_wording():
+    events = [
+        event('prices.checked', product='AirPods', competitor='A', diff_vs_own_pct='-6.7'),
+        event('prices.checked', product='AirPods', competitor='B', diff_vs_own_pct='-2.0'),
+    ]
+    assert highlights(events, 'ru') == ['Где вы были дороже всех: AirPods (самый дешёвый конкурент на 6,7% ниже вас)']
 
 
 def test__highlights__russian_and_tie__alphabetical():
@@ -134,6 +219,12 @@ def test__show_pct__signed(value, expected):
     assert texts.show_pct(Decimal(value)) == expected
 
 
+def test__show_pct__russian__comma_like_amounts():
+    assert texts.show_pct(Decimal('-5.44'), 'ru') == '−5,4'
+    assert texts.show_pct(Decimal('3.04'), 'ru') == '+3,0'
+    assert texts.plain_pct(Decimal('6.66'), 'ru') == '6,7'
+
+
 def test__cells__machine_friendly():
     assert texts.cell_amount(Decimal('2749')) == '2749.00'
     assert texts.cell_amount(Decimal('1.299')) == '1.299'
@@ -149,6 +240,8 @@ def test__cells__machine_friendly():
         ('too_large', 'page could not be read'),
         ('selector_not_found', 'price not found on the page'),
         ('llm_unverified', 'price not found on the page'),
+        ('llm_budget', 'not checked this time — will be checked on the next run'),
+        ('run_timeout', 'not checked this time — will be checked on the next run'),
     ],
 )
 def test__failure_text__client_words(reason, expected):
@@ -187,6 +280,12 @@ def test__redact__credentials_and_query_removed():
 def test__origin__port_kept():
     assert origin('https://shop.example:8443/p?q=1') == 'https://shop.example:8443'
     assert origin('https://shop.example/p') == 'https://shop.example'
+
+
+def test__origin__ipv6_literal__brackets_kept_robots_url_valid():
+    site = origin('https://[2606:4700:4700::1111]/p/1')
+    assert site == 'https://[2606:4700:4700::1111]'
+    assert url_problem(f'{site}/robots.txt') is None
 
 
 def test__url_problem__public_ok_invalid_rejected():

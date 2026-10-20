@@ -284,10 +284,7 @@ class PoliteFetcher:
         # Резолвим ровно то имя, к которому подключится httpx (IDNA 2008, punycode): системный
         # резолвер кодирует Unicode-имя по IDNA 2003, и «faß.example» превратился бы в другое
         # имя — «fass.example» — с другими адресами.
-        try:
-            wire_host = parsed.raw_host.decode('ascii')
-        except UnicodeDecodeError:
-            return FetchFailure(reason='blocked_url', detail=f'{host}: имя не в ASCII после IDNA')
+        wire_host = parsed.raw_host.decode('ascii', errors='replace')
         try:
             addresses = await self._resolve(wire_host, parsed.port or (443 if parsed.scheme == 'https' else 80))
         except OSError as exc:

@@ -1,5 +1,4 @@
 import csv
-import datetime as dt
 from decimal import Decimal
 from pathlib import Path
 
@@ -9,15 +8,18 @@ import respx
 from dishka import make_async_container
 
 from autostudio.clientconf import ClientInfo, NotifyConfig, SinkConfig, load_client_config
+from autostudio.clientconf import ClientInfo as Client
 from autostudio.errors import AutoStudioError, ConfigError
-from autostudio.llm import FakeLLM
+from autostudio.llm import FakeLLM, ResilientLLM
 from autostudio.prices import cli, demo
 from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product
+from autostudio.prices.extract import PriceGuess
 from autostudio.prices.fetch import PoliteFetcher
+from autostudio.prices.heuristics import guess_price
 from autostudio.prices.monitor import PricesDeps, RunResult
-from autostudio.prices.providers import PricesProvider
+from autostudio.prices.providers import PricesProvider, price_model
 from autostudio.providers import CoreProvider
-from autostudio.settings import Settings
+from autostudio.settings import LLMProvider, Settings
 
 EXAMPLE = Path(__file__).resolve().parents[2] / 'examples' / 'prices' / 'client.toml'
 IP = '93.184.215.14'
@@ -88,21 +90,70 @@ def client_toml(tmp_path: Path, extra: str = '', out: Path | None = None) -> Pat
 # --- check ---------------------------------------------------------------------------------
 
 
-def test__check__example_config__table_and_ok(clean_env, capsys):
+def test__check__example_config__table_readiness_notes_not_ok(clean_env, capsys):
     invoke('check', str(EXAMPLE))
     out = capsys.readouterr().out
     assert 'iphone-15-128' in out
     assert 'selector .price-now' in out
     assert '3 товаров, 9 ссылок, клиент demo-prices' in out
-    assert '! llm_fallback включён, но AUTOSTUDIO_LLM_PROVIDER=fake' in out
-    assert '✓ конфиг и окружение в порядке' in out
+    assert 'llm_fallback' not in out  # в образце ступень модели выключена (Premium)
+    assert '! sink.backend = "csv"' in out
+    assert '! prices.contact_email = monitor@autostudio.example: адрес из образца' in out
+    assert '! ссылок на демо-доменах (*.example и т.п.): 9' in out
+    # Образец читается, но к боевому запуску не готов — и check говорит это прямо.
+    assert '✓ конфиг и окружение читаются; к боевому запуску замечаний: 3' in out
+    assert 'конфиг и окружение в порядке' not in out
+
+
+def test__check__example_strict__not_ready_error(clean_env, capsys):
+    with pytest.raises(ConfigError, match='не готово к боевому запуску: 3'):
+        invoke('check', str(EXAMPLE), '--strict')
+    assert '✗ sink.backend = "csv"' in capsys.readouterr().out
+
+
+def test__check__llm_fallback_with_fake_provider__problem_not_note(clean_env, tmp_path, capsys):
+    with pytest.raises(ConfigError, match='не готово'):
+        invoke('check', str(client_toml(tmp_path, extra='llm_fallback = true')))
+    assert '✗ llm_fallback включён, но AUTOSTUDIO_LLM_PROVIDER=fake' in capsys.readouterr().out
+
+
+def test__check__ready_client__all_ok(clean_env, tmp_path, capsys):
+    creds = tmp_path / 'sa.json'
+    creds.write_text('{}')
+    clean_env.setenv('GOOGLE_APPLICATION_CREDENTIALS', str(creds))
+    path = client_toml(tmp_path)
+    text = path.read_text().replace(f'csv_dir = "{tmp_path / "out"}"', 'backend = "google"\nspreadsheet_id = "X"')
+    path.write_text(text.replace('ops@studio.example', 'ops@studio.ge'))  # настоящий домен, а не из образца
+    invoke('check', str(path), '--strict')
+    assert '✓ конфиг и окружение в порядке' in capsys.readouterr().out
+
+
+def test__readiness_report__empty_product_no_own_price_unknown_language():
+    config = PricesConfig(
+        client=Client(id='acme-shop', name='Acme', language='ka'),
+        sink=SinkConfig(backend='google', spreadsheet_id='X'),
+        prices=PricesSection(
+            products=[
+                Product(id='p1', name='P'),
+                Product(id='p2', name='Q', offers=[Offer(competitor='A', url=f'http://{IP}/p')]),
+            ],
+            contact_email='ops@studio.ge',
+        ),
+    )
+    report = cli.readiness_report(config)
+    assert report == [
+        'product p1: нет ни одной ссылки конкурента — товар не проверяется',
+        'product p1: нет own_price — сравнения «дешевле вас» не будет',
+        'product p2: нет own_price — сравнения «дешевле вас» не будет',
+        'client.language = "ka": перевода нет, таблица и сообщения будут на английском',
+    ]
 
 
 def test__check__google_without_credentials__config_error(clean_env, tmp_path, capsys):
     path = client_toml(tmp_path)
     text = path.read_text().replace(f'csv_dir = "{tmp_path / "out"}"', 'backend = "google"\nspreadsheet_id = "X"')
     path.write_text(text)
-    with pytest.raises(ConfigError, match='окружение не готово'):
+    with pytest.raises(ConfigError, match='не готово к боевому запуску'):
         invoke('check', str(path))
     assert '✗ GOOGLE_APPLICATION_CREDENTIALS не задан' in capsys.readouterr().out
 
@@ -199,6 +250,22 @@ def test__summary__failures_listed():
     assert cli.summary(result) == 'prices: прочитано 1, не прочитано 2 (timeout 2), событий 0, страниц модели 1'
 
 
+def test__summary__model_tokens_and_skipped_run():
+    used = RunResult(
+        checked=1,
+        failed=0,
+        changes=(),
+        digest=None,
+        operator_alert=None,
+        llm_pages=2,
+        llm_input_tokens=3000,
+        llm_output_tokens=40,
+    )
+    assert cli.summary(used).endswith('страниц модели 2, токенов модели 3000 вх. / 40 вых.')
+    skipped = RunResult(checked=0, failed=0, changes=(), digest=None, operator_alert=None, llm_pages=0, skipped=True)
+    assert cli.summary(skipped) == 'prices: пропущено — предыдущий проход по этому клиенту ещё идёт'
+
+
 # --- probe ---------------------------------------------------------------------------------
 
 
@@ -250,7 +317,7 @@ async def test__probe_report__plain_page_with_llm__suggestion_and_verified_quote
         )
     assert 'selector   — (selector_not_found)' in report
     assert "llm        729 GEL ← '729 ₾'" in report
-    assert 'модель fake' in report
+    assert 'эвристика fake — не ИИ, в боевой запуск не попадает' in report
     assert 'Итог бесплатного каскада: ✗ selector_not_found' in report
     assert 'div.cost-box' in report
     assert 'attr = "data-price"' in report
@@ -303,6 +370,35 @@ async def test__probe_report__unparseable_selector_suggestion_offered():
     assert '(валюта не найдена)' not in report
 
 
+async def test__probe_report__real_provider__labelled_model_without_fallback(monkeypatch):
+    built: list[object] = []
+
+    class Model(FakeLLM):
+        @property
+        def model(self) -> str:
+            return 'gpt-test'
+
+    def fake_make_llm(settings: Settings, fake: FakeLLM | None = None, on_fallback: object = None) -> FakeLLM:
+        built.append(fake)
+        return Model({PriceGuess: guess_price})
+
+    monkeypatch.setattr(cli, 'make_llm', fake_make_llm)
+    page = '<html><body><div class="cost-box">Цена: 729 ₾</div></body></html>'
+    offer = Offer(competitor='probe', url='https://shop.example/p')
+    async with site({'/p': httpx.Response(200, headers={'content-type': 'text/html'}, text=page)}) as http:
+        report = await cli.probe_report(
+            'https://shop.example/p',
+            section=SECTION,
+            offer=offer,
+            http=http,
+            resolver=resolve_public,
+            use_llm=True,
+            settings=Settings(llm_provider=LLMProvider.OPENAI, llm_model='gpt-test'),
+        )
+    assert '(модель gpt-test' in report
+    assert built == [None]  # без запасной эвристики: сбой ключа не выдаёт себя за ответ модели
+
+
 def test__probe__no_contact_email__config_error(clean_env):
     with pytest.raises(ConfigError, match='contact-email'):
         invoke('probe', f'http://{IP}/p')
@@ -344,6 +440,10 @@ async def test__run_demo__two_days__cascade_alerts_and_tabs(tmp_path, capsys):
     assert 'alerts: price 3, stock 1, undercut 2; operator: alerted' in summary
     assert 'Model calls: 2' in summary
     assert 'Report highlight: Price changes caught: 3' in summary
+    assert 'skipped: the site asks robots not to visit this page' in summary  # колонка статуса не обрезана
+    assert '[operator channel, internal — the client does not see this]' in printed
+    assert 'Successful runs: 2 of 2 (100.0%)' in summary
+    assert (tmp_path / 'report.md').read_text(encoding='utf-8').startswith('# Automation report: Tech Corner Tbilisi')
     assert '• iPhone 15 128GB — Shop A: 2,749 → 2,599 GEL (−5.5%)' in printed
     assert '• iPhone 15 128GB — Shop B: out of stock' in printed
     assert "селектор '.price-now' не находит цену" in printed
@@ -392,7 +492,7 @@ async def test__prices_provider__builds_deps_under_client_data_dir(tmp_path):
         CoreProvider(), PricesProvider(resolver=resolve_public), context={Settings: settings, PricesConfig: config}
     )
     deps = await container.get(PricesDeps)
-    assert isinstance(deps.llm, FakeLLM)  # llm_fallback = true в образце, провайдер fake
+    assert deps.llm is None  # в образце ступень модели выключена
     assert isinstance(deps.new_fetcher(), PoliteFetcher)
     assert deps.new_fetcher() is not deps.new_fetcher()  # кэш robots.txt — на один запуск
     assert (tmp_path / 'demo-prices' / 'prices.sqlite').exists()
@@ -427,5 +527,47 @@ def test__registry__points_to_this_package():
 def test__decimal_in_example__no_float_drift():
     config = load_client_config(EXAMPLE, PricesConfig)
     assert config.prices.products[0].own_price == Decimal('2699.00')
+    assert str(config.prices.products[0].own_price) == '2699.00'  # строка, а не двоичная дробь
     assert config.prices.alert_change_pct == Decimal(3)
-    assert dt.datetime.now(dt.UTC).tzinfo is dt.UTC
+    assert all(isinstance(p.own_price, Decimal) for p in config.prices.products)
+
+
+def _with_fallback(config: PricesConfig) -> PricesConfig:
+    import msgspec
+
+    return msgspec.structs.replace(config, prices=msgspec.structs.replace(config.prices, llm_fallback=True))
+
+
+def test__price_model__fallback_with_fake_provider__no_heuristic_in_production():
+    # Эвристика «первое число с валютой» берёт порог доставки — в таблицу клиента она не попадает.
+    config = _with_fallback(load_client_config(EXAMPLE, PricesConfig))
+    assert price_model(Settings(), config) is None
+    assert price_model(Settings(), load_client_config(EXAMPLE, PricesConfig)) is None
+
+
+async def test__price_model__real_provider__no_silent_heuristic_fallback(monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-test')
+    config = _with_fallback(load_client_config(EXAMPLE, PricesConfig))
+    llm = price_model(Settings(llm_provider=LLMProvider.OPENAI, llm_model='gpt-5.4-mini'), config)
+    assert llm is not None
+    assert not isinstance(llm, ResilientLLM | FakeLLM)
+    assert llm.model == 'gpt-5.4-mini'
+    await llm.aclose()
+
+
+async def test__prices_provider__real_model__closed_with_container(tmp_path, monkeypatch):
+    closed: list[bool] = []
+
+    class Model(FakeLLM):
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr('autostudio.prices.providers.make_llm', lambda settings: Model())
+    config = _with_fallback(load_client_config(EXAMPLE, PricesConfig))
+    settings = Settings(data_dir=tmp_path, llm_provider=LLMProvider.OPENAI)
+    container = make_async_container(
+        CoreProvider(), PricesProvider(resolver=resolve_public), context={Settings: settings, PricesConfig: config}
+    )
+    assert isinstance((await container.get(PricesDeps)).llm, Model)
+    await container.close()
+    assert closed == [True]

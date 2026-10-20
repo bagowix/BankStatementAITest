@@ -42,7 +42,9 @@ def render(message: Outgoing, user: str, first_index: int) -> tuple[str, list[Bu
     if message.to == ADMINS:
         return f'[→ администраторам] {message.text}', []
     if message.to is not None and message.to != user:
-        return f'[→ {message.to}] {message.text}', []
+        # В консоли «доставка» другому чату — это показ; квитанция отправителю — следом.
+        receipt = f'\n🤖 {message.receipt.delivered}' if message.receipt is not None else ''
+        return f'[→ {message.to}] {message.text}{receipt}', []
     lines = [f'🤖 {message.text}']
     buttons = [button for row in message.buttons for button in row]
     index = first_index
@@ -101,10 +103,13 @@ async def repl(
                 return handled
             line = line.strip()
             base = Incoming(user=user, name=name, language=language, is_admin=admin)
-            if line.isdigit() and 1 <= int(line) <= len(pressable):
+            # `isascii`: «²» и «٣» — тоже isdigit/isdecimal, но int() на них падает.
+            if line.isascii() and line.isdecimal() and 1 <= int(line) <= len(pressable):
                 incoming = msgspec.structs.replace(base, data=pressable[int(line) - 1].data)
             elif line.startswith('/share '):
-                incoming = msgspec.structs.replace(base, phone=line.removeprefix('/share ').strip())
+                # /share — «Отправить мой номер»: свой номер оператора-«покупателя».
+                phone = line.removeprefix('/share ').strip()
+                incoming = msgspec.structs.replace(base, phone=phone, phone_verified=True)
             elif line:
                 incoming = msgspec.structs.replace(base, text=line)
     return handled

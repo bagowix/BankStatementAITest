@@ -32,3 +32,37 @@ def test__examples_dir__not_found__config_error(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ConfigError, match='examples/inbox'):
         demo.examples_dir()
+
+
+async def test__run_demo__out_dir_with_user_files__refused_and_files_kept(tmp_path):
+    (tmp_path / 'drafts').mkdir()
+    contract = tmp_path / 'drafts' / 'contract.docx'
+    contract.write_bytes(b'important')
+    (tmp_path / 'state').mkdir()
+    (tmp_path / 'state' / 'tax-2025.pdf').write_bytes(b'pdf')
+    with pytest.raises(ConfigError, match='не пуст'):
+        await run_demo(tmp_path)
+    assert contract.read_bytes() == b'important' and (tmp_path / 'state' / 'tax-2025.pdf').exists()
+
+
+async def test__run_demo__own_dir_with_extra_user_file__rerun_keeps_it(tmp_path):
+    await run_demo(tmp_path)
+    keep = tmp_path / 'drafts' / 'my-notes.txt'
+    keep.write_text('mine', encoding='utf-8')
+    await run_demo(tmp_path)
+    assert keep.read_text(encoding='utf-8') == 'mine'
+    assert len(list((tmp_path / 'drafts').glob('*.eml'))) == 6
+
+
+async def test__run_demo__legacy_demo_dir_without_marker__accepted(tmp_path):
+    await run_demo(tmp_path)
+    (tmp_path / '.autostudio-demo').unlink()
+    summary = await run_demo(tmp_path)
+    assert 'Run 1: 10 processed' in summary and (tmp_path / '.autostudio-demo').exists()
+
+
+async def test__run_demo__out_is_a_file__config_error(tmp_path):
+    target = tmp_path / 'file.txt'
+    target.write_text('x', encoding='utf-8')
+    with pytest.raises(ConfigError, match='файл'):
+        await run_demo(target)

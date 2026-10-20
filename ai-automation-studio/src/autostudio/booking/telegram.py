@@ -4,11 +4,14 @@
 ключ чата `tg:<id>`, кто администратор (по `admin_chat_ids`), инлайн-кнопки,
 клавиатура «Отправить мой номер», ответ на нажатие кнопки, ошибки Bot API.
 
-В группах (например, общий чат сотрудников из `admin_chat_ids`) бот слушает только
-служебные команды администраторов, чтобы не отвечать на каждую реплику коллег.
+В группах бот слушает только служебные команды и только в группах из
+`admin_chat_ids` (общий чат сотрудников): расписание с именами и телефонами не должно
+попасть в семейный или публичный чат, куда кто-то добавил бота, даже если команду
+набрал владелец.
 """
 
 import asyncio
+import datetime as dt
 import logging
 from collections.abc import Sequence
 from typing import Final
@@ -41,6 +44,7 @@ from autostudio.booking.engine import Engine
 from autostudio.booking.messages import DeliveryError, Incoming, Outgoing, RecipientGoneError, Sender, deliver
 from autostudio.booking.reminders import ReminderLoop
 from autostudio.booking.texts import Texts
+from autostudio.clock import Clock, system_now
 from autostudio.errors import NotifyError
 from autostudio.notify import Notifier, clip
 
@@ -48,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 KEY_PREFIX: Final = 'tg:'
 _RETRY_AFTER_MAX_S: Final = 30
+# Один и тот же сбой (баг, недоступный администратор) — не чаще раза в час: поток
+# поддельных нажатий не должен превращаться в поток сообщений оператору.
+ALERT_EVERY: Final = dt.timedelta(hours=1)
 _COMMANDS: Final = (('start', 'cmd_start'), ('book', 'cmd_book'), ('my', 'cmd_my'), ('cancel', 'cmd_cancel'))
 
 type Markup = InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove
@@ -128,8 +135,10 @@ class BookingBot:
         engine: Движок разговора.
         sender: Канал (обычно `TelegramSender`).
         texts: Тексты (извинение при сбое, описания команд).
-        notifier: Дополнительный канал владельца из `[notify]` или None.
+        notifier: Дополнительный канал владельца из `[notify]` или None (консоль сюда не
+            передаётся: в боевом режиме уведомления с именами и телефонами не пишутся в логи).
         operator: Канал оператора для сигнала о сбое или None.
+        clock: Часы (ограничение частоты сигналов оператору).
     """
 
     def __init__(
@@ -141,6 +150,7 @@ class BookingBot:
         texts: Texts,
         notifier: Notifier | None = None,
         operator: Notifier | None = None,
+        clock: Clock = system_now,
     ) -> None:
         self._config = config
         self._engine = engine
@@ -148,7 +158,9 @@ class BookingBot:
         self._texts = texts
         self._notifier = notifier
         self._operator = operator
+        self._clock = clock
         self._admin_ids = frozenset(config.booking.admin_chat_ids)
+        self._alerted: dict[str, dt.datetime] = {}
 
     @property
     def admin_keys(self) -> list[str]:
@@ -171,9 +183,10 @@ class BookingBot:
         text = message.text
         if message.chat.type != 'private':
             command = AdminDesk.parse_command(text)[0] if text and text.startswith('/') else ''
-            if not admin or command not in ADMIN_COMMANDS:
+            if message.chat.id not in self._admin_ids or command not in ADMIN_COMMANDS:
                 return None
         name, handle = self._who(user)
+        contact = message.contact
         return Incoming(
             user=chat_key(message.chat.id),
             name=name,
@@ -181,7 +194,10 @@ class BookingBot:
             language=user.language_code,
             is_admin=admin,
             text=text if text is not None else '',
-            phone=message.contact.phone_number if message.contact is not None else None,
+            phone=contact.phone_number if contact is not None else None,
+            # Карточку контакта можно переслать чужую: «свой номер» — только когда Telegram
+            # говорит, что карточка принадлежит отправителю.
+            phone_verified=contact is not None and contact.user_id == user.id,
         )
 
     def incoming_from_callback(self, query: CallbackQuery) -> Incoming | None:
@@ -191,7 +207,7 @@ class BookingBot:
         private = query.message is None or query.message.chat.type == 'private'
         admin = self.is_admin(user.id, chat_id)
         data = query.data or ''
-        if not private and not (admin and split(data)[0] == ADMIN_CANCEL):
+        if not private and not (chat_id in self._admin_ids and split(data)[0] == ADMIN_CANCEL):
             return None
         name, handle = self._who(user)
         return Incoming(
@@ -208,12 +224,27 @@ class BookingBot:
             logger.exception('сбой обработки сообщения от %s', incoming.user)
             language = self._texts.resolve_language(incoming.language)
             replies = [Outgoing(text=self._texts.get(language, 'error'))]
-            await self._alert(f'⚠️ {self._config.client.name} / booking: сбой обработки сообщения: {type(exc).__name__}')
-        await deliver(self._sender, incoming.user, replies, admins=self.admin_keys, notifier=self._notifier)
+            kind = type(exc).__name__
+            await self._alert(kind, f'⚠️ {self._config.client.name} / booking: сбой обработки сообщения: {kind}')
+        failed = await deliver(self._sender, incoming.user, replies, admins=self.admin_keys, notifier=self._notifier)
+        unreachable = sorted(set(failed) & set(self.admin_keys))
+        if unreachable:
+            # Владелец, не нажавший /start или заблокировавший бота, не узнает о записях —
+            # об этом должен узнать оператор, а не только лог.
+            await self._alert(
+                'admin_unreachable',
+                f'⚠️ {self._config.client.name} / booking: администратор {", ".join(unreachable)} не получает '
+                'сообщения бота (не нажал /start или заблокировал бота)',
+            )
 
-    async def _alert(self, text: str) -> None:
+    async def _alert(self, kind: str, text: str) -> None:
         if self._operator is None:
             return
+        now = self._clock()
+        last = self._alerted.get(kind)
+        if last is not None and now - last < ALERT_EVERY:
+            return
+        self._alerted[kind] = now
         try:
             await self._operator.send(text)
         except NotifyError as exc:

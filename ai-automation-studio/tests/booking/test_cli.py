@@ -2,7 +2,9 @@ import datetime as dt
 import json
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 
 from autostudio.booking import cli
 from autostudio.booking.domain import Customer, Slot
@@ -25,7 +27,7 @@ def env(monkeypatch, tmp_path):
 def test__check__offline__config_summary_and_slots(env, capsys):
     cli.check(EXAMPLE, offline=True)
     out = capsys.readouterr().out
-    assert 'конфиг:' in out and 'секреты: не проверялись' in out
+    assert 'конфиг:' in out and 'секреты и ключ модели: не проверялись' in out
     assert 'Demo Barbers (demo-booking)' in out and 'ближайшие свободные слоты:' in out
     assert out.count('(Giorgi)') >= 3
     assert not (env / 'data').exists()  # без побочных эффектов
@@ -47,7 +49,7 @@ def test__check_environment__google_sink_and_notify_channels__each_secret_requir
     text = EXAMPLE.read_text(encoding='utf-8').replace(
         'backend = "csv"', 'backend = "google"\nspreadsheet_id = "sheet-1"'
     )
-    text = text.replace('console = true', 'console = true\ntelegram_chat_id = "42"\nwebhook_url_env = "HOOK"')
+    text = text.replace('console = false', 'console = false\ntelegram_chat_id = "42"\nwebhook_url_env = "HOOK"')
     config = cli.load_booking_config(write_toml(text))
     environ = {'BOOKING_BOT_TOKEN': TOKEN}
     with pytest.raises(ConfigError, match='GOOGLE_APPLICATION_CREDENTIALS'):
@@ -132,3 +134,96 @@ def test__root_cli__import__booking_subcommand_registered():
     from autostudio.cli import app
 
     assert 'booking' in app
+
+
+API = f'https://api.telegram.org/bot{TOKEN}'
+
+
+def test__check__offline_with_openai_and_no_key__passes_key_not_checked(env, monkeypatch, capsys):
+    monkeypatch.setenv('AUTOSTUDIO_LLM_PROVIDER', 'openai')
+    cli.check(EXAMPLE, offline=True)
+    out = capsys.readouterr().out
+    assert 'ключ модели: не проверялись' in out and 'модель: openai (gpt-5.4-mini)' in out
+    with pytest.raises(ConfigError, match='OPENAI_API_KEY'):
+        cli.check(EXAMPLE)  # без --offline ключ обязателен
+
+
+def test__check__no_admins_and_no_notify_channel__config_error(env, write_toml, monkeypatch):
+    text = EXAMPLE.read_text(encoding='utf-8').replace('admin_chat_ids = [111111111]', 'admin_chat_ids = []')
+    path = write_toml(text.replace('console = false', 'console = true'))
+    with pytest.raises(ConfigError, match='никто не узнает'):
+        cli.check(path, offline=True)
+    monkeypatch.setenv('BOOKING_BOT_TOKEN', TOKEN)
+    with pytest.raises(ConfigError, match='никто не узнает'):
+        cli.run(path)
+    hooked = write_toml(text.replace('console = false', 'webhook_url_env = "HOOK"'), name='hooked.toml')
+    cli.check(hooked, offline=True)  # вебхук — настоящий канал
+
+
+def test__check__offline_and_online__refused(env):
+    with pytest.raises(ConfigError, match='взаимоисключающи'):
+        cli.check(EXAMPLE, offline=True, online=True)
+
+
+@respx.mock
+def test__check__online_token_alive_admin_started__ok(env, monkeypatch, capsys):
+    monkeypatch.setenv('BOOKING_BOT_TOKEN', TOKEN)
+    respx.get(f'{API}/getMe').mock(
+        return_value=httpx.Response(200, json={'ok': True, 'result': {'username': 'demo_bot'}})
+    )
+    respx.get(f'{API}/getChat').mock(return_value=httpx.Response(200, json={'ok': True, 'result': {'id': 111111111}}))
+    cli.check(EXAMPLE, online=True)
+    out = capsys.readouterr().out
+    assert 'бот @demo_bot отвечает' in out and 'чаты администраторов доступны (1)' in out and TOKEN not in out
+
+
+@respx.mock
+async def test__probe_telegram__admin_never_started_or_token_revoked__config_error_without_token():
+    async with httpx.AsyncClient() as http:
+        respx.get(f'{API}/getMe').mock(return_value=httpx.Response(200, json={'ok': True, 'result': {'username': 'b'}}))
+        respx.get(f'{API}/getChat').mock(
+            return_value=httpx.Response(400, json={'ok': False, 'description': 'Bad Request: chat not found'})
+        )
+        with pytest.raises(ConfigError, match='нажать /start') as caught:
+            await cli.probe_telegram(http, TOKEN, [111111111])
+        assert '111111111' in str(caught.value) and TOKEN not in str(caught.value)
+        respx.get(f'{API}/getMe').mock(
+            return_value=httpx.Response(401, json={'ok': False, 'description': 'Unauthorized'})
+        )
+        with pytest.raises(ConfigError, match='Unauthorized'):
+            await cli.probe_telegram(http, TOKEN, [])
+        respx.get(f'{API}/getMe').mock(side_effect=httpx.ConnectError(f'{API}/getMe'))
+        with pytest.raises(ConfigError) as caught:
+            await cli.probe_telegram(http, TOKEN, [])
+        assert str(caught.value) == 'Telegram недоступен: ConnectError'
+        respx.get(f'{API}/getMe').mock(return_value=httpx.Response(502, text='<html>bad gateway</html>'))
+        with pytest.raises(ConfigError, match='не JSON'):
+            await cli.probe_telegram(http, TOKEN, [])
+
+
+def test__describe__idle_staff_console_notify_unwritable_csv__warnings(env, write_toml, monkeypatch):
+    from autostudio.booking import providers
+
+    text = EXAMPLE.read_text(encoding='utf-8')
+    text = text.replace('wed = ["12:00-20:00"]\nthu = ["12:00-20:00"]\nfri = ["12:00-20:00"]\nsat = ["10:00-18:00"]',
+                        'sun = ["12:00-20:00"]')  # fmt: skip
+    text = text.replace('console = false', 'console = true')
+    config = cli.load_booking_config(write_toml(text))
+    monkeypatch.setattr(providers.os, 'access', lambda path, mode: False)
+    lines = cli.describe(config, cli.Settings(data_dir=env / 'data'), dt.datetime(2026, 10, 20, 8, 30, tzinfo=dt.UTC))
+    joined = '\n'.join(lines)
+    assert 'мастер Nika (nika) не работает ни в один день' in joined
+    assert 'console = true: в боевом run уведомления в консоль не пишутся' in joined
+    assert 'CSV-выгрузка не сможет писать' in joined
+    assert f'таблица: csv → {env / "data" / "demo-booking" / "out"}' in joined
+
+
+def test__describe__service_only_idle_staff__warning(env, write_toml):
+    text = EXAMPLE.read_text(encoding='utf-8').replace('staff_ids = ["giorgi"]', 'staff_ids = ["nika"]')
+    text = text.replace('wed = ["12:00-20:00"]\nthu = ["12:00-20:00"]\nfri = ["12:00-20:00"]\nsat = ["10:00-18:00"]',
+                        'sun = ["12:00-20:00"]')  # fmt: skip
+    config = cli.load_booking_config(write_toml(text))
+    lines = cli.describe(config, cli.Settings(data_dir=env / 'data'), dt.datetime(2026, 10, 20, 8, 30, tzinfo=dt.UTC))
+    assert any(
+        line.endswith('услуга combo: никто из её мастеров не работает — записаться на неё нельзя') for line in lines
+    )

@@ -557,6 +557,74 @@ def test__extract__schema_dot_thousands_unconfirmed__strict_with_warning():
     assert result.warnings == ('schema_ambiguous_decimal',)
 
 
+def raw_ld(offers: str) -> str:
+    # JSON-LD текстом как есть: голое число («"price":2.499») json.dumps из теста не запишет —
+    # Decimal он не умеет, а float мог бы округлить.
+    return f'<script type="application/ld+json">{{"@type":"Product","offers":{offers}}}</script>'
+
+
+def test__extract__json_number_thousands_dot_confirmed_by_page__thousands_with_warning():
+    # Шаблон с number_format без кавычек: «"price": 2.499» — число JSON, а не строка.
+    html = page(raw_ld('{"price":2.499,"priceCurrency":"GEL"}'), '<h1>Phone</h1><p>2 499 ₾</p>')
+    result = reading(extract_price(html, OFFER))
+    assert result.amount == Decimal(2499)
+    assert result.warnings == ('schema_thousands_dot',)
+    assert not result.doubtful
+
+
+def test__extract__json_number_thousands_dot_unconfirmed__doubtful():
+    result = reading(extract_price(page(raw_ld('{"price":2.499,"priceCurrency":"GEL"}')), OFFER))
+    assert result.amount == Decimal('2.499')
+    assert result.warnings == ('schema_ambiguous_decimal',)
+    assert result.doubtful
+
+
+def test__extract__json_number_three_decimals_confirmed_by_page__strict_no_warning():
+    html = page(raw_ld('{"price":1.250,"priceCurrency":"KWD"}'), '<p>Price 1.25 KWD</p>')
+    result = reading(extract_price(html, OFFER))
+    assert result.amount == Decimal('1.250')
+    assert result.warnings == ()
+
+
+@pytest.mark.parametrize(
+    'offers',
+    [
+        '{"@type":"AggregateOffer","lowPrice":2.499,"priceCurrency":"GEL"}',
+        '{"@type":"Offer","priceSpecification":[{"price":2.499,"priceCurrency":"GEL"}]}',
+    ],
+)
+def test__extract__json_number_in_low_price_or_specification__same_ambiguity_check(offers):
+    result = reading(extract_price(page(raw_ld(offers)), OFFER))
+    assert result.amount == Decimal('2.499')
+    assert result.doubtful
+    confirmed = reading(extract_price(page(raw_ld(offers), '<p>2 499 ₾</p>'), OFFER))
+    assert confirmed.amount == Decimal(2499)
+    assert confirmed.warnings == ('schema_thousands_dot',)
+
+
+@pytest.mark.parametrize(
+    ('price', 'amount'),
+    [
+        ('2499', '2499'),  # целое неоднозначным не бывает
+        ('24.99', '24.99'),
+        ('2.4990', '2.499'),  # четыре знака после точки — не группа тысяч
+        ('1e3', '1000'),
+        ('0.500', '0.5'),  # группа тысяч не начинается с нуля
+        ('"0.500"', '0.5'),
+    ],
+)
+def test__extract__json_price_not_thousands_shaped__strict_no_warning(price, amount):
+    result = reading(extract_price(page(raw_ld(f'{{"price":{price},"priceCurrency":"GEL"}}')), OFFER))
+    assert result.amount == Decimal(amount)
+    assert result.warnings == ()
+
+
+def test__explain__json_number_ambiguous__warning_visible_to_operator():
+    reports = {r.rung: r for r in explain(page(raw_ld('{"price":1.299,"priceCurrency":"GEL"}')), OFFER)}
+    assert reports['json_ld'].reading is not None
+    assert reports['json_ld'].reading.warnings == ('schema_ambiguous_decimal',)
+
+
 def test__explain__ambiguous_schema__warning_visible_to_operator():
     data = {'@type': 'Product', 'offers': {'price': '1.299', 'priceCurrency': 'GEL'}}
     reports = {r.rung: r for r in explain(page(ld(data), '<p>1 299 ₾</p>'), OFFER)}
@@ -632,7 +700,11 @@ def test__verify_guess__free_quote_allowed__zero_with_declared_currency():
 
 
 def related_graph(main_url: str | None = None) -> dict[str, object]:
-    main: dict[str, object] = {'@type': 'Product', 'name': 'iPhone 15', 'offers': {'price': '2799', 'priceCurrency': 'GEL'}}
+    main: dict[str, object] = {
+        '@type': 'Product',
+        'name': 'iPhone 15',
+        'offers': {'price': '2799', 'priceCurrency': 'GEL'},
+    }
     if main_url:
         main['url'] = main_url
     related = {'@type': 'Product', 'name': 'Case', 'offers': {'price': '49', 'priceCurrency': 'GEL'}}
@@ -661,7 +733,10 @@ def test__extract__json_ld_related_via_is_related_to__ignored():
 
 
 def test__extract__json_ld_only_list_products__no_structured_price():
-    data = {'@type': 'ItemList', 'itemListElement': [{'@type': 'Product', 'offers': {'price': 49, 'priceCurrency': 'GEL'}}]}
+    data = {
+        '@type': 'ItemList',
+        'itemListElement': [{'@type': 'Product', 'offers': {'price': 49, 'priceCurrency': 'GEL'}}],
+    }
     failure = extract_price(page(ld(data)), OFFER)
     assert isinstance(failure, ExtractionFailure)
     assert failure.reason == 'no_price'
@@ -685,6 +760,14 @@ def test__extract__two_products_one_matches_page_url__that_one_without_warning()
     ]
     result = reading(extract_price(page(ld(data)), OFFER))
     assert (result.amount, result.warnings) == (Decimal(2799), ())
+
+
+def test__extract__two_products_broken_url_in_markup__ignored_not_crash():
+    data = [
+        {'@type': 'Product', 'url': 'http://[::1', 'offers': {'price': '49', 'priceCurrency': 'GEL'}},
+        {'@type': 'Product', 'url': 'https://shop.example/p/1', 'offers': {'price': '2799', 'priceCurrency': 'GEL'}},
+    ]
+    assert reading(extract_price(page(ld(data)), OFFER)).amount == Decimal(2799)
 
 
 def test__extract__two_products_canonical_and_heading__resolved():
@@ -799,4 +882,3 @@ def test__budget_denied__selector_reason_kept_else_llm_budget():
 
     assert budget_denied(ExtractionFailure(reason='no_price')).reason == 'llm_budget'
     assert budget_denied(ExtractionFailure(reason='selector_not_found')).reason == 'selector_not_found'
-

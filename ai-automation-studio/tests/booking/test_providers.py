@@ -101,3 +101,70 @@ async def test__booking_provider__no_operator__degradation_hook_silent(tmp_path,
     llm = await built.get(LLMClient)
     await llm._on_fallback(LLMError('down'))
     await built.close()
+
+
+async def test__owner_notifier__console_only_or_channels__none_or_real_channel(monkeypatch):
+    import httpx
+
+    from autostudio.booking.providers import owner_notifier
+    from autostudio.clientconf import NotifyConfig
+    from autostudio.notify import ConsoleNotifier, WebhookNotifier
+
+    async with httpx.AsyncClient() as http:
+        # Консоль в боевом режиме не канал: имена и телефоны не должны попадать в логи.
+        assert owner_notifier(NotifyConfig(console=True), http) is None
+        assert owner_notifier(NotifyConfig(), http) is None
+        monkeypatch.setenv('HOOK', 'https://hooks.example.test/x')
+        channel = owner_notifier(NotifyConfig(console=True, webhook_url_env='HOOK'), http)
+        assert isinstance(channel, WebhookNotifier) and not isinstance(channel, ConsoleNotifier)
+
+
+async def test__telegram_provider__console_notify__owner_alert_not_printed(tmp_path, monkeypatch, capsys):
+    import msgspec
+
+    from autostudio.booking.messages import ADMINS, Outgoing, deliver
+    from autostudio.clientconf import NotifyConfig
+    from tests.booking.helpers import make_config
+
+    monkeypatch.setenv('BOOKING_BOT_TOKEN', '123456:' + 'A' * 35)
+    config = msgspec.structs.replace(make_config(), notify=NotifyConfig(console=True))
+    built = container(tmp_path, config, telegram=True)
+    booking_bot = await built.get(BookingBot)
+    assert booking_bot._notifier is None
+    alert = Outgoing(to=ADMINS, text='Customer: Anna, +995 555 12 34 56')
+    await deliver(Recorder(), 'tg:1', [alert], admins=booking_bot.admin_keys, notifier=booking_bot._notifier)
+    assert '+995' not in capsys.readouterr().out
+    await built.close()
+
+
+def test__resolve_sink__relative_csv_dir__under_client_data_dir(tmp_path, config):
+    from pathlib import Path
+
+    from autostudio.booking.providers import resolve_sink
+    from autostudio.clientconf import SinkConfig
+
+    settings = Settings(data_dir=Path('/data'))
+    assert resolve_sink(SinkConfig(csv_dir=Path('out')), settings, config).csv_dir == Path('/data/test-barbers/out')
+    absolute = SinkConfig(csv_dir=tmp_path / 'abs')
+    assert resolve_sink(absolute, settings, config) is absolute
+
+
+async def test__booking_provider__sink__csv_written_under_data_dir(tmp_path, config):
+    from autostudio.sinks import CsvSink, TableSink
+
+    built = container(tmp_path, config)
+    sink = await built.get(TableSink)
+    assert isinstance(sink, CsvSink)
+    assert sink.path_for('Bookings') == tmp_path / 'data' / 'test-barbers' / 'var' / 'out' / 'Bookings.csv'
+    await built.close()
+
+
+def test__csv_dir_problem__writable_file_in_way_or_no_rights__reported(tmp_path, monkeypatch):
+    from autostudio.booking import providers
+
+    assert providers.csv_dir_problem(tmp_path / 'new' / 'out') is None
+    blocker = tmp_path / 'file'
+    blocker.write_text('x', encoding='utf-8')
+    assert 'не каталог' in providers.csv_dir_problem(blocker / 'out')
+    monkeypatch.setattr(providers.os, 'access', lambda path, mode: False)
+    assert 'нет прав на запись' in providers.csv_dir_problem(tmp_path / 'out')

@@ -18,7 +18,7 @@
 import datetime as dt
 import secrets
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Final
@@ -209,7 +209,7 @@ class BookingStore:
         return self._path
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self) -> Generator[sqlite3.Connection]:
         if self._readonly:
             target, uri = f'{self._path.resolve().as_uri()}?mode=ro', True
         else:
@@ -219,7 +219,7 @@ class BookingStore:
             yield conn
 
     @contextmanager
-    def _write(self) -> Iterator[sqlite3.Connection]:
+    def _write(self) -> Generator[sqlite3.Connection]:
         if self._readonly:
             raise BookingError('хранилище открыто только для чтения')
         with self._connect() as conn:
@@ -507,7 +507,11 @@ class BookingStore:
                 current = self._get(conn, due.id)
                 if current is None or not current.active:
                     return None
-                if (current.start, current.staff_id, current.scheduled_at) != (due.start, due.staff_id, due.scheduled_at):
+                if (current.start, current.staff_id, current.scheduled_at) != (
+                    due.start,
+                    due.staff_id,
+                    due.scheduled_at,
+                ):
                     return None
                 for minutes in reminder.covers:
                     if not conn.execute(_CLAIM, (due.id, minutes, _ts(now))).rowcount:

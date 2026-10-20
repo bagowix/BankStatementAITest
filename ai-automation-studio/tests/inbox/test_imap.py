@@ -239,3 +239,14 @@ def test__fake_server__non_peek_fetch__marks_seen():
     server.uid('FETCH', '1', '(BODY[])')
     server.uid('FETCH', '2', '(RFC822)')
     assert server.flags[1] == {'\\Seen'} and server.flags[2] == {'\\Seen'}
+
+
+async def test__imap__login_refused_for_other_reason__server_reason_without_password_hint():
+    server = FakeImapServer()
+    server.fail['LOGIN'] = imaplib.IMAP4.error("b'[ALERT] Too many simultaneous connections. (Failure)'")
+    with pytest.raises(MailboxError) as caught:
+        async with _box(server):
+            pass
+    message = str(caught.value)
+    assert message.endswith('[ALERT] Too many simultaneous connections. (Failure)')
+    assert 'пароль приложения' not in message

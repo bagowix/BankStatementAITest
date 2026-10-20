@@ -101,3 +101,59 @@ def test__default_categories__fresh_list_each_call():
     first = default_categories()
     first.pop()
     assert len(default_categories()) == 5
+
+
+def test__category__label_lead_flag_and_title_fallback():
+    labelled = Category(id='booking_request', description='x', label={'ru': 'Заявка'}, notify=True)
+    assert labelled.title('ru') == 'Заявка' and labelled.title('en') == 'Booking request'
+    assert labelled.is_lead  # без lead — как раньше, по notify
+    assert Category(id='lead', description='x', lead=True).is_lead
+    assert not Category(id='vip', description='x', notify=True, lead=False).is_lead
+
+
+@pytest.mark.parametrize(
+    'kwargs',
+    [
+        {'label': {'russian': 'x'}},
+        {'label': {'ru': ' '}},
+    ],
+)
+def test__category__bad_label__config_error(kwargs):
+    with pytest.raises(ConfigError, match='label'):
+        Category(id='lead', description='x', **kwargs)
+
+
+def test__company__localized_signatures_and_facts():
+    company = CompanyProfile(
+        name='Acme',
+        signature='Best, Acme',
+        signatures={'ru': 'С уважением, Acme'},
+        facts=['Tour: 120 GEL.'],
+        facts_by_language={'ru': ['Тур: 120 GEL.']},
+    )
+    assert company.sign_off_for('ru') == 'С уважением, Acme' and company.sign_off_for('de') == 'Best, Acme'
+    assert company.facts_for('ru') == ['Тур: 120 GEL.'] and company.facts_for('en') == ['Tour: 120 GEL.']
+    assert company.all_facts == ['Tour: 120 GEL.', 'Тур: 120 GEL.']
+
+
+@pytest.mark.parametrize(
+    ('kwargs', 'match'),
+    [
+        ({'signatures': {'ru': ''}}, 'signatures'),
+        ({'facts_by_language': {'russian': ['x']}}, 'facts_by_language'),
+        ({'facts_by_language': {'ru': []}}, 'facts_by_language'),
+        ({'facts_by_language': {'ru': [' ']}}, 'facts_by_language'),
+    ],
+)
+def test__company__bad_localized_values__config_error(kwargs, match):
+    with pytest.raises(ConfigError, match=match):
+        CompanyProfile(name='Acme', **kwargs)
+
+
+def test__example_config__labels_lead_flags_and_russian_texts():
+    config = load_client_config(EXAMPLE, InboxConfig)
+    booking = config.inbox.category('booking_request')
+    assert booking.is_lead and booking.title('ru') == 'Заявка на бронирование'
+    assert config.inbox.company.sign_off_for('ru').startswith('С уважением')
+    assert config.inbox.company.facts_for('ru')[0].startswith('Однодневные')
+    assert str(config.sink.csv_dir).startswith('/data/')

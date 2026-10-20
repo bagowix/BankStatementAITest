@@ -8,7 +8,8 @@
 Цикл напоминаний работает в том же процессе, что и бот, раз в минуту. Раз в час он
 же переписывает вкладку `Schedule` (расписание на горизонт записи) — через
 `supervised_run`, чтобы пинг healthcheck и сигнал оператору о сбое таблицы шли
-по общему для всех пакетов пути.
+по общему для всех пакетов пути. Обновление ограничено по времени (`SCHEDULE_TIMEOUT`):
+зависший Google не должен останавливать напоминания.
 """
 
 import asyncio
@@ -24,7 +25,7 @@ from autostudio.booking.service import PACKAGE, SCHEDULE_TAB
 from autostudio.booking.store import BookingStore
 from autostudio.booking.texts import SCHEDULE_HEADER, Texts
 from autostudio.clock import Clock
-from autostudio.errors import AutoStudioError
+from autostudio.errors import AutoStudioError, SinkError
 from autostudio.events import EventLog
 from autostudio.notify import Notifier
 from autostudio.runlog import Heartbeat, supervised_run
@@ -34,10 +35,16 @@ logger = logging.getLogger(__name__)
 
 TICK: Final = dt.timedelta(minutes=1)
 SCHEDULE_EVERY: Final = dt.timedelta(hours=1)
+SCHEDULE_TIMEOUT_S: Final = 60.0
 
 
-def reminder_message(booking: Booking, config: BookingConfig, texts: Texts) -> Outgoing:
-    """Текст напоминания на языке покупателя с кнопкой «Изменить или отменить»."""
+def reminder_message(booking: Booking, config: BookingConfig, texts: Texts, now: dt.datetime) -> Outgoing:
+    """Текст напоминания на языке покупателя.
+
+    Кнопка «Изменить или отменить» — только пока политика отмены это позволяет: за
+    2 часа до визита при политике «не позже чем за 2 часа» она привела бы к «уже поздно».
+    Тогда вместо кнопки — телефон для связи.
+    """
     lang = booking.language
     text = texts.get(
         lang,
@@ -48,7 +55,12 @@ def reminder_message(booking: Booking, config: BookingConfig, texts: Texts) -> O
         id=booking.id,
         business=config.client.name,
     )
-    return Outgoing(text=text, buttons=[[Button(texts.get(lang, 'btn_manage'), join(BOOKING, booking.id))]])
+    if booking.start - now > dt.timedelta(minutes=config.booking.cancellation_min_before):
+        return Outgoing(text=text, buttons=[[Button(texts.get(lang, 'btn_manage'), join(BOOKING, booking.id))]])
+    phone = config.booking.contact_phone
+    if phone:
+        text = f'{text}\n{texts.get(lang, "call_us", phone=phone)}'
+    return Outgoing(text=text)
 
 
 async def send_due_reminders(
@@ -75,10 +87,12 @@ async def send_due_reminders(
     """
     delivered = 0
     for due in store.due_reminders(now, config.booking.reminders_min_before):
-        if not store.claim_reminder(due, now):
+        # Текст строится по записи, перечитанной при отметке: её могли перенести за эти секунды.
+        booking = store.claim_reminder(due, now)
+        if booking is None:
             continue
         try:
-            await sender.send(due.booking.customer, reminder_message(due.booking, config, texts))
+            await sender.send(booking.customer, reminder_message(booking, config, texts, now))
         except RecipientGoneError as exc:
             # Отметка остаётся: покупатель заблокировал бота, повторять бессмысленно.
             logger.info('напоминание по записи %s не доставлено навсегда: %s', due.booking.id, exc)
@@ -156,6 +170,7 @@ class ReminderLoop:
         operator: Канал оператора для сигнала о сбое или None.
         clock: Часы.
         tick: Пауза между проходами.
+        schedule_timeout: Сколько секунд ждать обновления вкладки `Schedule`.
     """
 
     def __init__(
@@ -171,6 +186,7 @@ class ReminderLoop:
         operator: Notifier | None,
         clock: Clock,
         tick: dt.timedelta = TICK,
+        schedule_timeout: float = SCHEDULE_TIMEOUT_S,
     ) -> None:
         self._config = config
         self._store = store
@@ -182,6 +198,7 @@ class ReminderLoop:
         self._operator = operator
         self._clock = clock
         self._tick = tick
+        self._schedule_timeout = schedule_timeout
         self._last_schedule: dt.datetime | None = None
 
     async def tick(self) -> int:
@@ -202,7 +219,12 @@ class ReminderLoop:
             self._last_schedule = now
 
             async def job() -> int:
-                return await refresh_schedule(self._store, self._sink, now, config=self._config, texts=self._texts)
+                refresh = refresh_schedule(self._store, self._sink, now, config=self._config, texts=self._texts)
+                try:
+                    return await asyncio.wait_for(refresh, timeout=self._schedule_timeout)
+                except TimeoutError:
+                    # Для supervised_run это сбой таблицы: журнал, пинг /fail и сигнал оператору.
+                    raise SinkError(f'вкладка {SCHEDULE_TAB} не обновилась за {self._schedule_timeout:.0f} с') from None
 
             await supervised_run(
                 package=PACKAGE,

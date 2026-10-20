@@ -15,7 +15,8 @@
 6. оператору — о сломанных ссылках и сомнительных ценах (один раз на пороге, а не каждый запуск).
 
 Клиенту не сообщается то, в чём сомневается сам монитор: цена из неоднозначной разметки,
-цена со страницы с несколькими товарами и скачок больше ±50%, пока его не подтвердило
+цена со страницы с несколькими товарами, скачок больше ±50% и цена, которую не с чем сверить
+(первое чтение), больше чем на 50% ниже цены клиента, — последние две, пока их не подтвердило
 повторное чтение. Такие чтения видны в таблице как «нужна проверка» и не становятся базой
 для следующих сравнений.
 
@@ -198,7 +199,9 @@ class Assessment(msgspec.Struct, frozen=True, kw_only=True):
         new_value: Цена или наличие отличаются от прошлых (или это первое чтение).
         operator_lines: Что сказать оператору.
         doubtful: Число под сомнением (неоднозначная разметка, несколько товаров).
-        held: Скачок цены ждёт подтверждения повторным чтением.
+        held: Цена ждёт подтверждения повторным чтением (скачок или «намного ниже вашей»).
+        far_below: Причина задержки — не скачок к прошлой цене, а цена намного ниже цены клиента
+            при том, что сверить её с прошлым чтением нельзя.
     """
 
     key: OfferKey
@@ -214,6 +217,7 @@ class Assessment(msgspec.Struct, frozen=True, kw_only=True):
     operator_lines: tuple[str, ...] = ()
     doubtful: bool = False
     held: bool = False
+    far_below: bool = False
 
     @property
     def recorded(self) -> bool:
@@ -259,6 +263,55 @@ def _jump_key(reading: PriceReading) -> str:
     return f'{format(reading.amount, "f")} {reading.currency or "?"}'
 
 
+class _Hold(msgspec.Struct, frozen=True, kw_only=True):
+    # Почему цена ждёт повторного чтения: строка для оператора и «намного ниже вашей» ли это.
+    line: str
+    far_below: bool
+
+
+def _hold(
+    where: str,
+    offer: Offer,
+    reading: PriceReading,
+    previous: StoredReading | None,
+    change_vs_last: Decimal | None,
+    diff: Decimal | None,
+    own: Decimal | None,
+) -> _Hold | None:
+    """Необычная цена, которой клиенту сразу не сообщаем, или None.
+
+    Скачок ловится сравнением с прошлой ценой. Но цену, которую сверить не с чем (первое
+    чтение, смена валюты, до этого «бесплатно»), монитор сразу сделал бы и «дешевле вас», и
+    базой: «2.50 при вашей 2 599» из сломанной разметки ушло бы клиенту как −99.9%. Такая цена
+    сверяется с ценой клиента — и только вниз: «дороже вас» клиенту не сообщается, а конкурент
+    вдвое дороже — обычное дело. И только точная: «бесплатно» (включено оператором) ниже любой
+    цены на 100%, а «от …» и диапазон — нижние границы, «дешевле вас» по ним не сообщается.
+    """
+    price = f'{texts.cell_amount(reading.amount)} {reading.currency or ""}'.rstrip()
+    url = redact(offer.url)
+    if previous is not None and change_vs_last is not None:
+        if abs(change_vs_last) <= MAX_PLAUSIBLE_JUMP_PCT:
+            return None
+        return _Hold(
+            line=(
+                f'• {where}: цена {texts.cell_amount(previous.amount)} → {price} '
+                f'({texts.cell_pct(change_vs_last)}%) — необычный скачок; клиенту '
+                f'сообщим, если повторное чтение его подтвердит. {url}'
+            ),
+            far_below=False,
+        )
+    if diff is None or own is None or diff >= -MAX_PLAUSIBLE_JUMP_PCT or reading.qualifier is not Qualifier.EXACT:
+        return None
+    return _Hold(
+        line=(
+            f'• {where}: цена {price} — на {texts.cell_pct(-diff)}% ниже цены клиента ({texts.cell_amount(own)}), '
+            f'а сверить её с прошлой ценой нельзя; клиенту сообщим, если повторное чтение её подтвердит. '
+            f'Сверьте с сайтом: {url}'
+        ),
+        far_below=True,
+    )
+
+
 def _failed(
     product: Product,
     offer: Offer,
@@ -299,7 +352,9 @@ def assess(
     Первое чтение — не «изменение»: сравнивать не с чем. Валюты не смешиваются: другая
     валюта — не процент изменения и не «дешевле вас», а отдельная пометка. Сомнительная
     цена (`PriceReading.doubtful`) и неподтверждённый скачок больше `MAX_PLAUSIBLE_JUMP_PCT`
-    не дают клиенту уведомлений и не становятся базой сравнения.
+    не дают клиенту уведомлений и не становятся базой сравнения. Цена, которую не с чем
+    сверить (первое чтение, смена валюты, до этого «бесплатно»), сверяется с ценой клиента:
+    ниже неё больше чем на `MAX_PLAUSIBLE_JUMP_PCT` — тоже ждёт повторного чтения.
 
     Args:
         product: Товар клиента.
@@ -325,8 +380,13 @@ def assess(
         if previous is not None and same_currency and previous.amount > 0 and not doubtful
         else None
     )
+    diff = pct_change(own, reading.amount) if own and _comparable(reading.currency, own, product) else None
     jump = _jump_key(reading)
-    held = change_vs_last is not None and abs(change_vs_last) > MAX_PLAUSIBLE_JUMP_PCT and state.pending != jump
+    # Сомнительная цена и так не уходит клиенту; необычная ждёт, пока повторное чтение не
+    # увидит ту же цену (`state.pending`).
+    hold = None if doubtful else _hold(where, offer, reading, previous, change_vs_last, diff, own)
+    if hold is not None and state.pending == jump:
+        hold = None
 
     lines: list[str] = []
     for warning in dict.fromkeys(reading.warnings):
@@ -342,14 +402,12 @@ def assess(
         failures=0, last_reason=None, warning=','.join(dict.fromkeys(reading.warnings)) or None, pending=None
     )
 
-    if doubtful or held:
-        if held and previous is not None and change_vs_last is not None:
-            lines.append(
-                f'• {where}: цена {texts.cell_amount(previous.amount)} → {texts.cell_amount(reading.amount)} '
-                f'{reading.currency or ""} ({texts.cell_pct(change_vs_last)}%) — необычный скачок; клиенту '
-                f'сообщим, если повторное чтение его подтвердит. {redact(offer.url)}'
-            )
+    if doubtful or hold is not None:
+        if hold is not None:
             new_state = msgspec.structs.replace(new_state, pending=jump)
+            lines.append(hold.line)
+        # Разница с ценой клиента у такой цены не пишется ни в таблицу, ни в журнал: из журнала
+        # строится месячный отчёт, и «−99.9%» попало бы туда в обход уведомлений.
         return Assessment(
             key=key,
             product=product,
@@ -357,10 +415,11 @@ def assess(
             outcome=reading,
             previous=previous,
             state=new_state,
-            change_vs_last=change_vs_last if held else None,
+            change_vs_last=change_vs_last if hold is not None else None,
             operator_lines=tuple(lines),
             doubtful=doubtful,
-            held=held,
+            held=hold is not None,
+            far_below=hold is not None and hold.far_below,
         )
 
     changes: list[Change] = []
@@ -397,7 +456,6 @@ def assess(
             changes.append(
                 replace(base, kind='stock', availability=reading.availability, old_availability=previous.availability)
             )
-    diff = pct_change(own, reading.amount) if own and _comparable(reading.currency, own, product) else None
     exact = reading.qualifier is Qualifier.EXACT
     if (
         section.alert_undercut
@@ -607,7 +665,7 @@ def _status(item: Assessment, language: str) -> str:
         reason = texts.failure_text(outcome.reason, language)
         return t['stale'].format(reason=reason) if item.previous is not None else reason
     if item.held:
-        return t['jump']
+        return t['far_below'] if item.far_below else t['jump']
     if item.doubtful:
         return t['multiple'] if MULTIPLE_PRODUCTS in outcome.warnings else t['ambiguous']
     return t[outcome.qualifier.value] if outcome.qualifier is not Qualifier.EXACT else t['ok']
@@ -626,6 +684,7 @@ def now_row(item: Assessment, *, at: dt.datetime, zone: dt.tzinfo, language: str
     product, offer = item.product, item.offer
     own = texts.cell_amount(product.own_price) if product.own_price is not None else ''
     shown: PriceReading | StoredReading | None
+    checked: dt.datetime | None
     if isinstance(item.outcome, PriceReading):
         shown, checked, diff = item.outcome, at, item.diff_vs_own
     else:

@@ -109,6 +109,10 @@ def test__weekly_hours__for_weekday__monday_is_zero():
         ({'reminders_min_before': [120, 120]}, 'reminders_min_before'),
         ({'reminders_min_before': [0]}, 'reminders_min_before'),
         ({'phone_region': 'XX'}, 'phone_region'),
+        ({'contact_phone': 'call me'}, 'contact_phone'),
+        ({'contact_phone': '+995 55'}, 'contact_phone'),
+        ({'max_active_per_customer': 0}, 'max_active_per_customer'),
+        ({'max_active_per_customer': 51}, 'max_active_per_customer'),
         ({'phone_region': 'ge'}, 'phone_region'),
         ({'texts': {'en': {'nonexistent': 'x'}}}, 'нет такого текста'),
         ({'texts': {'ka': {'booked': 'x'}}}, 'не поддерживается'),
@@ -202,3 +206,16 @@ def test__pick_text__missing_language__fallbacks():
     assert pick_text({'en': 'Hi'}, 'ru', 'en') == 'Hi'
     assert pick_text({'ka': 'გამარჯობა'}, 'ru', 'en') == 'გამარჯობა'
     assert pick_text({}, 'ru', 'en') == ''
+
+
+def test__booking_config__owner_channel__admins_or_real_notify_channel():
+    import msgspec
+
+    from autostudio.clientconf import NotifyConfig
+
+    assert make_config().has_owner_channel
+    lonely = make_config(admin_chat_ids=[])
+    assert not lonely.has_owner_channel
+    assert not msgspec.structs.replace(lonely, notify=NotifyConfig(console=True)).has_owner_channel
+    assert msgspec.structs.replace(lonely, notify=NotifyConfig(webhook_url_env='HOOK')).has_owner_channel
+    assert make_config(contact_phone='599 12 34 56').booking.contact_phone == '599 12 34 56'  # местный формат GE

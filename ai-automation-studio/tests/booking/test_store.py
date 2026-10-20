@@ -15,6 +15,7 @@ from autostudio.booking.domain import (
     Customer,
     Slot,
     SlotTakenError,
+    TooManyBookingsError,
 )
 from autostudio.booking.store import BookingStore, DueReminder, new_booking_id
 from tests.booking.helpers import START, WED, local
@@ -251,3 +252,57 @@ def test__new_booking_id__many__unique_without_ambiguous_chars():
     ids = {new_booking_id() for _ in range(200)}
     assert len(ids) == 200
     assert not any(set(i) & set('IO01') for i in ids)
+
+
+THU = WED + dt.timedelta(days=1)
+
+
+def test__claim_reminder__rescheduled_after_due__not_claimed_and_new_time_reminded(store):
+    # Bob переносит четверг 17:00 → 19:00, пока цикл ещё рассылает напоминания этого прохода.
+    bob = create(store, local(THU, 17), who=BOB)
+    now = local(WED, 17, 5)
+    [due] = store.due_reminders(now, [1440])
+    store.reschedule(bob.id, slot(local(THU, 19)), now=now, by_admin=False, customer=BOB.key)
+    assert store.claim_reminder(due, now) is None  # старое время не уходит покупателю
+    assert store.due_reminders(now, [1440]) == []  # «за сутки» до 19:00 ещё не наступило
+    later = local(WED, 19, 5)
+    [fresh] = store.due_reminders(later, [1440])
+    claimed = store.claim_reminder(fresh, later)
+    assert claimed is not None and claimed.start == local(THU, 19)
+
+
+def test__create__customer_limit__refused_in_transaction(store):
+    for hour in (10, 11, 12):
+        store.create(
+            slot(local(WED, hour)), customer=ANNA, source='buttons', language='en', now=START,
+            buffer=dt.timedelta(0), max_active=3,
+        )  # fmt: skip
+    with pytest.raises(TooManyBookingsError):
+        store.create(
+            slot(local(WED, 15)), customer=ANNA, source='buttons', language='en', now=START,
+            buffer=dt.timedelta(0), max_active=3,
+        )  # fmt: skip
+    assert store.active_count(ANNA.key, START) == 3
+    # Прошедшие записи не в счёт: к вечеру среды лимит снова свободен.
+    assert store.active_count(ANNA.key, local(WED, 13)) == 0
+    create(store, local(WED, 16), who=ANNA)  # без лимита (администратор) — можно
+
+
+def test__find_customer__full_key_bare_id_or_ambiguous__resolved_or_none(store):
+    store.save_customer(Customer(key='tg:555', language='ru'), START)
+    assert store.find_customer('tg:555') == 'tg:555'
+    assert store.find_customer(' 555 ') == 'tg:555'
+    assert store.find_customer('556') is None
+    assert store.find_customer('wa:555') is None
+    assert store.find_customer('') is None
+    store.save_customer(Customer(key='wa:555', language='en'), START)
+    assert store.find_customer('555') is None  # два канала с тем же номером — не угадываем
+
+
+def test__due_reminders__walk_in_entered_by_admin__no_reminder(store):
+    booking = store.create(
+        slot(local(WED, 17)), customer=Customer(key='tg:999', name='Guest', phone='+995555000333'),
+        source='admin', language='en', now=START, buffer=dt.timedelta(0),
+    )  # fmt: skip
+    assert store.get(booking.id).source == 'admin'
+    assert store.due_reminders(local(WED, 15, 5), [120]) == []

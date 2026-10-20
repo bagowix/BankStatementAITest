@@ -12,9 +12,12 @@ Google Sheets) и хранятся в SQLite, пока запись не уда�
 засчитывается, после `MAX_ATTEMPTS` письмо закрывается — с разбором и пометкой, какой шаг
 не прошёл, или строкой «нужна ручная проверка», если разобрать его не удалось вовсе.
 Если зависимость не работала ни разу, письмо не виновато и ждёт, а запуск сообщает об
-ошибке (оператору — через `supervised_run`). Разобранное письмо ждёт сломанный канал не
+ошибке (оператору — через `supervised_run`). Недоступность модели (сеть, ключ, лимит,
+перегрузка) письму не засчитывается никогда. Разобранное письмо ждёт сломанный канал не
 дольше `OUTAGE_GRACE`, потом закрывается с пометкой. Отказ модели на конкретном письме
-(отказ, ответ не по схеме) — вина письма, если модель недавно работала.
+(HTTP 400, отказ, ответ не по схеме) — вина письма, только если в этом же запуске модель
+ответила: на другое письмо или на проверочный запрос с безобидным письмом. Иначе это
+поломка настройки (неверная модель или effort в `.env`), и письма ждут, как при недоступности.
 
 Письма, которые уже не удавались, следующий запуск берёт после свежих: застрявшее письмо
 не загораживает очередь. Если подряд не удаются `BREAKER` писем из-за модели или ящика,
@@ -38,7 +41,7 @@ from autostudio.inbox.imap import FolderState, MailBox
 from autostudio.inbox.mail import GENERATED_ID_DOMAIN, ParsedEmail, compose_reply, parse_email
 from autostudio.inbox.sheet import build_row, failure_row
 from autostudio.inbox.store import Envelope, InboxStore, StoredMessage
-from autostudio.inbox.triage import Draft, TriageResult, triage_email, write_draft
+from autostudio.inbox.triage import Draft, TriageResult, probe_model, triage_email, write_draft
 from autostudio.llm import LLMClient
 from autostudio.notify import Notifier
 from autostudio.sinks import TableSink
@@ -55,9 +58,6 @@ DRY_RUN_WINDOW: Final = dt.timedelta(days=14)
 # чем попасть в таблицу с пометкой «шаг не выполнен»: короткий сбой переживается повтором,
 # а заблокированный бот не прячет лида из таблицы навсегда.
 OUTAGE_GRACE: Final = dt.timedelta(hours=24)
-# Отказ модели на письме (отказ, ответ не по схеме) считается виной письма, если модель
-# отвечала за это время; иначе это может быть общая поломка (неверная модель в .env).
-MODEL_TRUST: Final = dt.timedelta(hours=6)
 # В первый запуск (и после смены UIDVALIDITY) письма старше суток только заносятся в
 # таблицу: на них, скорее всего, уже ответили, а черновики и сигналы по ним — шум.
 FIRST_RUN_QUIET: Final = dt.timedelta(hours=24)
@@ -267,6 +267,7 @@ class _Run:
         self.down: set[str] = set()
         self.misses: dict[str, int] = {}
         self.quiet_before: dt.datetime | None = None
+        self.probe_error: LLMError | None = None
 
     # --- запуск -------------------------------------------------------------------------
 
@@ -623,15 +624,50 @@ class _Run:
         cause = failure.cause
         if cause == 'email':
             return False
+        if cause == 'model':
+            # Сеть, ключ, лимит, перегрузка — письмо не виновато, даже если минуту назад
+            # модель отвечала: лимит запросов как раз и кончается посреди запуска.
+            return True
         if cause == 'model_content':
-            # Отказ на этом письме — его вина, если модель отвечала недавно и не лежит сейчас.
-            if any(other.cause == 'model' for other in self.failures):
-                return True
-            last_ok = self.store.healthy_at('model')
-            return last_ok is None or last_ok < self.now - MODEL_TRUST
+            # Отказ на этом письме — его вина, только если модель в этом же запуске ответила
+            # (`_check_model`) и не лежит. Давний успех не в счёт: после смены модели или effort
+            # в .env провайдер отвечает 400 на каждый запрос, и списать письма было бы ошибкой.
+            return 'model' not in self.healthy or any(other.cause == 'model' for other in self.failures)
         return self.aborted is not None or cause not in self.healthy
 
+    async def _check_model(self) -> None:
+        # Модель отказала на письмах и ни разу не ответила в этом запуске: виновато письмо или
+        # настройка? Один вызов на безобидном письме отвечает на это прямо — и одинокое
+        # «ядовитое» письмо в тихом ящике не ждёт вечно, и поломку оператор видит с первого запуска.
+        content = any(failure.cause == 'model_content' for failure in self.failures)
+        outage = any(failure.cause == 'model' for failure in self.failures)
+        if not content or outage or 'model' in self.healthy:
+            return
+        self.stage = 'probe'
+        try:
+            await probe_model(self.section, self.language, self.deps.llm, self.now)
+        except LLMError as exc:
+            logger.warning('inbox: модель не ответила и на проверочный запрос: %s', exc)
+            self.probe_error = exc
+            return
+        self._ok('model')
+
+    def _probe_report(self, exc: LLMError) -> str:
+        # Текст для оператора: что проверить. Давний успех модели подсказывает, что сломала
+        # недавняя правка .env, а не провайдер.
+        last_ok = self.store.healthy_at('model')
+        since = 'модель ещё ни разу не ответила'
+        if last_ok is not None:
+            since = f'последний успешный ответ модели: {last_ok.astimezone(dt.UTC):%Y-%m-%d %H:%M} UTC'
+        if model_outage(exc):
+            return f'модель недоступна и на проверочном запросе ({since}): {exc}'
+        return (
+            'модель отклоняет и проверочный запрос с безобидным письмом — проверьте AUTOSTUDIO_LLM_MODEL '
+            f'и AUTOSTUDIO_LLM_EFFORT ({since}): {exc}'
+        )
+
     async def _settle_failures(self, state: FolderState) -> None:
+        await self._check_model()
         postponed: list[_Failure] = []
         folder = self.section.folder
         for failure in self.failures:
@@ -658,6 +694,8 @@ class _Run:
             self.errors.append(
                 f'писем отложено до следующего запуска: {len(postponed)} (не работает: {causes}; {postponed[-1].error})'
             )
+            if self.probe_error is not None:
+                self.errors.append(self._probe_report(self.probe_error))
 
     async def _grace_over(self, state: FolderState, failure: _Failure) -> bool:
         if failure.key is None or failure.email is None:

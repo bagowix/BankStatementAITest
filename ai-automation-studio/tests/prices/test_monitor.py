@@ -1,5 +1,8 @@
+import asyncio
 import csv
 import datetime as dt
+import json
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,7 +14,7 @@ from autostudio.errors import NotifyError, SinkError
 from autostudio.events import EventLog
 from autostudio.llm import FakeLLM
 from autostudio.prices.config import Offer, PricesConfig, PricesSection, Product
-from autostudio.prices.extract import PriceGuess
+from autostudio.prices.extract import MAX_EVIDENCE_CHARS, LLMBudget, PriceGuess
 from autostudio.prices.fetch import FetchFailure, FetchResult
 from autostudio.prices.heuristics import make_fake_llm
 from autostudio.prices.monitor import PricesDeps, RunResult, check_all, pct_change, render_digest, run_once
@@ -509,18 +512,444 @@ async def test__run_once__was_free_now_paid__change_without_division_by_zero(tmp
         '<html><body><span itemprop="price">Бесплатно</span><meta itemprop="priceCurrency" content="GEL"></body></html>'
     )
     world = World(tmp_path, {URL_A: free})
-    config = make_config(product(offer()), allow_free=True)
+    # Ваша цена 12: «10 после бесплатно» правдоподобно (−16.7%) и не ждёт повторного чтения.
+    config = make_config(product(offer(), own='12.00'), allow_free=True)
     first = await world.run(config)
     assert first.checked == 1
     world.fetcher.pages[URL_A] = ld_page('10.00')
     result = await world.run(config)
-    [change] = result.changes
+    [change] = [c for c in result.changes if c.kind == 'price']
     assert (change.kind, change.old_amount, change.new_amount, change.pct) == (
         'price',
         Decimal(0),
         Decimal('10.00'),
         None,
     )
+    # «Бесплатно» не было «дешевле вас» (не точная цена), а 10 при вашей 12 — уже да: сообщаем.
+    assert [c.kind for c in result.changes] == ['price', 'undercut']
     assert result.digest is not None
     assert '• Phone — Shop A: 0 → 10 GEL\n' in result.digest + '\n'
     assert '%' not in result.digest.split('Price changes:')[1].split('\n')[1]
+
+
+# --- ловушки ревью: сомнительные цены не уходят клиенту ------------------------------------------
+
+
+async def test__run_once__ambiguous_schema_price__no_client_alert_needs_check(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('2.499')})
+    result = await world.run(make_config(product(offer(), own='2599.00')))
+    assert result.changes == ()
+    assert result.digest is None
+    row = world.tab('Prices now')[1]
+    assert (row[3], row[5], row[10]) == ('2.499', '', 'needs a check: unclear price format on the site')
+    assert world.store.last_reading(OfferKey('p1', 'Shop A', URL_A)) is None  # не база для сравнения
+
+
+async def test__run_once__ambiguous_after_good_reading__no_change_baseline_kept(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('2499.00')})
+    config = make_config(product(offer(), own='2599.00'))
+    await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('2.499')
+    glitch = await world.run(config)
+    assert (glitch.changes, glitch.digest) == ((), None)
+    world.fetcher.pages[URL_A] = ld_page('2499.00')
+    back = await world.run(config)
+    assert back.changes == ()
+    assert len(world.tab('History')) == 2
+
+
+async def test__run_once__several_products_on_page__no_undercut_needs_check(tmp_path):
+    data = [
+        {'@type': 'Product', 'name': 'Case', 'offers': {'price': '49', 'priceCurrency': 'GEL'}},
+        {'@type': 'Product', 'name': 'Phone', 'offers': {'price': '2799', 'priceCurrency': 'GEL'}},
+    ]
+    html = f'<html><head><script type="application/ld+json">{json.dumps(data)}</script></head><body></body></html>'
+    world = World(tmp_path, {URL_A: html})
+    result = await world.run(make_config(product(offer(), own='100.00')))
+    assert result.digest is None
+    assert world.tab('Prices now')[1][10] == 'needs a check: several products on the page'
+    assert result.operator_alert is not None and 'несколько товаров' in result.operator_alert
+
+
+async def test__run_once__implausible_jump__held_then_confirmed_by_second_read(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('100.00')})
+    config = make_config(product(offer(), own=None))
+    await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('30.00')
+    held = await world.run(config)
+    assert (held.changes, held.digest) == ((), None)
+    assert held.operator_alert is not None and 'необычный скачок' in held.operator_alert
+    assert world.tab('Prices now')[1][10] == 'needs a check: unusual price jump, re-checking'
+    assert len(world.tab('History')) == 2  # неподтверждённое — не в истории
+    confirmed = await world.run(config)
+    [change] = confirmed.changes
+    assert (change.old_amount, change.new_amount, change.pct) == (Decimal('100.00'), Decimal('30.00'), Decimal(-70))
+    assert (await world.run(config)).changes == ()
+
+
+async def test__run_once__implausible_jump_glitch__forgotten_when_price_returns(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('100.00')})
+    config = make_config(product(offer(), own=None))
+    await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('30.00')
+    await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('100.00')
+    assert (await world.run(config)).changes == ()
+    world.fetcher.pages[URL_A] = ld_page('30.00')
+    assert (await world.run(config)).changes == ()  # снова ждёт подтверждения
+
+
+def number_page(price: str, visible: str = '', currency: str = 'GEL') -> str:
+    # Цена голым числом JSON («"price":2.499»), как её пишет шаблон с number_format без кавычек.
+    data = (
+        '{"@type":"Product","name":"Phone","offers":{"price":' + price + ',"priceCurrency":"' + currency + '",'
+        '"availability":"https://schema.org/InStock"}}'
+    )
+    body = f'<h1>Phone</h1><p>{visible}</p>' if visible else ''
+    return f'<html><head><script type="application/ld+json">{data}</script></head><body>{body}</body></html>'
+
+
+async def test__run_once__json_number_thousands_dot_seen_on_page__read_as_thousands(tmp_path):
+    world = World(tmp_path, {URL_A: number_page('2.499', '2 499 ₾')})
+    result = await world.run(make_config(product(offer(), own='2599.00')))
+    assert result.digest is not None
+    assert '• Phone — Shop A: 2,499 GEL, yours 2,599 (−3.8%)' in result.digest
+    assert '99.9' not in result.digest
+    assert world.store.last_reading(OfferKey('p1', 'Shop A', URL_A)).amount == Decimal(2499)
+
+
+async def test__run_once__json_number_ambiguous__no_client_alert_needs_check(tmp_path):
+    world = World(tmp_path, {URL_A: number_page('2.499')})
+    result = await world.run(make_config(product(offer(), own='2599.00')))
+    assert (result.changes, result.digest) == ((), None)
+    row = world.tab('Prices now')[1]
+    assert (row[3], row[5], row[10]) == ('2.499', '', 'needs a check: unclear price format on the site')
+    assert world.store.last_reading(OfferKey('p1', 'Shop A', URL_A)) is None
+
+
+async def test__run_once__json_number_ambiguous_after_good_reading__no_alert_baseline_kept(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('2499.00')})
+    config = make_config(product(offer(), own='2599.00'))
+    await world.run(config)
+    world.fetcher.pages[URL_A] = number_page('2.499')
+    assert [(r.changes, r.digest) for r in [await world.run(config), await world.run(config)]] == [((), None)] * 2
+    assert world.store.last_reading(OfferKey('p1', 'Shop A', URL_A)).amount == Decimal('2499.00')
+
+
+async def test__run_once__first_reading_far_below_own__held_then_confirmed_by_second_read(tmp_path):
+    # Однозначная, но неверная цена (например, 2.50 из чужого блока) при вашей 2 599: сравнить
+    # её не с чем, а «−99.9%» сразу ушло бы клиенту и стало бы базой.
+    world = World(tmp_path, {URL_A: ld_page('2.50')})
+    config = make_config(product(offer(), own='2599.00'))
+    held = await world.run(config)
+    assert (held.changes, held.digest) == ((), None)
+    assert held.operator_alert is not None
+    assert 'Phone / Shop A: цена 2.50 GEL — на 99.9% ниже цены клиента (2599.00)' in held.operator_alert
+    row = world.tab('Prices now')[1]
+    assert (row[3], row[5], row[6], row[10]) == ('2.50', '', '', 'needs a check: far below your price, re-checking')
+    assert world.store.last_reading(OfferKey('p1', 'Shop A', URL_A)) is None
+    # В журнал (а из него — в месячный отчёт) «−99.9%» не попадает.
+    checked = world.events.between(T0, T0 + dt.timedelta(days=1))[0]
+    assert (checked.kind, checked.payload['diff_vs_own_pct']) == ('prices.checked', '')
+
+    confirmed = await world.run(config)
+    [change] = confirmed.changes
+    assert (change.kind, change.new_amount, change.pct) == (
+        'undercut',
+        Decimal('2.50'),
+        pct_change(Decimal(2599), Decimal('2.50')),
+    )
+    assert confirmed.digest is not None and 'Cheaper than you' in confirmed.digest
+    assert world.store.last_reading(OfferKey('p1', 'Shop A', URL_A)).amount == Decimal('2.50')
+    assert (await world.run(config)).changes == ()
+
+
+async def test__run_once__first_reading_far_below_own_glitch__forgotten_when_real_price_seen(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('2.50')})
+    config = make_config(product(offer(), own='2599.00'))
+    await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('2499.00')
+    real = await world.run(config)
+    assert [(c.kind, c.new_amount) for c in real.changes] == [('undercut', Decimal('2499.00'))]
+    assert world.tab('Prices now')[1][10] == 'ok'
+    world.fetcher.pages[URL_A] = ld_page('2.50')
+    again = await world.run(config)  # теперь есть прошлая цена: это обычный скачок, он ждёт
+    assert (again.changes, again.digest) == ((), None)
+    assert world.tab('Prices now')[1][10] == 'needs a check: unusual price jump, re-checking'
+
+
+async def test__run_once__first_reading_far_below_own__russian_status(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('2.50')})
+    await world.run(make_config(product(offer(), own='2599.00'), language='ru'))
+    assert world.tab('Цены сейчас')[1][10] == 'нужна проверка: намного ниже вашей цены, перепроверяем'
+
+
+async def test__run_once__first_reading_far_above_own__recorded_without_hold(tmp_path):
+    # «Дороже вас» клиенту не сообщается, а конкурент вдвое дороже — обычное дело: не держим.
+    world = World(tmp_path, {URL_A: ld_page('6000.00')})
+    result = await world.run(make_config(product(offer(), own='2599.00')))
+    assert (result.changes, result.operator_alert) == ((), None)
+    assert world.tab('Prices now')[1][10] == 'ok'
+    assert world.store.last_reading(OfferKey('p1', 'Shop A', URL_A)).amount == Decimal('6000.00')
+
+
+async def test__run_once__first_reading_from_price_far_below_own__recorded_without_hold(tmp_path):
+    # «От 90» — нижняя граница (другой вариант товара), «дешевле вас» по ней не сообщается.
+    page_from = ld_page('', offers_extra=',"lowPrice":"90"').replace('"price":"",', '')
+    world = World(tmp_path, {URL_A: page_from})
+    result = await world.run(make_config(product(offer(), own='2599.00')))
+    assert (result.changes, result.operator_alert) == ((), None)
+    assert world.tab('Prices now')[1][10] == 'ok: a “from” price'
+    assert world.store.last_reading(OfferKey('p1', 'Shop A', URL_A)) is not None
+
+
+async def test__run_once__first_reading_far_below_own_undercut_alerts_off__still_not_a_baseline(tmp_path):
+    # Уведомления «дешевле вас» выключены, но неверная первая цена всё равно не должна стать
+    # базой: иначе через день правильная цена пришла бы клиенту как «+99 900%».
+    world = World(tmp_path, {URL_A: ld_page('2.50')})
+    config = make_config(product(offer(), own='2599.00'), alert_undercut=False)
+    await world.run(config)
+    assert world.store.last_reading(OfferKey('p1', 'Shop A', URL_A)) is None
+    world.fetcher.pages[URL_A] = ld_page('2499.00')
+    assert (await world.run(config)).changes == ()
+
+
+async def test__run_once__currency_switch_far_below_own__held_then_confirmed(tmp_path):
+    # Прошлая цена в другой валюте — сверить новую не с чем, как и при первом чтении.
+    world = World(tmp_path, {URL_A: ld_page('900.00', currency='USD')})
+    config = make_config(product(offer(), own='2599.00'))
+    await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('2.50')
+    held = await world.run(config)
+    assert (held.changes, held.digest) == ((), None)
+    confirmed = await world.run(config)
+    assert [c.kind for c in confirmed.changes] == ['currency', 'undercut']
+
+
+async def test__run_once__from_reading_then_exact_below_own__undercut_alerted(tmp_path):
+    page_from = ld_page('', offers_extra=',"lowPrice":"90"').replace('"price":"",', '')
+    world = World(tmp_path, {URL_A: page_from})
+    config = make_config(product(offer(), own='100.00'))
+    assert (await world.run(config)).changes == ()
+    world.fetcher.pages[URL_A] = ld_page('90.00')
+    assert [c.kind for c in (await world.run(config)).changes] == ['undercut']
+
+
+async def test__run_once__own_price_raised_above_competitor__undercut_alerted(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('95.00')})
+    assert (await world.run(make_config(product(offer(), own='90.00')))).changes == ()
+    raised = await world.run(make_config(product(offer(), own='100.00')))
+    assert [c.kind for c in raised.changes] == ['undercut']
+
+
+# --- ловушки ревью: одновременные проходы и сбои доставки --------------------------------------
+
+
+async def test__run_once__overlapping_runs__second_skipped_one_digest(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('95.00')})
+    config = make_config(product(offer()))
+    first, second = await asyncio.gather(
+        run_once(config, world.deps, world.now), run_once(config, world.deps, world.now)
+    )
+    assert (first.skipped, second.skipped) == (False, True)
+    assert len(world.notifier.sent) == 1
+    assert len(world.tab('History')) == 2
+    assert world.kinds().count('prices.undercut') == 1
+
+
+class FlakySink(CsvSink):
+    def __init__(self, directory: Path, fail_tab: str) -> None:
+        super().__init__(directory)
+        self.fail_tab: str | None = fail_tab
+
+    async def append(self, tab, header, rows):
+        if tab == self.fail_tab:
+            raise SinkError('quota exceeded')
+        await super().append(tab, header, rows)
+
+
+async def test__run_once__changes_append_fails__retry_delivers_without_duplicate_history(tmp_path):
+    sink = FlakySink(tmp_path / 'out', 'Changes')
+    world = World(tmp_path, {URL_A: ld_page('95.00')}, sink=sink)
+    config = make_config(product(offer()))
+    with pytest.raises(SinkError):
+        await world.run(config)
+    assert len(world.notifier.sent) == 1  # таблица легла — уведомление всё равно ушло
+    sink.fail_tab = None
+    await world.run(config)
+    assert len(world.tab('History')) == 2
+    changes = world.tab('Changes')
+    assert len(changes) == 2
+    assert changes[1][0] == '2026-10-20 10:00'  # строка первого прохода, со своим временем
+
+
+async def test__run_once__owner_channel_down__digest_resent_next_run(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('95.00')})
+    world.notifier.fail = True
+    config = make_config(product(offer()))
+    with pytest.raises(NotifyError):
+        await run_once(config, world.deps, world.now)
+    world.now += dt.timedelta(days=1)
+    world.notifier.fail = False
+    second = await world.run(config)
+    assert second.digest is None  # «дешевле вас» уже сообщено — новых событий нет
+    assert len(world.notifier.sent) == 1
+    assert 'Cheaper than you' in world.notifier.sent[0]
+    assert world.store.pending() == []
+
+
+# --- ловушки ревью: бюджет модели и срок прохода -------------------------------------------------
+
+
+async def test__run_once__llm_budget__alert_once_until_recovered_neutral_client_text(tmp_path):
+    plain = '<html><body><p>Price 90 ₾</p></body></html>'
+    world = World(tmp_path, {URL_A: plain, URL_B: plain}, llm=make_fake_llm())
+    small = make_config(product(offer(), offer(URL_B, 'Shop B')), llm_fallback=True, llm_max_pages_per_run=1)
+    alerts = [(await world.run(small)).operator_alert or '' for _ in range(4)]
+    # Строка о бюджете — один раз, когда он кончился (а не каждый проход).
+    assert ['стр. за запуск) исчерпан' in a for a in alerts] == [True, False, False, False]
+    assert world.tab('Prices now')[2][10] == 'not checked this time — will be checked on the next run'
+    enough = make_config(product(offer(), offer(URL_B, 'Shop B')), llm_fallback=True, llm_max_pages_per_run=2)
+    recovered = await world.run(enough)
+    assert recovered.operator_alert is not None and 'снова хватает' in recovered.operator_alert
+    assert recovered.llm_input_tokens > 0
+
+
+class SlowFetcher(FakeFetcher):
+    def __init__(self, pages: dict[str, object], delays: dict[str, float], blocking: bool = False) -> None:
+        super().__init__(pages)
+        self.delays = delays
+        self.blocking = blocking
+
+    async def fetch(self, url: str) -> FetchResult | FetchFailure:
+        delay = self.delays.get(url, 0.0)
+        if delay == float('inf'):
+            await asyncio.Event().wait()
+        if self.blocking:
+            time.sleep(delay)  # noqa: ASYNC251 - нарочно: синхронную работу таймаут asyncio не прерывает
+        else:
+            await asyncio.sleep(delay)
+        return await super().fetch(url)
+
+
+async def test__check_all__budget_in_config_order__slow_first_site_still_gets_model():
+    plain = '<html><body><p>Price 90 ₾</p></body></html>'
+    fetcher = SlowFetcher({URL_A: plain, URL_B: plain}, {URL_A: 0.05})
+    config = make_config(product(offer(), offer(URL_B, 'Shop B')), llm_fallback=True)
+    results = await check_all(config.prices, fetcher, llm=make_fake_llm(), budget=LLMBudget(1))
+    assert [type(outcome).__name__ for _, _, outcome in results] == ['PriceReading', 'CheckFailure']
+    assert results[1][2].reason == 'llm_budget'
+
+
+async def test__check_all__hung_site__run_timeout_others_read():
+    fetcher = SlowFetcher({URL_A: ld_page('1.00'), URL_B: ld_page('2.00')}, {URL_A: float('inf')})
+    config = make_config(product(offer(), offer(URL_B, 'Shop B')))
+    results = await check_all(config.prices, fetcher, llm=None, budget=LLMBudget(0), deadline_s=0.2)
+    assert results[0][2].reason == 'run_timeout'
+    assert results[1][2].amount == Decimal('2.00')
+
+
+async def test__check_all__deadline_spent_before_model__run_timeout_not_hang():
+    plain = '<html><body><p>Price 90 ₾</p></body></html>'
+    fetcher = SlowFetcher({URL_A: plain}, {URL_A: 0.15}, blocking=True)
+    config = make_config(product(offer()), llm_fallback=True)
+    results = await check_all(config.prices, fetcher, llm=make_fake_llm(), budget=LLMBudget(1), deadline_s=0.05)
+    assert results[0][2].reason == 'run_timeout'
+
+
+async def test__check_all__slow_model__run_timeout():
+    class SlowLLM(FakeLLM):
+        async def extract(self, *, system, prompt, schema):
+            await asyncio.sleep(10)
+            raise AssertionError
+
+    fetcher = FakeFetcher({URL_A: '<html><body><p>90 ₾</p></body></html>'})
+    config = make_config(product(offer()), llm_fallback=True)
+    results = await check_all(config.prices, fetcher, llm=SlowLLM(), budget=LLMBudget(1), deadline_s=0.1)
+    assert results[0][2].reason == 'run_timeout'
+
+
+async def test__check_all__model_crashes__internal_error_for_that_page_only():
+    class Crashing(FakeLLM):
+        async def extract(self, *, system, prompt, schema):
+            raise RuntimeError('sdk bug')
+
+    pages = {URL_A: '<html><body><p>90 ₾</p></body></html>', URL_B: ld_page('5.00')}
+    config = make_config(product(offer(), offer(URL_B, 'Shop B')), llm_fallback=True)
+    results = await check_all(config.prices, FakeFetcher(pages), llm=Crashing(), budget=LLMBudget(5))
+    assert results[0][2].reason == 'internal_error'
+    assert results[1][2].amount == Decimal('5.00')
+
+
+# --- ловушки ревью: редиректы, размеры ячеек, тексты ---------------------------------------------
+
+
+async def test__run_once__redirect_to_shorter_canonical__read_and_operator_told_to_update(tmp_path):
+    url = 'https://shop-a.example/ru/catalog/phones/iphone-15'
+    world = World(tmp_path, {url: (ld_page('2799.00'), 'https://shop-a.example/catalog/phones/iphone-15')})
+    result = await world.run(make_config(product(offer(url), own=None)))
+    assert result.checked == 1
+    assert result.operator_alert is not None and 'обновите url' in result.operator_alert
+
+
+async def test__run_once__redirect_to_section__still_refused(tmp_path):
+    world = World(tmp_path, {URL_A: (ld_page('1.00'), 'https://shop-a.example/catalog')})
+    assert (await world.run(make_config(product(offer())))).failures == {'redirected_away': 1}
+
+
+async def test__run_once__long_page_values__history_cells_bounded(tmp_path):
+    data = {'@type': 'Product', 'offers': {'price': '1299 ₾ ' + 'x' * 150, 'priceCurrency': 'GEL'}}
+    html = f'<html><head><script type="application/ld+json">{json.dumps(data)}</script></head><body></body></html>'
+    world = World(tmp_path, {URL_A: html})
+    await world.run(make_config(product(offer(), own=None)))
+    row = world.tab('History')[1]
+    assert row[3] == '1299.00'
+    assert max(len(cell) for cell in row) <= MAX_EVIDENCE_CHARS
+
+
+async def test__run_once__stock_change__was_column_shows_previous_state(tmp_path):
+    world = World(tmp_path, {URL_A: ld_page('120.00')})
+    config = make_config(product(offer()))
+    await world.run(config)
+    world.fetcher.pages[URL_A] = ld_page('120.00', availability='OutOfStock')
+    await world.run(config)
+    assert world.tab('Changes')[1][3:6] == ['availability', 'in stock', 'out of stock']
+
+
+def test__render_digest__russian__percent_with_comma_like_amounts():
+    from autostudio.prices.monitor import Change
+
+    change = Change(
+        kind='price',
+        product='iPhone',
+        competitor='A',
+        url=URL_A,
+        currency='GEL',
+        old_amount=Decimal('2749'),
+        new_amount=Decimal('2599.50'),
+        pct=Decimal('-5.44'),
+    )
+    digest = render_digest([change], client='Acme', language='ru', when='now', failed=0, total=1, sheet_url=None)
+    assert digest is not None
+    assert '• iPhone — A: 2\u00a0749 → 2\u00a0599,50 GEL (−5,4%)' in digest
+
+
+async def test__check_all__deadline_already_passed__every_offer_run_timeout():
+    fetcher = FakeFetcher({URL_A: ld_page('1.00')})
+    config = make_config(product(offer()))
+    results = await check_all(config.prices, fetcher, llm=None, budget=LLMBudget(0), deadline_s=0)
+    assert results[0][2].reason == 'run_timeout'
+    assert fetcher.fetched == []
+
+
+async def test__run_once__history_append_fails__later_sheet_rows_wait_in_order(tmp_path):
+    sink = FlakySink(tmp_path / 'out', 'History')
+    world = World(tmp_path, {URL_A: ld_page('95.00')}, sink=sink)
+    config = make_config(product(offer()))
+    with pytest.raises(SinkError):
+        await world.run(config)
+    assert not CsvSink(tmp_path / 'out').path_for('Changes').exists()  # порядок вкладок сохраняется
+    assert [entry.tab for entry in world.store.pending()] == ['History', 'Changes']
+    sink.fail_tab = None
+    await world.run(config)
+    assert (len(world.tab('History')), len(world.tab('Changes'))) == (2, 2)

@@ -76,7 +76,9 @@ _PRICE_WORDS: Final = re.compile(r'price|cost|amount|цен|ფას', re.IGNOR
 _OLD_WORDS: Final = re.compile(r'old|was|regular|compare|strike|crossed|before|prev|list-?price|retail', re.IGNORECASE)
 _NEW_WORDS: Final = re.compile(r'now|new|current|sale|final|special|actual|promo|discount', re.IGNORECASE)
 _STRUCK_TAGS: Final = frozenset({'del', 's', 'strike'})
-_THOUSANDS_DOT: Final = re.compile(r'^\d{1,3}\.\d{3}$')
+# «1.299» — может быть тысячами; «0.500» — нет: группа тысяч не начинается с нуля (то же
+# правило, что и в `money._amount`), иначе цена 0.250 из разметки стала бы «нужна проверка».
+_THOUSANDS_DOT: Final = re.compile(r'^[1-9]\d{0,2}\.\d{3}$')
 _CSS_IDENT: Final = re.compile(r'^-?[A-Za-z_][\w-]*$')
 _PAGE_TAG: Final = re.compile(r'</?page_text>', re.IGNORECASE)
 # Символы, которыми число продолжается: цитата, обрывающаяся на них рядом с цифрой, режет число.
@@ -357,6 +359,21 @@ def _schema_amount(value: JSONLD) -> Decimal | None:
     return parse_schema_amount(value)
 
 
+def _schema_text(value: JSONLD) -> str | None:
+    """Машинное значение цены так, как оно записано в разметке, — для `_disambiguate`.
+
+    Голое число JSON (`"price": 2.499` — шаблон с number_format без кавычек) несёт ту же
+    неоднозначность «дробь или тысячи», что и строка `"2.499"`. `json.loads` читает его в
+    `Decimal` без потери знаков, и `str` возвращает ровно записанные цифры («2.499», «2.4990»).
+    Целое число неоднозначным не бывает.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Decimal):
+        return str(value)
+    return None
+
+
 def _offer_values(node: dict[str, JSONLD]) -> _Found | None:
     price, qualifier = node.get('price'), Qualifier.EXACT
     if price is None or price == '':
@@ -383,7 +400,7 @@ def _offer_values(node: dict[str, JSONLD]) -> _Found | None:
         availability=_availability(node.get('availability')),
         qualifier=qualifier,
         method=Method.JSON_LD,
-        schema_text=price.strip() if isinstance(price, str) else None,
+        schema_text=_schema_text(price),
     )
 
 

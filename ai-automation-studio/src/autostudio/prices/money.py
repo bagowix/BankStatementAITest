@@ -29,7 +29,7 @@ import re
 from bisect import bisect_left, bisect_right
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import Final
+from typing import Final, Literal
 
 import msgspec
 
@@ -178,11 +178,21 @@ class PriceMention(msgspec.Struct, frozen=True, kw_only=True):
     currency_token: str | None
 
 
+type _Side = Literal['prefix', 'suffix', '']
+type _Verdict = Literal['left', 'right', 'both', 'none']
+
+# Где знак стоит по обычаю: «$649», «£9.99» — перед числом; «729 ლ», «1 299 руб.» — после.
+# «€», «₾», коды валют встречаются с обеих сторон.
+_PREFIX_SYMBOLS: Final = frozenset({'$', 'US$', '£'})
+_SUFFIX_GROUPS: Final = frozenset({'lari', 'rub', 'uah'})
+
+
 class _Token(msgspec.Struct, frozen=True):
     start: int
     end: int
     text: str
     code: str
+    side: _Side = ''
 
 
 class _Option(msgspec.Struct, frozen=True):
@@ -195,18 +205,23 @@ class _Option(msgspec.Struct, frozen=True):
 def _currency_tokens(text: str) -> list[_Token]:
     tokens: list[_Token] = []
     for match in _CURRENCY.finditer(text):
-        token = match.group(0)
+        found = match.group(0)
         if match.lastgroup == 'code':
-            code = _ISO_CODES[token]
+            code = _ISO_CODES[found]
         elif match.lastgroup == 'sym':
-            code = _SYMBOLS[token]
+            code = _SYMBOLS[found]
         elif match.lastgroup == 'lari':
             code = 'GEL'
         elif match.lastgroup == 'rub':
             code = 'RUB'
         else:
             code = 'UAH'
-        tokens.append(_Token(match.start(), match.end(), token, code))
+        side: _Side = ''
+        if found in _PREFIX_SYMBOLS:
+            side = 'prefix'
+        elif match.lastgroup in _SUFFIX_GROUPS or found == '₽':
+            side = 'suffix'
+        tokens.append(_Token(match.start(), match.end(), found, code, side))
     return tokens
 
 
@@ -265,39 +280,58 @@ def _option(norm: str, tokens: list[_Token], index: int, start: int, end: int) -
     return _Option(gap=end - start, index=index, crosses='\n' in gap)
 
 
+def _contest(token: _Token, left: _Option, right: _Option) -> _Verdict:
+    """Чей знак, стоящий между двумя числами: левого, правого, обоих или ничей."""
+    if left.crosses != right.crosses:
+        return 'right' if left.crosses else 'left'  # своя строка важнее соседней
+    if left.gap != right.gap:
+        return 'left' if left.gap < right.gap else 'right'
+    if token.side == 'prefix':
+        return 'right'
+    if token.side == 'suffix':
+        return 'left'
+    # Неясно, к какому числу относится «₾» или «GEL»: в одной строке — к обоим (как раньше:
+    # «1 499 ₾ 1 299 ₾»), а через границы элементов — ни к какому: честный пропуск лучше
+    # «15 GEL» из «iPhone 15» над отдельным «₾».
+    return 'none' if left.crosses else 'both'
+
+
 def _attach(norm: str, spans: list[tuple[int, int]], tokens: list[_Token]) -> list[int | None]:
     """Какой знак валюты принадлежит каждому числу (индекс в `tokens` или None).
 
     Знак ищется только у ближайших соседей (bisect по позициям), поэтому разбор линеен по
-    длине текста — страница в мегабайты цифр не превращается в часы работы. Сначала числа
-    берут знаки из своей строки; через границу строки знак достаётся числу, только если он
-    ничей: «iPhone 15» над «$799» — это 15 без валюты и 799 долларов.
+    длине текста — страница в мегабайты цифр не превращается в часы работы. Знак между двумя
+    числами достаётся одному (`_contest`): «iPhone 15 $799» и «iPhone 15» над «$799» — это 15
+    без валюты и 799 долларов.
     """
     starts = [token.start for token in tokens]
     ends = [token.end for token in tokens]
-    owners: list[int | None] = [None] * len(spans)
-    bound: set[int] = set()
-    late: list[tuple[int, list[_Option]]] = []
+    options: list[list[_Option]] = []
+    left_of: dict[int, tuple[int, _Option]] = {}  # знак справа от числа
+    right_of: dict[int, tuple[int, _Option]] = {}  # знак слева от числа
     for number, (start, end) in enumerate(spans):
-        options: list[_Option] = []
+        found: list[_Option] = []
         before = bisect_right(ends, start) - 1
-        if before >= 0 and (found := _option(norm, tokens, before, tokens[before].end, start)) is not None:
-            options.append(found)
+        if before >= 0 and (option := _option(norm, tokens, before, tokens[before].end, start)) is not None:
+            found.append(option)
+            right_of[before] = (number, option)
         after = bisect_left(starts, end)
-        if after < len(tokens) and (found := _option(norm, tokens, after, end, tokens[after].start)) is not None:
-            options.append(found)
-        same_line = [option for option in options if not option.crosses]
-        if same_line:
-            # При равном зазоре побеждает знак перед числом (он раньше в списке).
-            pick = min(same_line, key=lambda option: option.gap)
-            owners[number] = pick.index
-            bound.add(pick.index)
-        elif options:
-            late.append((number, options))
-    for number, options in late:
-        free = [option for option in options if option.index not in bound]
-        if free:
-            owners[number] = min(free, key=lambda option: option.gap).index
+        if after < len(tokens) and (option := _option(norm, tokens, after, end, tokens[after].start)) is not None:
+            found.append(option)
+            left_of[after] = (number, option)
+        options.append(found)
+    for index in left_of.keys() & right_of.keys():
+        (left, left_option), (right, right_option) = left_of[index], right_of[index]
+        verdict = _contest(tokens[index], left_option, right_option)
+        if verdict in ('right', 'none'):
+            options[left].remove(left_option)
+        if verdict in ('left', 'none'):
+            options[right].remove(right_option)
+    owners: list[int | None] = []
+    for found in options:
+        pool = [option for option in found if not option.crosses] or found
+        # При равном зазоре побеждает знак перед числом (он раньше в списке).
+        owners.append(min(pool, key=lambda option: option.gap).index if pool else None)
     return owners
 
 

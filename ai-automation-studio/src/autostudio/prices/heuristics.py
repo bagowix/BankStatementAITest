@@ -42,5 +42,9 @@ def guess_price(system: str, prompt: str) -> PriceGuess:
 
 
 def make_fake_llm() -> FakeLLM:
-    """`FakeLLM` с эвристикой цены — для демо, тестов и развёртывания без ключа."""
+    """`FakeLLM` с эвристикой цены — для демо, тестов и `probe --llm` без ключа.
+
+    В боевой запуск эвристика не попадает (см. `providers.price_model`): её «цена» — первое
+    число с валютой, а это часто порог доставки или старая цена.
+    """
     return FakeLLM({PriceGuess: guess_price})

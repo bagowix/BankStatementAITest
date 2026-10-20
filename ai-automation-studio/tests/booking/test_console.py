@@ -46,3 +46,16 @@ async def test__read_line__eof__none(monkeypatch):
     assert await read_line('> ') is None
     monkeypatch.setattr('builtins.input', lambda prompt: 'hi')
     assert await read_line('> ') == 'hi'
+
+
+def test__render__relay_with_receipt__receipt_shown():
+    from autostudio.booking.messages import Receipt
+
+    message = Outgoing(text='Hi', to='tg:5', receipt=Receipt(delivered='Delivered to tg:5.', failed='Not delivered'))
+    assert render(message, 'console:op', 1)[0] == '[→ tg:5] Hi\n🤖 Delivered to tg:5.'
+
+
+async def test__repl__unicode_digit_input__treated_as_text_no_crash(app: App):
+    out: list[str] = []
+    handled = await repl(app.engine, read=scripted(['²', '٣', '/quit']), write=out.append, language='en')
+    assert handled == 3

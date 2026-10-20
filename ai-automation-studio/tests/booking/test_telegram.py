@@ -26,10 +26,11 @@ from aiogram.types import (
 )
 
 from autostudio.booking import telegram as tg
+from autostudio.booking.domain import Customer
 from autostudio.booking.messages import Button, DeliveryError, Outgoing, RecipientGoneError
 from autostudio.booking.telegram import BookingBot, TelegramSender, chat_id_of, chat_key, render_markup, set_commands
 from autostudio.errors import NotifyError
-from tests.booking.helpers import App, Recorder, make_config
+from tests.booking.helpers import START, App, Recorder, make_config
 
 TOKEN = '42:TEST'
 ADMIN_ID = 999
@@ -42,6 +43,7 @@ class MockSession(BaseSession):
         super().__init__()
         self.requests: list = []
         self.errors: dict[type, list[Exception]] = {}
+        self.chat_errors: dict[int, Exception] = {}
 
     async def close(self) -> None:
         return None
@@ -51,6 +53,8 @@ class MockSession(BaseSession):
         queue = self.errors.get(type(method))
         if queue:
             raise queue.pop(0)
+        if isinstance(method, SendMessage) and int(method.chat_id) in self.chat_errors:
+            raise self.chat_errors[int(method.chat_id)]
         if isinstance(method, SendMessage):
             return Message(
                 message_id=len(self.requests),
@@ -219,18 +223,27 @@ async def test__router__contact_shared__phone_passed_to_engine(bot, session, boo
     assert isinstance(session.sent()[0].reply_markup, ReplyKeyboardRemove)
 
 
-async def test__router__group__non_admin_ignored_admin_command_served(bot, session, booking_bot):
+async def test__router__group_not_in_admin_chats__admin_command_ignored_even_from_owner(bot, session, booking_bot):
     await feed(bot, booking_bot, message_update('/today', chat_id=-100, chat_type='group'))
     await feed(bot, booking_bot, message_update('hello', chat_id=-100, chat_type='supergroup'))
-    assert session.sent() == []
-    raw = message_update('/today@TestBot', chat_id=-100, chat_type='group')
+    # Владелец набрал /week в семейном или публичном чате: расписание с телефонами туда не уходит.
+    raw = message_update('/week@TestBot', chat_id=-100, chat_type='group')
     raw['message']['from']['id'] = ADMIN_ID
     await feed(bot, booking_bot, raw)
+    assert session.sent() == []
+    callback = callback_update('ac:ABCDEF', chat_id=-100, chat_type='group', id=ADMIN_ID)
+    await feed(bot, booking_bot, callback)
+    assert session.sent() == []
+
+
+async def test__router__staff_group_in_admin_chats__admin_command_served(bot, session, app):
+    config = make_config(admin_chat_ids=[ADMIN_ID, -100])
+    staff_bot = BookingBot(config=config, engine=app.engine, sender=TelegramSender(bot), texts=app.texts)
+    raw = message_update('/today@TestBot', chat_id=-100, chat_type='group')
+    await feed(bot, staff_bot, raw)
     [agenda] = session.sent()
     assert agenda.chat_id == -100 and agenda.text.startswith('📋')
-    raw = message_update('just chatting', chat_id=-100, chat_type='group')
-    raw['message']['from']['id'] = ADMIN_ID
-    await feed(bot, booking_bot, raw)
+    await feed(bot, staff_bot, message_update('just chatting', chat_id=-100, chat_type='group'))
     assert len(session.sent()) == 1
 
 
@@ -317,3 +330,71 @@ async def test__run_polling__stopped__webhook_dropped_and_loop_stopped(bot, sess
     await tg.run_polling(bot, booking_bot, loop, ['en', 'ru'])
     assert started == [True]
     assert any(isinstance(r, DeleteWebhook) for r in session.requests)
+
+
+def forbidden(chat_id: int) -> TelegramForbiddenError:
+    return TelegramForbiddenError(
+        method=SendMessage(chat_id=chat_id, text='x'), message='Forbidden: bot was blocked by the user'
+    )
+
+
+async def test__router__contact_of_someone_else__not_verified(bot, session, booking_bot, app):
+    seen = []
+
+    async def spy(incoming):
+        seen.append(incoming)
+        return []
+
+    booking_bot._engine.handle = spy
+    own = {'phone_number': '995555123456', 'first_name': 'Anna', 'user_id': 1}
+    other = {'phone_number': '+1 000 000 0000', 'first_name': 'Bob', 'user_id': 777}
+    no_owner = {'phone_number': '995555123456', 'first_name': 'Card'}
+    for contact in (own, other, no_owner):
+        await feed(bot, booking_bot, message_update(None, contact=contact))
+    assert [(item.phone, item.phone_verified) for item in seen] == [
+        ('995555123456', True),
+        ('+1 000 000 0000', False),
+        ('995555123456', False),
+    ]
+
+
+async def test__process__engine_bug_repeated__operator_alerted_once_per_hour(
+    bot, session, app, booking_bot, monkeypatch
+):
+    async def broken(message):
+        raise ValueError('forged callback')
+
+    monkeypatch.setattr(app.engine, 'handle', broken)
+    for _ in range(5):
+        await feed(bot, booking_bot, callback_update('d:haircut:_:20261021:x'))
+    assert len(app.operator.texts) == 1
+    booking_bot._clock = lambda: dt.datetime.now(dt.UTC) + dt.timedelta(hours=2)
+    await feed(bot, booking_bot, callback_update('d:haircut:_:20261021:x'))
+    assert len(app.operator.texts) == 2
+
+
+async def test__process__admin_blocked_bot__operator_alerted(bot, session, app, booking_bot):
+    session.chat_errors[ADMIN_ID] = forbidden(ADMIN_ID)
+    await feed(bot, booking_bot, callback_update('h'))
+    await feed(bot, booking_bot, message_update('Can Giorgi do a fade?'))
+    # Покупатель ответ получил; попытка в чат администратора (последняя) упала.
+    assert [request.chat_id for request in session.sent()] == [1, 1, ADMIN_ID]
+    assert app.operator.texts and 'tg:999 не получает сообщения бота' in app.operator.texts[0]
+
+
+async def test__process__reply_to_customer_who_blocked_bot__admin_told_not_delivered(bot, session, app, booking_bot):
+    app.store.save_customer(Customer(key='tg:4242', language='en'), START)
+    session.chat_errors[4242] = TelegramBadRequest(
+        method=SendMessage(chat_id=4242, text='x'), message='Bad Request: chat not found'
+    )
+    raw = message_update('/reply tg:4242 Yes, we do kids coloring')
+    raw['message']['chat']['id'] = ADMIN_ID
+    raw['message']['from']['id'] = ADMIN_ID
+    await feed(bot, booking_bot, raw)
+    attempt, note = session.sent()  # попытка в tg:4242 упала — админу честное «не доставлено»
+    assert attempt.chat_id == 4242
+    assert note.chat_id == ADMIN_ID and note.text.startswith('Not delivered to tg:4242')
+    session.chat_errors.clear()
+    await feed(bot, booking_bot, raw)
+    relay, receipt = session.sent()[2:]
+    assert relay.chat_id == 4242 and receipt.text == 'Delivered to tg:4242.'

@@ -2,12 +2,11 @@
 
 > **Template. Not legal advice.** Before the first use, a lawyer qualified in Georgia must review
 > it (see `README.md`). Fill the fields in `{{double braces}}` once and the fields in
-> `[square brackets]` for each client. Delete this box and every `[LAWYER: …]` and `[VERIFY: …]`
-> note before you send it.
+> `[square brackets]` for each client. Delete this box before you send it.
 
 These Support Terms are part of Agreement No. [number] dated [date] between {{NAME}} (the
-**Developer**) and [Client's legal name] (the **Client**). Words in bold capitals, such as
-**Business Day** and **Client Accounts**, have the meaning given in the Agreement.
+**Developer**) and [Client's legal name] (the **Client**). Capitalised words, such as
+**Business Day**, **Client Accounts** and **Order Form**, have the meaning given in the Agreement.
 
 They apply while the Client has an active support plan. While the Developer hosts the Client's
 system, a support plan is required.
@@ -22,7 +21,7 @@ system, a support plan is required.
 | Hosting, monitoring, daily backups, monthly security updates, monthly report | ✓ | ✓ | ✓ |
 | First response within | 2 Business Days | 1 Business Day | 4 business hours |
 | Hours for small changes per month | 1 hour | 4 hours | 10 hours |
-| Repairs after outside changes | counted within the 1 hour | included, no hours used | included, no hours used |
+| Repairs after outside changes | counted within the 1 hour; above it, extra hours | included, no hours used | included, no hours used |
 | Fixes of the Developer's own bugs | always free | always free | always free |
 | AI operations per month | 2,000 | 10,000 | 30,000 |
 | One new small automation per quarter, up to 6 hours | — | — | ✓ |
@@ -93,12 +92,14 @@ more than 3 Business Days, and how incidents will be handled during it. Monitori
 
 ## 4. Incident or change request
 
+4.1. Every request is one of these types:
+
 | Type | Examples | How it is paid |
 |---|---|---|
 | **The Developer's bug:** the system does not work as described in the Order Form | A reminder goes out at the wrong time. A row is missing from the sheet. The bot stops after an update. | Always free. No plan hours are used. |
-| **Repair after an outside change:** something outside the system changed | A competitor redesigns a product page. The Client changes the mailbox password. A provider changes its interface. Sheet access was removed. | Care: counted within the 1 hour. Pro and Business: included, no hours used. |
+| **Repair after an outside change:** something outside the system changed | A competitor redesigns a product page. The Client changes the mailbox password. A provider changes its interface. Sheet access was removed. | Care: counted within the 1 hour; above it, extra hours (5.3). Pro and Business: included, no hours used. |
 | **Small change** | Prices, services, staff, opening hours, holidays, FAQ, email categories, company facts, competitor links within the tier, bot texts, alert threshold. | Plan hours. |
-| **New small automation** (Business only) | A weekly summary in Telegram. A new report tab. A new email category with its own action. | One per quarter, up to 6 hours. |
+| **New small automation** (Business only) | A weekly summary in Telegram. A new report tab. A new email category with its own action. | One per quarter, up to 6 hours. An unused one does not carry over. |
 | **Custom work** | New features, integrations or channels (WhatsApp, Instagram, a CRM). New data sources. Anything above the tier's limits. | Quoted separately. |
 
 4.2. A repair brings back the same function on the same site or service. Some outside changes need a
@@ -139,7 +140,8 @@ Basic booking bot uses no AI at all.
 6.2. When the Client reaches 80% of the monthly limit, the Developer tells the Client.
 
 6.3. Above the limit, the Order Form sets one of two options:
-- **Keep working** (default). Extra operations cost $2 per 1,000, on the next invoice.
+- **Keep working** (default). Extra operations cost $2 per 1,000, or the amount set in the Order
+  Form, on the next invoice.
 - **Hard cap.** Until the 1st of the next month, the system uses simple built-in rules. Buttons,
   reminders and prices from page markup work as usual. Typed messages and emails are understood
   less well, and only in English and Russian. Nothing is lost.

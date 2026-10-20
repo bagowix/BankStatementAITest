@@ -135,7 +135,8 @@ _EN: Final[dict[str, str]] = {
     'admin_not_found': 'Booking #{id} not found or already cancelled.',
     'admin_help': (
         'Admin commands:\n/today, /tomorrow, /week — schedule\n'
-        '/cancel_booking <id> — cancel a booking (the customer is notified)\n/reply <user> <text> — reply to a customer\n'
+        '/cancel_booking <id> — cancel a booking (the customer is notified)\n'
+        '/reply <user> <text> — reply to a customer\n'
         '📅 Book — book a walk-in or phone customer (the bot asks for their name and phone)'
     ),
     'admin_reply_sent': 'Delivered to {user}.',
@@ -145,7 +146,9 @@ _EN: Final[dict[str, str]] = {
     'admin_cancel_not_notified': "Couldn't notify the customer in Telegram — please call them: {phone}",
     'walkin_name': 'Booking a walk-in or phone customer: {slot}. What is the customer’s name?',
     'walkin_phone': 'And the customer’s phone number?',
-    'walkin_booked': 'Booked ✅ #{id}: {name}, {service}, {when}, with {staff}. No reminder is sent for walk-in bookings.',
+    'walkin_booked': (
+        'Booked ✅ #{id}: {name}, {service}, {when}, with {staff}. No reminder is sent for walk-in bookings.'
+    ),
     'admin_usage_cancel': 'Usage: /cancel_booking <id>, e.g. /cancel_booking K7Q2MX',
     'admin_usage_reply': 'Usage: /reply <user> <text>',
     'actor_customer': 'the customer',
@@ -274,7 +277,8 @@ _RU: Final[dict[str, str]] = {
     'admin_not_found': 'Запись №{id} не найдена или уже отменена.',
     'admin_help': (
         'Команды администратора:\n/today, /tomorrow, /week — расписание\n'
-        '/cancel_booking <id> — отменить запись (клиент получит уведомление)\n/reply <user> <текст> — ответить клиенту\n'
+        '/cancel_booking <id> — отменить запись (клиент получит уведомление)\n'
+        '/reply <user> <текст> — ответить клиенту\n'
         '📅 Записаться — запись клиента с улицы или по телефону (бот спросит его имя и телефон)'
     ),
     'admin_reply_sent': 'Доставлено: {user}.',
@@ -284,7 +288,9 @@ _RU: Final[dict[str, str]] = {
     'admin_cancel_not_notified': 'Не удалось уведомить клиента в Telegram — позвоните ему: {phone}',
     'walkin_name': 'Запись клиента с улицы или по телефону: {slot}. Как зовут клиента?',
     'walkin_phone': 'И телефон клиента?',
-    'walkin_booked': 'Записали ✅ №{id}: {name}, {service}, {when}, специалист: {staff}. Напоминание гостю не отправляется.',
+    'walkin_booked': (
+        'Записали ✅ №{id}: {name}, {service}, {when}, специалист: {staff}. Напоминание гостю не отправляется.'
+    ),
     'admin_usage_cancel': 'Формат: /cancel_booking <id>, например /cancel_booking K7Q2MX',
     'admin_usage_reply': 'Формат: /reply <user> <текст>',
     'actor_customer': 'клиентом',

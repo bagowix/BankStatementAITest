@@ -36,7 +36,9 @@ def test__intent_prompt__config__services_today_untrusted_rule(config):
 def test__faq_prompt__language_and_config__facts_and_sources(config):
     texts = Texts(config.booking, config.client.zone)
     ru = faq_system_prompt(config, texts, 'ru')
-    assert '- [address] Q: Где вы находитесь? | A: Тбилиси, проспект Руставели, 12.' in ru
+    assert '- [address] Q: "Где вы находитесь?" | A: "Тбилиси, проспект Руставели, 12."' in ru
+    # Для ответа на вопрос — названия услуг на языке покупателя.
+    assert '- haircut: Стрижка | 40 GEL | 45 min' in ru and 'Haircut' not in ru
     assert 'SERVICES AND PRICES [prices]' in ru and 'OPENING HOURS [hours]' in ru and 'CONTACT [contact]' in ru
     assert 'language "ru"' in ru
     empty = make_config(faq=[], contact_phone=None)

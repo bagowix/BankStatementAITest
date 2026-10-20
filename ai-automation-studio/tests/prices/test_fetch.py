@@ -1,3 +1,4 @@
+import asyncio
 import datetime as dt
 from collections.abc import AsyncIterator, Callable
 
@@ -457,3 +458,135 @@ async def test__system_resolver__localhost__loopback_addresses():
     addresses = await system_resolver('localhost', 80)
     assert addresses
     assert all(a.startswith(('127.', '::1')) for a in addresses)
+
+
+# --- ловушки ревью ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ('rules', 'path', 'allowed'),
+    [
+        # urllib.robotparser в Python 3.12 брал первое совпавшее правило и не знал «*» и «$».
+        ('User-agent: *\nAllow: /\nDisallow: /private/\n', '/private/x', False),
+        ('User-agent: *\nDisallow: /*/private/\n', '/ru/private/x', False),
+        ('User-agent: *\nDisallow: /*.html$\n', '/old/airpods.html', False),
+        ('User-agent: *\nDisallow: /*?*variant=\n', '/products/x?color=1&variant=2', False),
+        ('User-agent: *\nDisallow: /\nAllow: /products/\n', '/products/x', True),
+        ('User-agent: *\nDisallow: /*.html$\n', '/old/airpods.html?x=1', True),
+    ],
+)
+async def test__fetch__robots_rfc9309_wildcards_and_longest_match__same_on_every_python(rules, path, allowed):
+    site = Site({'a.example/robots.txt': httpx.Response(200, text=rules), f'a.example{path.split("?")[0]}': ok()})
+    fetcher, http, _ = make(site, min_delay_s=1.0)
+    async with http:
+        result = await fetcher.fetch(f'https://a.example{path}')
+    assert isinstance(result, FetchResult) is allowed, result
+
+
+async def test__fetch__crawl_delay_garbage__ignored_no_crash():
+    rules = 'User-agent: *\nCrawl-delay: 1' + '0' * 400 + '\nDisallow: /x\n'
+    site = Site({'a.example/robots.txt': httpx.Response(200, text=rules), 'a.example/p': ok()})
+    fetcher, http, time = make(site, min_delay_s=1.0)
+    async with http:
+        assert isinstance(await fetcher.fetch('https://a.example/p'), FetchResult)
+        assert isinstance(await fetcher.fetch('https://a.example/p'), FetchResult)
+    assert time.sleeps == [1.0, 1.0]  # robots.txt, страница, страница — паузы только min_delay_s
+
+
+async def test__fetch__idn_host__resolver_gets_punycode_httpx_connects_to():
+    # Python-резолвер кодирует «faß» по IDNA 2003 («fass»), httpx подключается к IDNA 2008 («xn--fa-hia»).
+    asked: list[str] = []
+
+    async def resolve(host: str, port: int) -> list[str]:
+        asked.append(host)
+        return [PUBLIC]
+
+    site = Site({'faß.example/p': ok()})  # httpx.URL.host — снова Unicode-имя
+    settings = FetchSettings(user_agent='bot (+mailto:ops@studio.example)', respect_robots=False)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(site)) as http:
+        fetcher = PoliteFetcher(http, settings, sleep=FakeTime().sleep, resolver=resolve)
+        assert isinstance(await fetcher.fetch('https://faß.example/p'), FetchResult)
+    assert asked == ['xn--fa-hia.example']
+
+
+class Drip(httpx.AsyncByteStream):
+    """Сервер-«тарпит»: отдаёт страницу по байту, каждый — быстрее таймаута чтения."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for _ in range(1000):
+            await asyncio.sleep(0.01)
+            yield b'x'
+
+
+async def test__fetch__tarpit_drip__whole_attempt_deadline_timeout():
+    site = Site({'a.example/p': httpx.Response(200, headers=HTML, stream=Drip())})
+    fetcher, http, _ = make(site, respect_robots=False, max_retries=0, attempt_timeout_s=0.1)
+    async with http:
+        result = await fetcher.fetch('https://a.example/p')
+    assert isinstance(result, FetchFailure)
+    assert result.reason == 'timeout'
+    assert '0.1' in result.detail
+
+
+def test__fetch_settings__attempt_deadline__defaults_to_three_read_timeouts():
+    assert FetchSettings(user_agent='x', timeout_s=20).attempt_deadline_s == 60
+    assert FetchSettings(user_agent='x', attempt_timeout_s=5).attempt_deadline_s == 5
+
+
+@pytest.mark.parametrize('value', [b'\xb2', b'9' * 400])
+async def test__fetch__odd_retry_after__no_crash(value):
+    # h11 пропускает байт 0xB2 в заголовке; httpx читает его как «²», а «²».isdigit() — True.
+    replies = iter([httpx.Response(429, headers=[(b'retry-after', value)]), ok()])
+    site = Site({'a.example/p': lambda r: next(replies)})
+    fetcher, http, time = make(site, respect_robots=False, min_delay_s=1.0)
+    async with http:
+        result = await fetcher.fetch('https://a.example/p')
+    if value == b'\xb2':
+        assert isinstance(result, FetchResult)  # мусор вместо числа — обычная пауза с backoff
+        assert time.sleeps[0] == 2.0
+    else:
+        assert isinstance(result, FetchFailure)  # «очень долго» — до следующего запуска
+        assert result.reason == 'rate_limited'
+
+
+@pytest.mark.parametrize('charset', ['hex', 'rot13', 'base64', 'idna'])
+async def test__fetch__non_text_charset__decoded_as_utf8(charset):
+    page = httpx.Response(200, headers={'content-type': f'text/html; charset={charset}'}, content='₾'.encode())
+    site = Site({'a.example/p': page})
+    fetcher, http, _ = make(site, respect_robots=False)
+    async with http:
+        result = await fetcher.fetch('https://a.example/p')
+    assert isinstance(result, FetchResult)
+    assert result.html == '₾'
+    assert decode_html('₾'.encode(), charset) == '₾'
+
+
+async def test__fetch__ipv6_literal__robots_read_with_brackets():
+    v6 = '2606:4700:4700::1111'
+    site = Site({f'{v6}/robots.txt': httpx.Response(200, text='User-agent: *\nDisallow: /\n'), f'{v6}/p': ok()})
+    fetcher, http, _ = make(site)
+    async with http:
+        result = await fetcher.fetch(f'https://[{v6}]/p')
+    assert isinstance(result, FetchFailure)
+    assert result.reason == 'robots_disallowed'
+    assert site.paths() == [f'{v6}/robots.txt']
+
+
+async def test__fetch__robots_address_fails_its_own_check__site_skipped_not_allowed():
+    calls = 0
+
+    async def flaky(host: str, port: int) -> list[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # имя страницы только что резолвилось, а robots.txt того же сайта — нет
+            raise OSError('temporary failure')
+        return [PUBLIC]
+
+    site = Site({'a.example/p': ok()})
+    settings = FetchSettings(user_agent='bot (+mailto:ops@studio.example)')
+    async with httpx.AsyncClient(transport=httpx.MockTransport(site)) as http:
+        fetcher = PoliteFetcher(http, settings, sleep=FakeTime().sleep, resolver=flaky)
+        result = await fetcher.fetch('https://a.example/p')
+    assert isinstance(result, FetchFailure)
+    assert result.reason == 'robots_disallowed'
+    assert site.requests == []

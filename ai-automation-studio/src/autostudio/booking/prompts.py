@@ -169,7 +169,8 @@ def faq_system_prompt(config: BookingConfig, texts: Texts, language: str) -> str
     # Вопрос и ответ — JSON-строками: многострочный ответ (адрес и как пройти) остаётся одной
     # строкой промпта, а модель и эвристика читают его целиком, с переносами.
     faq = [
-        f'- [{item.id}] Q: {_quoted(texts.pick(item.question, language))} | A: {_quoted(texts.pick(item.answer, language))}'
+        f'- [{item.id}] Q: {_quoted(texts.pick(item.question, language))} | '
+        f'A: {_quoted(texts.pick(item.answer, language))}'
         for item in config.booking.faq
     ]
     phone = config.booking.contact_phone

@@ -148,6 +148,8 @@ class App:
         fields.setdefault('name', 'Anna')
         fields.setdefault('language', 'en')
         replies = await self.engine.handle(Incoming(user=user, **fields))
+        # Строки таблицы пишутся в фоне: тесты читают CSV сразу после ответа.
+        await self.service.drain()
         own = [reply for reply in replies if reply.to is None]
         if own:
             self.last[user] = own

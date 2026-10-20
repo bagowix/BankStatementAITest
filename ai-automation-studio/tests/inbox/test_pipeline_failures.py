@@ -71,7 +71,79 @@ async def test__run__model_refuses_everything_on_fresh_deploy__postponed_not_giv
         result = await run_once(h.config, h.deps, _later(minute))
         assert result.aborted is None and result.given_up == 0 and not result.ok
         assert 'model_content' in result.errors[0]
+        assert 'AUTOSTUDIO_LLM_MODEL' in result.errors[1] and 'ещё ни разу не ответила' in result.errors[1]
     assert h.sheet() == []
+
+
+def _rejecting_everything(status_code: int = 400) -> FakeLLM:
+    def rejected(system: str, prompt: str) -> Triage:
+        raise LLMError(
+            "OpenAI 400: Unsupported value: 'reasoning.effort' does not support 'minimal'", status_code=status_code
+        )
+
+    llm = make_fake_llm()
+    llm.register(Triage, rejected)
+    return llm
+
+
+async def test__run__every_call_rejected_after_env_change__nothing_written_off_operator_told_on_first_run(tmp_path):
+    # Регрессия: модель отвечала час назад, после правки AUTOSTUDIO_LLM_EFFORT провайдер отвечает
+    # 400 на каждый запрос. Раньше давний успех делал виноватым каждое письмо: два запуска «ok»,
+    # на третий все письма окна списывались в «нужна ручная проверка».
+    h = Harness(tmp_path, llm=_rejecting_everything())
+    h.store.mark_healthy('model', NOW - dt.timedelta(hours=1))
+    h.box.add(make_email(**LEAD))
+    for index in range(4):
+        h.box.add(make_email(subject=f'Booking {index}', message_id=f'<n{index}@x.example>', body='I want a tour'))
+    for attempt in range(MAX_ATTEMPTS + 1):
+        before = len(h.llm.calls)
+        result = await run_once(h.config, h.deps, _later(attempt))
+        assert not result.ok and result.errors and result.given_up == 0 and result.failed == 5
+        assert 'AUTOSTUDIO_LLM_EFFORT' in result.errors[1] and '2026-10-20 08:00 UTC' in result.errors[1]
+        assert len(h.llm.calls) - before == 6  # пять писем и один проверочный запрос
+    assert h.sheet() == [] and h.operator is not None and h.operator.sent == []
+    assert 'inbox.failed' not in h.event_kinds()
+
+    h.llm.register(Triage, triage_heuristic)  # оператор вернул .env
+    fixed = await run_once(h.config, h.deps, _later(30))
+    assert fixed.ok and fixed.processed == 5 and fixed.notified >= 1 and fixed.given_up == 0
+
+
+async def test__run__lone_refused_email_in_quiet_inbox__probe_answers_email_given_up(tmp_path):
+    # Одинокое письмо, на котором модель отказывается, не ждёт вечно, даже если других писем нет:
+    # проверочный запрос показывает, что модель жива, и попытка засчитывается письму.
+    h = Harness(tmp_path, llm=_refusing('Poison', LLMError('модель отказалась отвечать на этот ввод')))
+    h.box.add(make_email(subject='Poison', message_id='<p@x.example>', body='Price?'))
+    for attempt in range(MAX_ATTEMPTS):
+        result = await run_once(h.config, h.deps, _later(attempt))
+        assert result.ok and result.failed == 1
+    assert result.given_up == 1
+    probes = [call for call in h.llm.calls if 'Opening hours' in call.prompt]
+    assert len(probes) == MAX_ATTEMPTS and all('Poison' not in call.prompt for call in probes)
+    assert h.sheet()[1][14] == 'needs manual review'
+
+
+async def test__run__probe_hits_rate_limit__refusals_wait_error_names_outage(tmp_path):
+    def picky(system: str, prompt: str) -> Triage:
+        if 'Opening hours' in prompt:
+            raise LLMError('OpenAI 429: rate limit', status_code=429)
+        raise LLMError('модель отказалась отвечать на этот ввод')
+
+    h = Harness(tmp_path, llm=FakeLLM({Triage: picky}))
+    h.box.add(make_email(**LEAD))
+    for attempt in range(MAX_ATTEMPTS + 1):
+        result = await run_once(h.config, h.deps, _later(attempt))
+        assert result.given_up == 0 and 'недоступна и на проверочном запросе' in result.errors[1]
+    assert h.sheet() == []
+
+
+async def test__run__refusal_and_success_in_same_run__no_probe_needed(tmp_path):
+    h = Harness(tmp_path, llm=_refusing('Refuse', LLMError('модель отказалась отвечать на этот ввод')))
+    h.box.add(make_email(subject='Refuse', message_id='<r@x.example>', body='Price?'))
+    h.box.add(make_email(**LEAD))
+    result = await run_once(h.config, h.deps, NOW)
+    assert result.ok and result.processed == 1 and result.failed == 1
+    assert not any('Opening hours' in call.prompt for call in h.llm.calls)
 
 
 async def test__run__stuck_emails_at_head__fresh_email_processed_first_next_run(tmp_path):
@@ -124,7 +196,9 @@ async def test__run__notify_fails_for_one_email_while_channel_works__given_up_wi
     h = Harness(tmp_path)
     owner = FragileNotifier()
     deps = msgspec.structs.replace(h.deps, notifier=owner)
-    h.box.add(make_email(subject='Fragile price question', message_id='<f@x.example>', body='Price? Call +995 599 11 22 33'))
+    h.box.add(
+        make_email(subject='Fragile price question', message_id='<f@x.example>', body='Price? Call +995 599 11 22 33')
+    )
     for minute in range(MAX_ATTEMPTS):
         h.box.add(make_email(subject=f'Price {minute}', message_id=f'<ok{minute}@x.example>', body='Price?'))
         result = await run_once(h.config, deps, _later(minute))
@@ -245,3 +319,113 @@ async def test__dry_run__refusal_and_unreadable_email__error_rows_table_still_bu
     assert rows[1].notes == ['LLMError'] and rows[1].subject == 'Refuse me'
     assert seen == [(1, 3), (2, 3), (3, 3)]
     assert h.box.appended == [] and h.sheet() == []
+
+
+async def test__run__rate_limit_on_draft_after_model_answered__waits_not_counted(tmp_path):
+    # Лимит запросов кончается посреди запуска: разбор прошёл, черновик — 429. Письмо не виновато.
+    llm = make_fake_llm()
+
+    def limited(system: str, prompt: str) -> str:
+        raise LLMError('OpenAI 429: rate limit', status_code=429)
+
+    llm.set_writer(limited)
+    h = Harness(tmp_path, llm=llm)
+    h.box.add(make_email(**LEAD))
+    for minute in range(MAX_ATTEMPTS + 1):
+        result = await run_once(h.config, h.deps, _later(minute))
+        assert result.given_up == 0 and 'model' in result.errors[0]
+    assert h.sheet() == [] and h.store.record_failure('INBOX', 1, 1, 'probe', now=NOW) == 1
+
+    await run_once(h.config, h.deps, NOW + OUTAGE_GRACE + dt.timedelta(minutes=1))
+    row = h.sheet()[1]
+    assert row[3] == 'lead' and row[13] == 'no'
+    assert 'reply draft not prepared (AI unavailable)' in row[14]
+
+
+async def test__run__one_message_never_downloads_while_others_do__given_up_as_unreadable(tmp_path):
+    h = Harness(tmp_path)
+    broken = h.box.add(make_email(subject='Broken', message_id='<b@x.example>', body='Price?'))
+    h.box.fail_fetch.add(broken)
+    for minute in range(MAX_ATTEMPTS):
+        h.box.add(make_email(subject=f'Ok {minute}', message_id=f'<o{minute}@x.example>', body='Hello'))
+        result = await run_once(h.config, h.deps, _later(minute))
+    assert result.given_up == 1 and result.ok
+    assert any(f'UID {broken}' in row[5] for row in h.sheet()[1:])
+
+
+async def test__run__owner_channel_keeps_failing__later_leads_fail_fast_without_waiting(tmp_path):
+    h = Harness(tmp_path)
+
+    class Counting:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send(self, text: str) -> None:
+            self.calls += 1
+            raise NotifyError('Telegram недоступен: ConnectTimeout')
+
+    owner = Counting()
+    for index in range(4):
+        h.box.add(make_email(subject=f'Price {index}', message_id=f'<l{index}@x.example>', body='Price?'))
+    result = await run_once(h.config, msgspec.structs.replace(h.deps, notifier=owner), NOW)
+    assert owner.calls == 2 and result.failed == 4 and result.aborted is None
+    assert 'notifier' in result.errors[0]
+
+
+async def test__run__legacy_triage_without_envelope_vanishes__triage_erased(tmp_path):
+    from autostudio.inbox.triage import TriageResult
+    from tests.inbox.test_pipeline import VanishingBox
+
+    h = Harness(tmp_path)
+    box = VanishingBox({1}, folders=['Drafts'])
+    box.add(make_email(**LEAD))
+    h.store.set_cursor('INBOX', 1, 0)
+    h.store.save_triage('<m1@client.example>', TriageResult(category='lead', confidence=0.9, summary='s'), NOW)
+    h.store.record_failure('INBOX', 1, 1, 'NotifyError: down', now=NOW, message_id='<m1@client.example>', count=False)
+    await run_once(h.config, msgspec.structs.replace(h.deps, mailbox=box), _later(5))
+    stored = h.store.get('<m1@client.example>')
+    assert stored is not None and stored.triage is None and h.store.uid_done('INBOX', 1, 1)
+
+
+async def test__run__drafts_folder_missing_for_a_day__row_says_draft_not_saved(tmp_path):
+    h = Harness(tmp_path)
+    del h.box.folders_['Drafts']
+    h.box.add(make_email(**LEAD))
+    await run_once(h.config, h.deps, NOW)
+    await run_once(h.config, h.deps, NOW + OUTAGE_GRACE + dt.timedelta(minutes=1))
+    row = h.sheet()[1]
+    assert row[13] == 'no' and 'reply draft could not be saved' in row[14]
+
+
+async def test__run__unexpected_bug_after_triage__given_up_with_triage_and_generic_note(tmp_path, monkeypatch):
+    from autostudio.inbox import pipeline
+
+    def broken(*args: object, **kwargs: object) -> bytes:
+        raise ValueError('header assembly failed')
+
+    monkeypatch.setattr(pipeline, 'compose_reply', broken)
+    h = Harness(tmp_path)
+    h.box.add(make_email(**LEAD))
+    for attempt in range(MAX_ATTEMPTS):
+        result = await run_once(h.config, h.deps, _later(attempt))
+    assert result.given_up == 1
+    row = h.sheet()[1]
+    assert row[3] == 'lead' and 'not every step finished' in row[14]
+    writes = [call for call in h.llm.calls if call.kind == 'write']
+    assert len(writes) == 1  # текст черновика сохранён — повторы модели не платят
+
+
+async def test__run__refusal_while_model_also_down__refusal_waits_too(tmp_path):
+    def flaky(system: str, prompt: str) -> Triage:
+        if 'Refuse' in prompt:
+            raise LLMError('модель отказалась отвечать на этот ввод')
+        raise LLMError('OpenAI 503: overloaded', status_code=503)
+
+    h = Harness(tmp_path, llm=FakeLLM({Triage: flaky}))
+    h.store.mark_healthy('model', NOW)
+    h.box.add(make_email(subject='Refuse', message_id='<r@x.example>', body='Price?'))
+    h.box.add(make_email(**LEAD))
+    for minute in range(MAX_ATTEMPTS + 1):
+        result = await run_once(h.config, h.deps, _later(minute))
+        assert result.given_up == 0
+    assert h.store.record_failure('INBOX', 1, 1, 'probe', now=NOW) == 1

@@ -6,7 +6,7 @@ import pytest
 from autostudio.booking import callbacks as cb
 from autostudio.booking.callbacks import SlotRef
 from autostudio.booking.domain import BookingStatus, Customer
-from autostudio.booking.engine import Conversation, Conversations, Engine, Step
+from autostudio.booking.engine import HANDOFFS, MODEL_CALLS, Conversation, Conversations, Engine, Step
 from autostudio.booking.heuristics import answer_faq
 from autostudio.booking.messages import ADMINS, CALLBACK_DATA_LIMIT
 from autostudio.booking.prompts import BookingIntent, FaqAnswer
@@ -180,6 +180,8 @@ async def test__stale_slot_button__taken_meanwhile__alternatives(app):
         'l:ka',
         'bk',
         'ry:ABCDEF:bad',
+        'd:haircut:_:20261021:²',  # isdigit() == True, а int() падает
+        'd:haircut:_:20261021:٣',
     ],
 )
 async def test__button__forged_or_garbage__stale_menu(app, data):
@@ -418,9 +420,12 @@ async def test__cancel__inside_window__customer_refused_admin_allowed(app):
     assert 'less than 2 h' in texts_of(move)
     await app.text(ADMIN, f'/cancel_booking {booking.id.lower()}', is_admin=True)
     replies = await app.press(ADMIN, 'Yes, cancel', is_admin=True)
-    assert replies[0].text == f'Booking #{booking.id} cancelled; the customer has been notified.'
+    assert replies[0].text == f'Booking #{booking.id} cancelled.'
     to_customer = [r for r in replies if r.to == USER]
     assert to_customer and 'Test Barbers had to cancel your booking' in to_customer[0].text
+    # «Клиент уведомлён» — только после доставки: квитанция, а не обещание заранее.
+    assert to_customer[0].receipt.delivered == 'The customer has been notified.'
+    assert '+995 555 12 34 56' in to_customer[0].receipt.failed
     assert app.events_of('booking.cancelled')[0].payload['by'] == 'admin'
 
 
@@ -686,9 +691,9 @@ async def test__admin_cancel__bad_or_unknown_id__usage_or_not_found(app):
 async def test__admin_reply__customer_profile_ru__relayed_in_russian(app):
     app.store.save_customer(Customer(key=OTHER, language='ru'), START)
     replies = await app.text(ADMIN, '/reply tg:2 Да, детей стрижём с 5 лет', is_admin=True)
-    relay = [r for r in replies if r.to == OTHER]
-    assert relay and relay[0].text == '💬 Test Barbers: Да, детей стрижём с 5 лет'
-    assert replies[-1].text == 'Sent to tg:2.'
+    [relay] = replies
+    assert relay.to == OTHER and relay.text == '💬 Test Barbers: Да, детей стрижём с 5 лет'
+    assert relay.receipt.delivered == 'Delivered to tg:2.' and 'Not delivered to tg:2' in relay.receipt.failed
     assert 'Usage: /reply' in texts_of(await app.text(ADMIN, '/reply tg:2', is_admin=True))
 
 
@@ -705,3 +710,174 @@ async def test__engine__unknown_customer_language_profile__telegram_language_use
 def test__step_enum__values__stable():
     assert [step.value for step in Step] == ['idle', 'name', 'phone', 'question', 'human']
     assert isinstance(Engine, type) and TUE.weekday() == 1
+
+
+async def walk_in(app: App, *, time: str, name: str, phone: str) -> list:
+    await app.press(ADMIN, '📅', is_admin=True)
+    await app.press(ADMIN, 'Haircut ·', is_admin=True)
+    await app.press(ADMIN, 'Giorgi', is_admin=True)
+    await app.press(ADMIN, 'Tomorrow', is_admin=True)
+    [ask_name] = await app.press(ADMIN, time, is_admin=True)
+    assert ask_name.text.startswith('Booking a walk-in or phone customer') and 'Use' not in str(ask_name.buttons)
+    [ask_phone] = await app.text(ADMIN, name, is_admin=True)
+    assert ask_phone.text == 'And the customer’s phone number?' and ask_phone.request_contact is None
+    replies = await app.text(ADMIN, phone, is_admin=True)
+    assert f'{name}, ' in replies[-1].text
+    return await app.press(ADMIN, '✅', is_admin=True)
+
+
+async def test__walk_in__two_guests_in_a_row__each_asked_and_admin_profile_untouched(app):
+    await app.text(ADMIN, '/start', is_admin=True)
+    first = await walk_in(app, time='12:00', name='Walkin One', phone='+995 599 11 11 11')
+    assert first[0].text.startswith('Booked ✅') and 'Walkin One' in first[0].text
+    await app.press(ADMIN, '⬅️ Menu', is_admin=True)
+    await walk_in(app, time='15:00', name='Walkin Two', phone='+995 599 22 22 22')
+    bookings = app.store.for_customer(ADMIN, START)
+    assert [(b.name, b.phone, b.source) for b in bookings] == [
+        ('Walkin One', '+995599111111', 'admin'),
+        ('Walkin Two', '+995599222222', 'admin'),
+    ]
+    assert app.store.customer(ADMIN) is None  # гость не стал профилем администратора
+    # Отдельное событие без «сэкономленных минут»: это работа администратора, а не бота.
+    assert app.events_of('booking.created') == [] and len(app.events_of('booking.walk_in')) == 2
+
+
+async def test__walk_in__admin_cancel__no_apology_to_admin_chat(app):
+    await app.text(ADMIN, '/start', is_admin=True)
+    await walk_in(app, time='12:00', name='Walkin One', phone='+995 599 11 11 11')
+    booking = app.store.for_customer(ADMIN, START)[0]
+    await app.text(ADMIN, f'/cancel_booking {booking.id}', is_admin=True)
+    replies = await app.press(ADMIN, 'Yes, cancel', is_admin=True)
+    assert [r.text for r in replies] == [f'Booking #{booking.id} cancelled.']
+
+
+async def test__walk_in__confirm_after_state_lost__details_asked_again_no_booking(app):
+    await app.text(ADMIN, '/start', is_admin=True)
+    ref = SlotRef(source='buttons', service_id='haircut', staff_id='giorgi', start=local(WED, 12))
+    [ask] = await app.send(ADMIN, data=cb.slot_data(cb.CONFIRM, ref), is_admin=True)
+    assert ask.text.startswith('Booking a walk-in or phone customer')
+    assert app.store.for_customer(ADMIN, START) == []
+
+
+async def test__walk_in__guest_contact_card__validated_strictly(app):
+    await app.text(ADMIN, '/start', is_admin=True)
+    await app.press(ADMIN, '📅', is_admin=True)
+    await app.press(ADMIN, 'Haircut ·', is_admin=True)
+    await app.press(ADMIN, 'Giorgi', is_admin=True)
+    await app.press(ADMIN, 'Tomorrow', is_admin=True)
+    await app.press(ADMIN, '12:00', is_admin=True)
+    await app.text(ADMIN, 'Guest', is_admin=True)
+    replies = await app.send(ADMIN, phone='+1 000 000 0000', phone_verified=True, is_admin=True)
+    assert "doesn't look like a phone number" in replies[0].text
+
+
+async def test__customer_limit__fourth_booking__refused_early_with_phone(app):
+    for time in ('12:00', '15:00', '16:00'):
+        await book_by_buttons(app, time=time)
+        await app.press(USER, '⬅️ Menu')
+    assert len(app.store.for_customer(USER, START)) == 3
+    await app.press(USER, '📅')
+    await app.press(USER, 'Haircut ·')
+    await app.press(USER, 'Giorgi')
+    await app.press(USER, 'Tomorrow')
+    [refusal] = await app.press(USER, '17:00')
+    assert refusal.text.startswith('You already have 3 upcoming bookings') and '+995 555 00 00 00' in refusal.text
+    # Подделанная кнопка «Подтвердить» упирается в тот же лимит — в транзакции базы.
+    ref = SlotRef(source='buttons', service_id='haircut', staff_id='giorgi', start=local(WED, 17))
+    [again] = await app.send(USER, data=cb.slot_data(cb.CONFIRM, ref))
+    assert again.text.startswith('You already have 3 upcoming bookings')
+    assert len(app.store.for_customer(USER, START)) == 3
+
+
+async def test__booked__visit_sooner_than_any_reminder__no_reminder_promised(tmp_path):
+    app = App(tmp_path, make_config(min_lead_min=0))
+    replies = await book_by_buttons(app, time='12:00')  # завтра: «за сутки» и «за 2 часа» придут
+    assert "We'll send you a reminder" in replies[0].text
+    await app.text(USER, '/start')
+    await app.press(USER, '📅')
+    await app.press(USER, 'Beard trim')
+    await app.press(USER, 'Giorgi')
+    await app.press(USER, 'Today')
+    replies = await app.press(USER, '13:30')  # через час — ни одно напоминание уже не придёт
+    replies = await app.press(USER, '✅')
+    assert replies[0].text.startswith("You're booked!") and 'reminder' not in replies[0].text
+
+
+async def test__thanks_after_booking__short_reply_not_error(app):
+    await book_by_buttons(app)
+    [reply] = await app.text(USER, 'thanks!')
+    assert reply.text == "You're welcome! See you soon 👋" and len(all_buttons([reply])) == 1
+    [reply] = await app.text(OTHER, 'спасибо!', language='ru')
+    assert reply.text == 'Пожалуйста! Ждём вас 👋'
+
+
+async def test__name_step__lead_in_phrase__name_extracted(app):
+    await app.text(USER, '/start', language='ru')
+    await app.press(USER, '📅', language='ru')
+    await app.press(USER, 'Стрижка ·', language='ru')
+    await app.press(USER, 'Giorgi', language='ru')
+    await app.press(USER, 'Завтра', language='ru')
+    await app.press(USER, '12:00', language='ru')
+    [ask_phone] = await app.text(USER, 'Меня зовут Анна', language='ru')
+    assert ask_phone.text.startswith('Спасибо, Анна!')
+    [hint] = await app.text(USER, 'запишите меня пожалуйста на завтра', language='ru')
+    assert 'Не похоже на номер' in hint.text or hint.text.startswith('Пожалуйста, напишите только имя')
+
+
+async def test__bad_phone__hint__example_from_phone_region(tmp_path):
+    app = App(tmp_path, make_config(phone_region='RU', contact_phone='+7 912 345-67-89'))
+    await app.text(USER, '/start')
+    await app.press(USER, '📅')
+    await app.press(USER, 'Haircut ·')
+    await app.press(USER, 'Giorgi')
+    await app.press(USER, 'Tomorrow')
+    await app.press(USER, '12:00')
+    await app.text(USER, 'Anna')
+    [hint] = await app.text(USER, 'call me')
+    assert hint.text.endswith('Example: +7 912 345-67-89')
+
+
+async def test__shared_contact__someone_elses_card__strict_validation(app):
+    await app.text(USER, '/start')
+    await app.press(USER, '📅')
+    await app.press(USER, 'Haircut ·')
+    await app.press(USER, 'Giorgi')
+    await app.press(USER, 'Tomorrow')
+    await app.press(USER, '12:00')
+    await app.text(USER, 'Anna')
+    # Номер формата +1…, которого нет в плане нумерации: из чужой карточки не принимается.
+    [hint] = await app.send(USER, phone='+1 000 000 0000', phone_verified=False)
+    assert "doesn't look like a phone number" in hint.text
+    replies = await app.send(USER, phone='+1 000 000 0000', phone_verified=True)  # свой номер из Telegram
+    assert replies[0].text == 'Got it ✅'
+
+
+async def test__handoff_flood__owner_alerted_twice_customer_acknowledged(app):
+    replies = []
+    for index in range(MODEL_CALLS):
+        last = await app.text(USER, f'I want to talk to a human please {index}')
+        replies += last
+    alerts = [r for r in replies if r.to == ADMINS]
+    assert len(alerts) == HANDOFFS
+    assert len(app.events_of('booking.handoff')) == HANDOFFS
+    assert [r.text for r in last] == ["Thanks! We've already passed your message on — a person will reply here soon."]
+    assert app.store.customer(USER).language == 'en'  # язык для ответа /reply
+
+
+async def test__free_text_flood__model_budget__slow_down_without_model_call(app):
+    for index in range(MODEL_CALLS):
+        await app.text(USER, f'hello {index}')
+    calls = len(app.llm.calls)
+    replies = await app.text(USER, 'hello again')
+    assert replies[0].text.startswith("You're sending messages very quickly") and len(app.llm.calls) == calls
+    app.clock.advance(dt.timedelta(minutes=11))
+    await app.text(USER, 'hello later')
+    assert len(app.llm.calls) == calls + 1
+    await app.text(ADMIN, 'hello', is_admin=True)  # администратора лимит не касается
+
+
+async def test__question__gift_card_not_in_faq__handoff_not_card_answer(app):
+    replies = await app.text(USER, 'Do you have a gift card?')
+    assert replies[0].text.startswith('Good question!')
+    assert any(r.to == ADMINS and 'gift card' in r.text for r in replies)
+    assert app.events_of('booking.question_answered') == []

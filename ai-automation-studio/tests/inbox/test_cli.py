@@ -169,6 +169,7 @@ def test__run__one_shot__processes_and_logs_run_ok(server, tmp_path, capsys):
     cli.run(_config(tmp_path))
     out = capsys.readouterr().out
     assert 'inbox: новых 1' in out and 'черновиков 1' in out and '📩 New inquiry from Jane Doe' in out
+    assert 'модель-заглушка' in out  # заглушка выбрана явно — и об этом сказано в выводе
     mailbox, flags, _, message = server.appended[0]
     assert (mailbox, flags) == ('"Drafts"', '(\\Draft \\Seen)') and b'In-Reply-To: <m1@client.example>' in message
     assert server.flags[1] == set()  # письмо клиента осталось непрочитанным
@@ -207,6 +208,7 @@ def test__dry_run_command__table_without_side_effects(server, tmp_path, capsys):
     cli.dry_run_command(_config(tmp_path), limit=5)
     out = capsys.readouterr().out
     assert 'Received' in out and 'Would do' in out and 'модель-заглушка' in out
+    assert 'stub' in out and ' AI ' not in out  # ключевые слова не выдаются за ИИ
     assert 'вызовов модели' in out
     assert server.appended == [] and server.copied == []
     assert not (tmp_path / 'out' / 'Inbox.csv').exists()
@@ -240,3 +242,95 @@ def test__format_result__locked_aborted_errors():
     assert 'пропуск' in cli.format_result(RunResult(folder='INBOX', locked=True))
     text = cli.format_result(RunResult(folder='INBOX', aborted='3 подряд', errors=['таблица']))
     assert '✗ остановлено: 3 подряд' in text and '✗ таблица' in text and 'категории: —' in text
+
+
+def test__run__model_provider_not_set__refuses_to_run_on_stub(env, tmp_path):
+    with pytest.raises(ConfigError, match='AUTOSTUDIO_LLM_PROVIDER'):
+        cli.run(_config(tmp_path))
+
+
+def test__check__example__owner_and_operator_channels_reported(env, capsys):
+    env.setenv('AUTOSTUDIO_LLM_PROVIDER', 'fake')
+    cli.check(EXAMPLE)
+    out = capsys.readouterr().out
+    assert 'сигналы владельцу: консоль сервера' in out
+    assert '⚠ сигналы о горячих лидах уйдут только в лог сервера' in out
+    assert '⚠ канал оператора не настроен' in out and 'подозрительные письма' in out
+    assert 'данные клиента:' in out and 'demo-inbox' in out
+
+
+def test__check__telegram_and_operator_configured__no_channel_warnings(env, tmp_path, capsys):
+    env.setenv('AUTOSTUDIO_NOTIFY_BOT_TOKEN', '1:abc')
+    env.setenv('AUTOSTUDIO_OPERATOR_CHAT_ID', '42')
+    env.setenv('AUTOSTUDIO_OPERATOR_BOT_TOKEN', '2:def')
+    path = tmp_path / 't.toml'
+    path.write_text(
+        CONFIG.format(out=tmp_path, host='imap.example.com').replace(
+            '[sink]', '[notify]\ntelegram_chat_id = "777"\n\n[sink]'
+        ),
+        encoding='utf-8',
+    )
+    cli.check(path)
+    out = capsys.readouterr().out
+    assert 'сигналы владельцу: telegram 777' in out and 'сигналы оператору: telegram 42' in out
+    assert '⚠ сигналы о горячих' not in out and '⚠ канал оператора' not in out
+
+
+def test__check__missing_env__hint_how_to_load_client_env(monkeypatch, capsys):
+    for name in ('INBOX_IMAP_USER', 'INBOX_IMAP_PASSWORD'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('AUTOSTUDIO_LLM_PROVIDER', 'fake')
+    with pytest.raises(ConfigError):
+        cli.check(EXAMPLE)
+    assert 'uv run --env-file clients/<id>/.env' in capsys.readouterr().out
+
+
+def test__check__connect__server_reason_shown_not_only_password_hint(server, tmp_path):
+    import imaplib
+
+    server.fail['LOGIN'] = imaplib.IMAP4.error("b'[ALERT] Too many simultaneous connections. (Failure)'")
+    with pytest.raises(ConfigError, match='Too many simultaneous connections'):
+        cli.check(_config(tmp_path, host='imap.gmail.com'), connect=True)
+
+
+def test__dry_run_command__unreadable_message__error_row_and_count(server, tmp_path, capsys):
+    server.messages[2] = b'\x00\xff garbage that is not an email'
+    cli.dry_run_command(_config(tmp_path), limit=5)
+    captured = capsys.readouterr()
+    assert 'ERROR' in captured.out and 'с ошибкой: 1' in captured.out
+    assert 'разобрано 2/2' in captured.err
+
+
+def test__format_dry_rows__real_model__labelled_ai():
+    from autostudio.inbox.pipeline import DryRow
+
+    row = DryRow(
+        date=NOW, sender='a@b.example', subject='s', category='lead', urgency='high', confidence=0.9,
+        source='model', would=[], notes=[],
+    )  # fmt: skip
+    assert ' AI ' in cli.format_dry_rows([row], NOW.tzinfo or imap.dt.UTC)
+
+
+def test__require_model__real_provider__passes_silently(capsys):
+    from autostudio.settings import Settings
+
+    settings = Settings.from_env({'AUTOSTUDIO_LLM_PROVIDER': 'openai', 'OPENAI_API_KEY': 'sk-test'})
+    cli.require_model(settings, {'AUTOSTUDIO_LLM_PROVIDER': 'openai'})
+    assert capsys.readouterr().out == ''
+
+
+def test__run__copy_folder_missing__run_failed_operator_signal_and_error_exit(server, tmp_path):
+    path = tmp_path / 'c.toml'
+    path.write_text(
+        CONFIG.format(out=tmp_path / 'out', host='imap.example.com')
+        + '\n[[inbox.categories]]\nid = "invoice"\ndescription = "Invoices."\nmove_to = "Archive"\n'
+        + '\n[[inbox.categories]]\nid = "marketing"\ndescription = "Ads."\n'
+        + '\n[[inbox.categories]]\nid = "other"\ndescription = "Else."\n',
+        encoding='utf-8',
+    )
+    server.messages[1] = make_email(subject='Invoice INV-1', body='Please find attached invoice INV-1 for payment.')
+    with pytest.raises(InboxError, match='ошибкой'):
+        cli.run(path)
+    log = EventLog(tmp_path / 'data' / 'acme-tours' / 'events.sqlite')
+    kinds = [event.kind for event in log.between(NOW.replace(year=2000), NOW.replace(year=2100))]
+    assert kinds == ['system.run_failed']

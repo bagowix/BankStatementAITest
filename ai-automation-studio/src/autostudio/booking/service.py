@@ -40,6 +40,7 @@ from autostudio.events import EventLog
 from autostudio.sinks import TableSink
 
 PACKAGE: Final = 'booking'
+WALK_IN_EVENT: Final = 'booking.walk_in'
 BOOKINGS_TAB: Final = 'Bookings'
 SCHEDULE_TAB: Final = 'Schedule'
 
@@ -203,8 +204,10 @@ class BookingService:
             BookingError: Нет имени или телефона.
         """
         booking = self._create(service_id, staff_id, start, customer, language, source, now, max_active)
+        # Запись, которую внёс администратор, — его работа, а не сэкономленное ботом время:
+        # она идёт в журнал отдельным событием и не раздувает «записи» и «пока вы были закрыты».
         self.record(
-            'booking.created',
+            WALK_IN_EVENT if source == 'admin' else 'booking.created',
             now,
             {
                 **self._service_payload(booking),
