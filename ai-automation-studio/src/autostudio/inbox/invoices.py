@@ -259,7 +259,8 @@ def parse_amount(value: str | None) -> Decimal | None:
     Returns:
         Сумма или None, если числа нет или оно нелепо большое.
     """
-    if not value or not value.strip():
+    # price-parser читает «free» как 0: сумма без единой цифры — не сумма, а слово модели.
+    if not value or not any(ch.isdigit() for ch in value):
         return None
     amount = Price.fromstring(value).amount
     if amount is None or not amount.is_finite() or abs(amount) > _MAX_AMOUNT:

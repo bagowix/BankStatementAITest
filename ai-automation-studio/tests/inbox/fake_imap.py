@@ -2,8 +2,11 @@
 
 import imaplib
 import re
+from collections.abc import Callable
 
 from autostudio.inbox.imap import ImapReply
+
+GMAIL_ERROR: bytes = b'{"status":"400","schemes":"Bearer","scope":"https://mail.google.com/"}'
 
 
 class FakeImapServer:
@@ -18,12 +21,15 @@ class FakeImapServer:
         *,
         user: str = 'info@acme.example',
         password: str = 'app-pass-1234',
+        token: str = 'ya29.valid-token',
         messages: dict[int, bytes] | None = None,
         uidvalidity: int = 7,
         folders: list[bytes | tuple[bytes, bytes]] | None = None,
     ) -> None:
         self.user = user
         self.password = password
+        self.token = token
+        self.auth_payloads: list[bytes] = []
         self.messages = dict(messages or {})
         self.flags: dict[int, set[str]] = {uid: set() for uid in self.messages}
         self.uidvalidity = uidvalidity
@@ -55,6 +61,21 @@ class FakeImapServer:
         if (user, password) != (self.user, self.password):
             raise imaplib.IMAP4.error(f"b'[AUTHENTICATIONFAILED] Invalid credentials for {user} / {password}'")
         return 'OK', [b'LOGIN completed']
+
+    def authenticate(self, mechanism: str, authobject: Callable[[bytes], bytes | None]) -> ImapReply:
+        # Как Gmail: пустое продолжение → строка XOAUTH2; неверный токен → продолжение с JSON
+        # ошибки, на которое клиент обязан ответить пустой строкой, и только потом NO.
+        self.commands.append(('AUTHENTICATE', (mechanism,)))
+        self._maybe_fail('AUTHENTICATE')
+        payload = authobject(b'') or b''
+        self.auth_payloads.append(payload)
+        if payload == f'user={self.user}\x01auth=Bearer {self.token}\x01\x01'.encode():
+            return 'OK', [b'Success']
+        answer = authobject(GMAIL_ERROR)
+        self.auth_payloads.append(answer if answer is not None else b'*')
+        if answer != b'':
+            raise imaplib.IMAP4.error('AUTHENTICATE command error: BAD [b\'Invalid SASL argument.\']')
+        raise imaplib.IMAP4.error('[AUTHENTICATIONFAILED] Invalid credentials (Failure)')
 
     def select(self, mailbox: str = 'INBOX', readonly: bool = False) -> ImapReply:
         self.commands.append(('SELECT', (mailbox, str(readonly))))

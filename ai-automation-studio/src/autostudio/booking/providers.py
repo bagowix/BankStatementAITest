@@ -1,9 +1,9 @@
 """dishka-провайдеры пакета booking поверх `CoreProvider`.
 
 `BookingProvider` собирает всё, что не зависит от канала (база, журнал, таблица,
-модель, движок), — им пользуются `run`, `chat` и демо. `TelegramProvider` добавляет
-бота, отправку и цикл напоминаний — только для боевого `run`, чтобы консольному
-чату и демо не нужен был токен.
+модель, Google Calendar, движок), — им пользуются `run`, `chat` и демо. `ChannelProvider`
+добавляет каналы боевого `run`: бота Telegram, WhatsApp (если настроен), общую отправку
+по префиксу ключа чата и цикл напоминаний — консольному чату и демо не нужны токены.
 
 Два решения, которые отличают боевой режим от демо:
 
@@ -17,6 +17,7 @@
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Final
 
 import httpx
 import msgspec
@@ -25,17 +26,22 @@ from aiogram.utils.token import TokenValidationError
 from dishka import Provider, Scope, from_context, provide
 
 from autostudio.booking.admin import AdminDesk
+from autostudio.booking.alarm import OperatorAlarm
+from autostudio.booking.calsync import CalendarAvailability, CalendarSync
 from autostudio.booking.config import BookingConfig
 from autostudio.booking.engine import Engine
+from autostudio.booking.gcal import CalendarApi, GoogleCalendar
 from autostudio.booking.heuristics import booking_fake_llm
-from autostudio.booking.messages import Sender
+from autostudio.booking.messages import RoutingSender, Sender
+from autostudio.booking.relay import Relay
 from autostudio.booking.reminders import ReminderLoop
 from autostudio.booking.service import BookingService
 from autostudio.booking.store import BookingStore
 from autostudio.booking.telegram import BookingBot, TelegramSender
 from autostudio.booking.texts import Texts
 from autostudio.booking.views import Views
-from autostudio.clientconf import NotifyConfig, SinkConfig, client_data_dir, require_env
+from autostudio.booking.whatsapp import WhatsAppBot, WhatsAppSender
+from autostudio.clientconf import NotifyConfig, SinkConfig, client_data_dir, events_path, require_env
 from autostudio.clock import Clock
 from autostudio.errors import ConfigError, LLMError
 from autostudio.events import EventLog
@@ -46,8 +52,53 @@ from autostudio.runlog import Heartbeat
 from autostudio.settings import Settings
 from autostudio.sinks import TableSink, make_sink
 
-EVENTS_FILE = 'events.sqlite'
-STORE_FILE = 'booking.sqlite'
+STORE_FILE: Final = 'booking.sqlite'
+
+
+class CalendarLink:
+    """Календарь клиента для контейнера: API или None, если `[booking.calendar]` не настроен.
+
+    Args:
+        api: Google Calendar (или заглушка демо) либо None.
+    """
+
+    def __init__(self, api: CalendarApi | None) -> None:
+        self.api = api
+
+
+class CalendarParts:
+    """Занятость и синхронизация событий, собранные поверх `CalendarLink` (оба None без календаря).
+
+    Args:
+        availability: Кеш занятости.
+        sync: Запись событий.
+    """
+
+    def __init__(self, availability: CalendarAvailability | None, sync: CalendarSync | None) -> None:
+        self.availability = availability
+        self.sync = sync
+
+
+class WhatsAppLink:
+    """Отправка в WhatsApp или None, если `[booking.whatsapp]` не настроен.
+
+    Args:
+        sender: Отправитель WhatsApp или None.
+    """
+
+    def __init__(self, sender: WhatsAppSender | None) -> None:
+        self.sender = sender
+
+
+class WhatsAppEndpoint:
+    """Вебхук WhatsApp или None.
+
+    Args:
+        bot: Обработчик вебхука или None.
+    """
+
+    def __init__(self, bot: WhatsAppBot | None) -> None:
+        self.bot = bot
 
 
 def resolve_sink(sink: SinkConfig, settings: Settings, config: BookingConfig) -> SinkConfig:
@@ -111,7 +162,7 @@ class BookingProvider(Provider):
 
     @provide
     def events(self, settings: Settings, config: BookingConfig) -> EventLog:
-        return EventLog(client_data_dir(settings.data_dir, config.client) / EVENTS_FILE)
+        return EventLog(events_path(settings.data_dir, config.client))
 
     @provide
     def store(self, settings: Settings, config: BookingConfig) -> BookingStore:
@@ -129,8 +180,11 @@ class BookingProvider(Provider):
 
         async def degraded(error: LLMError) -> None:
             # Ядро шлёт этот сигнал не чаще раза в час: бот тем временем работает на эвристиках.
-            if notifier is not None:
-                await notifier.send(f'⚠️ {config.client.name} / booking: модель недоступна, бот на правилах: {error}')
+            # Модель, не справившаяся с одной репликой (`content`), — не повод будить оператора.
+            if notifier is None or error.kind == 'content':
+                return
+            what = 'проверьте ключ, права и модель' if error.kind == 'config' else 'провайдер недоступен'
+            await notifier.send(f'⚠️ {config.client.name} / booking: модель недоступна ({what}), бот на правилах: {error}')
 
         client = make_llm(settings, booking_fake_llm(), on_fallback=degraded)
         yield client
@@ -145,10 +199,57 @@ class BookingProvider(Provider):
         return Views(config, texts)
 
     @provide
+    def alarm(self, config: BookingConfig, operator: OperatorAlerts, clock: Clock) -> OperatorAlarm:
+        return OperatorAlarm(operator.notifier, f'{config.client.name} / booking', clock=clock)
+
+    @provide
+    def calendar_link(self, config: BookingConfig, http: httpx.AsyncClient) -> CalendarLink:
+        section = config.booking.calendar
+        if section is None:
+            return CalendarLink(None)
+        # google-auth — в extras `sheets`: импорт только при настроенном календаре.
+        from autostudio.booking.gauth import ServiceAccountTokens
+
+        key = Path(require_env(section.credentials_env, os.environ))
+        return CalendarLink(GoogleCalendar(http, ServiceAccountTokens(key)))
+
+    @provide
+    def calendar_parts(
+        self,
+        config: BookingConfig,
+        link: CalendarLink,
+        store: BookingStore,
+        texts: Texts,
+        alarm: OperatorAlarm,
+        clock: Clock,
+    ) -> CalendarParts:
+        if link.api is None:
+            return CalendarParts(None, None)
+        availability = CalendarAvailability(config=config, api=link.api, alarm=alarm, clock=clock)
+        sync = CalendarSync(
+            config=config, store=store, api=link.api, texts=texts, alarm=alarm, clock=clock, availability=availability
+        )
+        return CalendarParts(availability, sync)
+
+    @provide
     def service(
-        self, config: BookingConfig, store: BookingStore, events: EventLog, sink: TableSink, texts: Texts
+        self,
+        config: BookingConfig,
+        store: BookingStore,
+        events: EventLog,
+        sink: TableSink,
+        texts: Texts,
+        calendar: CalendarParts,
     ) -> BookingService:
-        return BookingService(config=config, store=store, events=events, sink=sink, texts=texts)
+        return BookingService(
+            config=config,
+            store=store,
+            events=events,
+            sink=sink,
+            texts=texts,
+            availability=calendar.availability,
+            calendar_sync=calendar.sync,
+        )
 
     @provide
     def admin(self, config: BookingConfig, texts: Texts, service: BookingService) -> AdminDesk:
@@ -176,8 +277,8 @@ class BookingProvider(Provider):
         )
 
 
-class TelegramProvider(Provider):
-    """Бот Telegram, отправка через него и цикл напоминаний (боевой `run`)."""
+class ChannelProvider(Provider):
+    """Каналы боевого `run`: бот Telegram, WhatsApp (если настроен), общая отправка и цикл напоминаний."""
 
     scope = Scope.APP
 
@@ -193,8 +294,43 @@ class TelegramProvider(Provider):
         await bot.session.close()
 
     @provide
-    def sender(self, bot: Bot) -> Sender:
+    def telegram_sender(self, bot: Bot) -> TelegramSender:
         return TelegramSender(bot)
+
+    @provide
+    def whatsapp_link(
+        self,
+        config: BookingConfig,
+        http: httpx.AsyncClient,
+        store: BookingStore,
+        texts: Texts,
+        events: EventLog,
+        alarm: OperatorAlarm,
+        clock: Clock,
+    ) -> WhatsAppLink:
+        section = config.booking.whatsapp
+        if section is None:
+            return WhatsAppLink(None)
+        sender = WhatsAppSender(
+            http=http,
+            config=config,
+            token=require_env(section.token_env, os.environ),
+            store=store,
+            texts=texts,
+            events=events,
+            alarm=alarm,
+            clock=clock,
+        )
+        return WhatsAppLink(sender)
+
+    @provide
+    def sender(self, telegram: TelegramSender, whatsapp: WhatsAppLink) -> Sender:
+        # Ответ администратора из Telegram покупателю в WhatsApp (`/reply wa:…`) и уведомление
+        # владельцу о записи из WhatsApp идут через один отправитель — по префиксу ключа чата.
+        routes: dict[str, Sender] = {'tg': telegram}
+        if whatsapp.sender is not None:
+            routes['wa'] = whatsapp.sender
+        return RoutingSender(routes)
 
     @provide
     def booking_bot(
@@ -204,8 +340,7 @@ class TelegramProvider(Provider):
         sender: Sender,
         texts: Texts,
         http: httpx.AsyncClient,
-        operator: OperatorAlerts,
-        clock: Clock,
+        alarm: OperatorAlarm,
     ) -> BookingBot:
         return BookingBot(
             config=config,
@@ -213,9 +348,46 @@ class TelegramProvider(Provider):
             sender=sender,
             texts=texts,
             notifier=owner_notifier(config.notify, http),
-            operator=operator.notifier,
+            alarm=alarm,
+        )
+
+    @provide
+    def whatsapp_endpoint(
+        self,
+        config: BookingConfig,
+        engine: Engine,
+        sender: Sender,
+        whatsapp: WhatsAppLink,
+        store: BookingStore,
+        texts: Texts,
+        http: httpx.AsyncClient,
+        alarm: OperatorAlarm,
+        clock: Clock,
+    ) -> WhatsAppEndpoint:
+        section = config.booking.whatsapp
+        if section is None or whatsapp.sender is None:
+            return WhatsAppEndpoint(None)
+        admins = [f'tg:{chat_id}' for chat_id in config.booking.admin_chat_ids]
+        relay = Relay(
+            engine=engine,
+            sender=sender,
+            texts=texts,
+            admins=admins,
+            notifier=owner_notifier(config.notify, http),
+            alarm=alarm,
+        )
+        bot = WhatsAppBot(
+            config=config,
+            relay=relay,
+            wa_sender=whatsapp.sender,
+            store=store,
+            texts=texts,
+            app_secret=require_env(section.app_secret_env, os.environ),
+            verify_token=require_env(section.verify_token_env, os.environ),
+            alarm=alarm,
             clock=clock,
         )
+        return WhatsAppEndpoint(bot)
 
     @provide
     def reminder_loop(
@@ -229,6 +401,7 @@ class TelegramProvider(Provider):
         heartbeat: Heartbeat,
         operator: OperatorAlerts,
         clock: Clock,
+        calendar: CalendarParts,
     ) -> ReminderLoop:
         return ReminderLoop(
             config=config,
@@ -240,4 +413,5 @@ class TelegramProvider(Provider):
             heartbeat=heartbeat,
             operator=operator.notifier,
             clock=clock,
+            calendar_sync=calendar.sync,
         )

@@ -250,3 +250,112 @@ async def test__imap__login_refused_for_other_reason__server_reason_without_pass
     message = str(caught.value)
     assert message.endswith('[ALERT] Too many simultaneous connections. (Failure)')
     assert 'пароль приложения' not in message
+
+
+class StaticTokens:
+    """Источник OAuth-токена для тестов адаптера: отдаёт заданный токен и считает вызовы."""
+
+    def __init__(self, token: str = 'ya29.valid-token', fail: Exception | None = None) -> None:
+        self.token = token
+        self.fail = fail
+        self.calls = 0
+        self.invalidated = 0
+
+    @property
+    def label(self) -> str:
+        return 'Google'
+
+    @property
+    def hint(self) -> str:
+        return 'check the scope'
+
+    async def access_token(self) -> str:
+        self.calls += 1
+        if self.fail is not None:
+            raise self.fail
+        return self.token
+
+    def invalidate(self) -> None:
+        self.invalidated += 1
+
+
+def _oauth_box(server: FakeImapServer, tokens: StaticTokens) -> ImapMailBox:
+    return ImapMailBox(
+        host='imap.gmail.com',
+        port=993,
+        user=server.user,
+        tokens=tokens,
+        timeout=5,
+        connector=lambda host, port, timeout: server,
+    )
+
+
+async def test__imap__xoauth2__authenticate_with_sasl_string_no_login_then_read_only():
+    server = FakeImapServer(messages={5: make_email()})
+    tokens = StaticTokens()
+    async with _oauth_box(server, tokens) as box:
+        state = await box.select('INBOX')
+        assert await box.fetch(5) == make_email()
+    assert server.auth_payloads == [b'user=info@acme.example\x01auth=Bearer ya29.valid-token\x01\x01']
+    assert [command for command, _ in server.commands][:2] == ['AUTHENTICATE', 'SELECT']
+    assert ('AUTHENTICATE', ('XOAUTH2',)) in server.commands
+    assert not any(command == 'LOGIN' for command, _ in server.commands)
+    assert state.uidvalidity == 7 and server.flags[5] == set() and tokens.calls == 1
+
+
+async def test__imap__xoauth2_token_rejected__empty_answer_reason_hint_no_token_and_invalidated():
+    server = FakeImapServer(token='ya29.other')
+    tokens = StaticTokens(token='ya29.expired-secret-token')
+    with pytest.raises(MailboxError) as caught:
+        async with _oauth_box(server, tokens):
+            pass
+    message = str(caught.value)
+    # Клиент ответил на продолжение-ошибку пустой строкой (RFC 7628), и сервер назвал причину.
+    assert server.auth_payloads[1] == b''
+    assert '[AUTHENTICATIONFAILED] Invalid credentials' in message
+    assert 'status=400, scope=https://mail.google.com/' in message and 'Google OAuth: check the scope' in message
+    assert 'ya29.expired-secret-token' not in message and server.user not in message
+    assert tokens.invalidated == 1 and server.logged_out
+
+
+async def test__imap__xoauth2_token_provider_fails__no_connection_opened():
+    connected: list[str] = []
+
+    def connector(host: str, port: int, timeout: float) -> FakeImapServer:
+        connected.append(host)
+        return FakeImapServer()
+
+    box = ImapMailBox(
+        host='outlook.office365.com',
+        port=993,
+        user='info@acme.example',
+        tokens=StaticTokens(fail=MailboxError('Microsoft 365 OAuth: токен не выдан')),
+        connector=connector,
+    )
+    with pytest.raises(MailboxError, match='токен не выдан'):
+        async with box:
+            pass
+    assert connected == []
+
+
+async def test__imap__server_error_mentions_oauth_token__scrubbed():
+    server = FakeImapServer(messages={1: b'x'})
+    server.fail['FETCH'] = imaplib.IMAP4.error('FETCH failed, token ya29.valid-token rejected')
+    with pytest.raises(MailboxError) as caught:
+        async with _oauth_box(server, StaticTokens()) as box:
+            await box.select('INBOX')
+            await box.fetch(1)
+    assert 'ya29.valid-token' not in str(caught.value) and '***' in str(caught.value)
+
+
+@pytest.mark.parametrize(('password', 'tokens'), [(None, None), ('p', StaticTokens())])
+def test__imap__login_method__exactly_one_required(password, tokens):
+    with pytest.raises(ValueError, match='ровно один способ входа'):
+        ImapMailBox(host='h', port=993, user='u', password=password, tokens=tokens)
+
+
+def test__fake_server__resending_token_on_error_continuation__bad_like_gmail():
+    # Проверка самой заглушки: клиент, повторяющий токен (как imap-tools), получает BAD без причины.
+    server = FakeImapServer()
+    with pytest.raises(imaplib.IMAP4.error, match='Invalid SASL argument'):
+        server.authenticate('XOAUTH2', lambda challenge: b'user=x\x01auth=Bearer bad\x01\x01')
