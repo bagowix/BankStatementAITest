@@ -22,7 +22,14 @@ def test__month_bounds__december__next_year():
 
 def test__build_report__counts_and_hours_and_reliability():
     events = _events('booking.created', 'booking.created', 'booking.reminded', 'system.run_ok', 'system.run_failed')
-    report = build_report(client='Acme', month=dt.date(2026, 10, 20), language='ru', events=events, specs=SPECS, highlights=['Пик — пятница'])
+    report = build_report(
+        client='Acme',
+        month=dt.date(2026, 10, 20),
+        language='ru',
+        events=events,
+        specs=SPECS,
+        highlights=['Пик — пятница'],
+    )
     assert [(line.label, line.count) for line in report.lines] == [('Записей создано', 2), ('Reminders sent', 1)]
     assert report.hours_saved == 0.2
     assert report.success_rate == 50.0
@@ -42,7 +49,14 @@ def test__build_report__no_events__honest_empty():
 
 
 def test__render_html__escapes_client_text():
-    report = build_report(client='<script>x</script>', month=dt.date(2026, 10, 1), language='en', events=_events('booking.created', 'system.run_ok'), specs=SPECS, highlights=['<b>'])
+    report = build_report(
+        client='<script>x</script>',
+        month=dt.date(2026, 10, 1),
+        language='en',
+        events=_events('booking.created', 'system.run_ok'),
+        specs=SPECS,
+        highlights=['<b>'],
+    )
     page = render_html(report)
     assert '<script>x' not in page
     assert '&lt;script&gt;' in page

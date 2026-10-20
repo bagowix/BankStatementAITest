@@ -53,7 +53,7 @@ def test__client_info__bad_timezone__config_error(write_toml):
 
 @pytest.mark.parametrize('bad_id', ['A', 'acme_shop', '-acme', 'x'])
 def test__client_info__bad_id__config_error(bad_id):
-    with pytest.raises(ConfigError, match='client.id'):
+    with pytest.raises(ConfigError, match=r'client\.id'):
         ClientInfo(id=bad_id, name='A')
 
 

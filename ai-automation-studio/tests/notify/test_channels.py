@@ -18,7 +18,9 @@ from autostudio.notify import (
 
 @respx.mock
 async def test__telegram_send__ok__posts_chat_and_text():
-    route = respx.post('https://api.telegram.org/bot123:abc/sendMessage').mock(return_value=httpx.Response(200, json={'ok': True}))
+    route = respx.post('https://api.telegram.org/bot123:abc/sendMessage').mock(
+        return_value=httpx.Response(200, json={'ok': True})
+    )
     async with httpx.AsyncClient() as http:
         await TelegramNotifier(http, '123:abc', '42').send('hi')
     assert route.called

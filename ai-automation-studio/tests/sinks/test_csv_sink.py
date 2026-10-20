@@ -2,9 +2,9 @@ import csv
 
 import pytest
 
+from autostudio.clientconf import SinkConfig
 from autostudio.errors import SinkError
 from autostudio.sinks import CsvSink, make_sink, neutralize_formula
-from autostudio.clientconf import SinkConfig
 
 
 def _read(path):

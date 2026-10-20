@@ -27,7 +27,15 @@ async def test__supervised_run__success__ok_event_and_pings(tmp_path, clock):
         return 7
 
     async with httpx.AsyncClient() as http:
-        result = await supervised_run(package='prices', job=job, events=log, heartbeat=Heartbeat(http, 'https://hc.example.test/abc/'), operator=None, client_name='Acme', now=clock)
+        result = await supervised_run(
+            package='prices',
+            job=job,
+            events=log,
+            heartbeat=Heartbeat(http, 'https://hc.example.test/abc/'),
+            operator=None,
+            client_name='Acme',
+            now=clock,
+        )
     assert result == 7
     assert start.called and ok.called
     assert [e.kind for e in log.between(clock().replace(year=2000), clock().replace(year=2100))] == ['system.run_ok']
@@ -44,7 +52,15 @@ async def test__supervised_run__package_error__failed_event_fail_ping_operator_a
         raise LLMError('quota exceeded')
 
     async with httpx.AsyncClient() as http:
-        result = await supervised_run(package='inbox', job=job, events=log, heartbeat=Heartbeat(http, 'https://hc.example.test/abc'), operator=operator, client_name='Acme', now=clock)
+        result = await supervised_run(
+            package='inbox',
+            job=job,
+            events=log,
+            heartbeat=Heartbeat(http, 'https://hc.example.test/abc'),
+            operator=operator,
+            client_name='Acme',
+            now=clock,
+        )
     assert result is None
     assert fail.calls[0].request.content == b'quota exceeded'
     assert operator.sent == ['⚠️ Acme / inbox: quota exceeded']
@@ -58,7 +74,15 @@ async def test__supervised_run__operator_down__still_returns_none(tmp_path, cloc
         raise LLMError('x')
 
     async with httpx.AsyncClient() as http:
-        result = await supervised_run(package='inbox', job=job, events=EventLog(tmp_path / 'e.sqlite'), heartbeat=Heartbeat(http, None), operator=Recorder(fail=True), client_name='A', now=clock)
+        result = await supervised_run(
+            package='inbox',
+            job=job,
+            events=EventLog(tmp_path / 'e.sqlite'),
+            heartbeat=Heartbeat(http, None),
+            operator=Recorder(fail=True),
+            client_name='A',
+            now=clock,
+        )
     assert result is None
 
 

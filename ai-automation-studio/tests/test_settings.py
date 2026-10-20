@@ -47,7 +47,11 @@ def test__settings__empty_effort__none():
 
 def test__settings__operator_and_healthcheck__read():
     settings = Settings.from_env(
-        {'AUTOSTUDIO_HEALTHCHECK_URL': 'https://hc-ping.com/x', 'AUTOSTUDIO_OPERATOR_CHAT_ID': '42', 'AUTOSTUDIO_DATA_DIR': '/data'}
+        {
+            'AUTOSTUDIO_HEALTHCHECK_URL': 'https://hc-ping.com/x',
+            'AUTOSTUDIO_OPERATOR_CHAT_ID': '42',
+            'AUTOSTUDIO_DATA_DIR': '/data',
+        }
     )
     assert settings.healthcheck_url == 'https://hc-ping.com/x'
     assert settings.operator_chat_id == '42'
