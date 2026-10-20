@@ -23,9 +23,30 @@ _TELEGRAM_RETRIES: Final = 2
 _MAX_RETRY_AFTER_S: Final = 30.0
 
 
+def utf16_len(text: str) -> int:
+    """Длина в единицах UTF-16 — так Telegram считает лимит сообщения (эмодзи — две единицы)."""
+    return len(text.encode('utf-16-le')) // 2
+
+
 def clip(text: str, limit: int = TELEGRAM_LIMIT) -> str:
-    """Обрезает текст до лимита канала, честно помечая обрезку."""
-    return text if len(text) <= limit else text[: limit - 1] + '…'
+    """Обрезает текст до лимита канала в единицах UTF-16, честно помечая обрезку.
+
+    Args:
+        text: Текст сообщения.
+        limit: Лимит канала в единицах UTF-16.
+
+    Returns:
+        Исходный текст или его начало с «…», не длиннее лимита.
+    """
+    if utf16_len(text) <= limit:
+        return text
+    budget = limit - 1
+    used = 0
+    for index, char in enumerate(text):
+        used += 2 if ord(char) > 0xFFFF else 1
+        if used > budget:
+            return text[:index] + '…'
+    return text  # pragma: no cover - недостижимо: длина выше лимита
 
 
 class TelegramNotifier:

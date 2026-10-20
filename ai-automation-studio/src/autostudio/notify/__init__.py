@@ -7,14 +7,17 @@ import httpx
 from autostudio.clientconf import NotifyConfig, require_env
 from autostudio.notify.base import Notifier
 from autostudio.notify.channels import (
+    TELEGRAM_LIMIT,
     ConsoleNotifier,
     FanoutNotifier,
     TelegramNotifier,
     WebhookNotifier,
     clip,
+    utf16_len,
 )
 
 __all__ = [
+    'TELEGRAM_LIMIT',
     'ConsoleNotifier',
     'FanoutNotifier',
     'Notifier',
@@ -22,6 +25,7 @@ __all__ = [
     'WebhookNotifier',
     'clip',
     'make_notifier',
+    'utf16_len',
 ]
 
 

@@ -144,3 +144,13 @@ async def test__telegram_send__huge_retry_after__capped():
     async with httpx.AsyncClient() as http:
         await TelegramNotifier(http, 't', '42', sleep=sleep).send('hi')
     assert slept == [30.0]
+
+
+def test__clip__emoji__counted_as_two_utf16_units():
+    from autostudio.notify import utf16_len
+
+    text = '😀' * 2500  # 5000 единиц UTF-16
+    clipped = clip(text)
+    assert utf16_len(clipped) <= 4000
+    assert clipped.endswith('…')
+    assert utf16_len('a😀') == 3
