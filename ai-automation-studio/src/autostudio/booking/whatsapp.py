@@ -22,12 +22,14 @@
 - Бот — помощник записи и FAQ конкретного бизнеса (с 15.01.2026 Meta запрещает в WhatsApp
   ассистентов общего назначения): движок отвечает только по услугам, графику и FAQ.
 - **Ошибки Graph API делятся по тому, кто их чинит.** Перегрузка и 5xx — один повтор, затем
-  `DeliveryError`. Сбой всего канала (токен отозван, нет прав, шаблон отклонён) — тоже
-  `DeliveryError`: напоминание вернётся в очередь и уйдёт, когда оператор починит токен или
-  шаблон (сигнал ему — при первом сбое и «снова работает» — при первой удачной отправке).
-  `RecipientGoneError` — только то, что не лечится ни повтором, ни оператором: этот покупатель
-  недоступен или запрос неверен. Тело ошибки не от Graph (HTML прокси, пустой 503) кода не
-  имеет и сигнал «токен» не поднимает: код 0 у Graph — это AuthException, а не «нет кода».
+  `DeliveryError`. Сбой всего канала (токен отозван, нет прав, шаблон отклонён; оплата,
+  блокировка аккаунта Meta, номер не зарегистрирован) — тоже `DeliveryError`: напоминание
+  вернётся в очередь и уйдёт, когда оператор или клиент починит причину (сигнал оператору — при
+  первом сбое и «снова работает» — при первой удачной отправке). `RecipientGoneError` — только
+  то, что не лечится ни повтором, ни оператором: этот покупатель недоступен или запрос неверен.
+  Тело ошибки не от Graph (HTML прокси, пустой ответ) кода не имеет и сигнал «токен» не
+  поднимает (код 0 у Graph — это AuthException, а не «нет кода»); 4xx без ошибки Graph — тоже
+  сбой канала: о получателе такой ответ ничего не говорит.
 - **Неверная подпись вебхука** — сигнал оператору, если запрос похож на настоящий от Meta: при
   чужом App Secret каждое сообщение покупателя получает 403, Meta повторяет его до 7 дней и
   выбрасывает, а `check` этого не видит — секрет проверяет только настоящая доставка.
@@ -41,6 +43,7 @@ import hmac
 import logging
 import secrets
 from collections import OrderedDict
+from collections.abc import Mapping
 from typing import Final
 
 import httpx
@@ -91,13 +94,29 @@ _SEEN_MAX: Final = 2000
 _PAGES_MAX: Final = 1000
 _PAGE_TTL: Final = dt.timedelta(minutes=30)
 # Коды Meta: перегрузка и лимиты (повторить позже) — пропускная способность номера,
-# пара «бизнес — пользователь» (одно сообщение в 6 секунд), временные сбои платформы.
-RETRYABLE_CODES: Final = frozenset({1, 2, 4, 80007, 130429, 131000, 131016, 131056})
+# пара «бизнес — пользователь» (одно сообщение в 6 секунд), временные сбои платформы,
+# аккаунт в обслуживании (131057, например повышение пропускной способности).
+RETRYABLE_CODES: Final = frozenset({1, 2, 4, 80007, 130429, 131000, 131016, 131056, 131057})
 # Токен отозван или нет прав (0 — AuthException Graph) — чинит оператор, а не следующая попытка.
 AUTH_CODES: Final = frozenset({0, 10, 190, 200})
 # Ошибки шаблона (нет такого, не одобрен, параметры не сходятся, приостановлен) — тоже оператор.
 TEMPLATE_CODES: Final = range(132000, 133000)
+# Не может отправлять весь аккаунт или номер, а не этот получатель: Meta отвечает 400, как на
+# неверный номер, но молчаливый отказ стоил бы всех напоминаний, пока клиент не заметит сам.
+# Код → что проверить. 130497 (нельзя писать в страну получателя) сюда не входит: он про
+# конкретного получателя, и повтор его не доставит.
+ACCOUNT_CODES: Final[Mapping[int, str]] = {
+    131042: 'проблема оплаты: проверьте способ оплаты в WhatsApp Manager (карта истекла, отклонена или не добавлена)',
+    131031: 'аккаунт заблокирован Meta: WhatsApp Manager → «Качество аккаунта», снимается апелляцией',
+    368: 'временная блокировка за нарушение правил Meta: WhatsApp Manager → «Качество аккаунта»',
+    131048: 'номер ограничен за жалобы на спам: WhatsApp Manager → «Качество аккаунта»',
+    131037: 'отображаемое имя номера не одобрено: WhatsApp Manager → «Номера телефонов»',
+    131045: 'ошибка регистрации номера (сертификат): зарегистрируйте номер в Cloud API заново',
+    133010: 'номер не зарегистрирован в Cloud API: зарегистрируйте номер',
+}
 ALARM_AUTH: Final = 'whatsapp_auth'
+ALARM_ACCOUNT: Final = 'whatsapp_account'
+ALARM_HTTP: Final = 'whatsapp_http'
 ALARM_TEMPLATE: Final = 'whatsapp_template'
 ALARM_TEMPLATE_STATUS: Final = 'whatsapp_template_status'
 ALARM_SIGNATURE: Final = 'whatsapp_signature'
@@ -179,6 +198,9 @@ class WhatsAppSender:
         self._alarm = alarm
         self._clock = clock
         self._retry_delay = retry_delay
+        # Виды сообщений (`service`, `template`), на которых аккаунт отказал: сигнал снимает удача
+        # каждого из них, а не любая — блокировка бывает только на шаблоны.
+        self._account_down: set[str] = set()
         self._pages: OrderedDict[str, _Page] = OrderedDict()
         self._url = f'{GRAPH_API}/{section.graph_version}/{section.phone_number_id}/messages'
 
@@ -290,8 +312,8 @@ class WhatsAppSender:
             shown = '—' if code is None else code
             channel_down = await self._failed(code, text, response.status_code, kind)
             if retryable or channel_down:
-                # Канал целиком (перегрузка, токен, шаблон): напоминание вернётся в очередь и уйдёт
-                # после восстановления — оператор о сбое уже знает.
+                # Канал целиком (перегрузка, токен, шаблон, оплата, блокировка): напоминание вернётся
+                # в очередь и уйдёт после восстановления — оператор о сбое уже знает.
                 raise DeliveryError(f'WhatsApp {response.status_code} ({shown}): {text}')
             # Остальное (неверный параметр, этот получатель недоступен) повтором не лечится:
             # повтор напоминания каждую минуту был бы спамом и расходом.
@@ -300,6 +322,15 @@ class WhatsAppSender:
     async def _failed(self, code: int | None, text: str, status: int, kind: str) -> bool:
         """Сигнал оператору о сбое всего канала; True, если сбой такой (а не у одного получателя)."""
         shown = f'{code}: {text}' if code is not None else text
+        # Код точнее статуса: блокировка может прийти и с 403, а «проверьте токен» увело бы не туда.
+        if code is not None and code in ACCOUNT_CODES:
+            self._account_down.add(kind)
+            await self._alarm.raise_(
+                ALARM_ACCOUNT,
+                f'WhatsApp не отправляет сообщения ({shown}) — {ACCOUNT_CODES[code]}; '
+                'напоминания ждут и уйдут после исправления',
+            )
+            return True
         if status in (401, 403) or (code is not None and code in AUTH_CODES):
             await self._alarm.raise_(ALARM_AUTH, f'WhatsApp отклонил токен ({shown}) — проверьте токен system user')
             return True
@@ -310,12 +341,28 @@ class WhatsAppSender:
                 'статус одобрения и число параметров; напоминания ждут и уйдут после исправления',
             )
             return True
+        if code is None and status < 500 and status != 429:
+            # 4xx без ошибки Graph отдал не Graph (прокси, фильтр исходящего трафика): о получателе
+            # он ничего не говорит, а «не доставлено навсегда» потеряло бы все напоминания.
+            await self._alarm.raise_(
+                ALARM_HTTP,
+                f'WhatsApp API ответил HTTP {status} без ошибки Graph — запрос, похоже, не дошёл до Meta: '
+                'проверьте прокси и исходящую сеть сервера; напоминания ждут и уйдут после исправления',
+            )
+            return True
         return False
 
     async def _recovered(self, kind: str) -> None:
         # Удачная отправка доказывает, что токен работает (а шаблонная — что и шаблон): сигнал
         # снимается, и следующий сбой снова дойдёт до оператора.
         await self._alarm.clear(ALARM_AUTH, 'WhatsApp снова принимает токен — сообщения уходят')
+        await self._alarm.clear(ALARM_HTTP, 'WhatsApp API снова отвечает — сообщения уходят')
+        if kind in self._account_down:
+            # Ответ внутри окна при блокировке только шаблонов (1–3 дня за нарушения) сигнал не
+            # снимает: иначе «⚠️» и «✅» чередовались бы до конца блокировки.
+            self._account_down.discard(kind)
+            if not self._account_down:
+                await self._alarm.clear(ALARM_ACCOUNT, 'WhatsApp снова отправляет сообщения')
         if kind == 'template':
             await self._alarm.clear(ALARM_TEMPLATE, f'шаблон {self._section.reminder_template} снова отправляется')
 

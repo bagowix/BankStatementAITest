@@ -161,14 +161,15 @@ async def test__reminder__no_consent_opted_out_or_no_template__recipient_gone(ap
 
 
 @respx.mock
-async def test__post__throttled_then_ok__retried_once(app):
+@pytest.mark.parametrize('code', [131056, 131057])
+async def test__post__throttled_or_maintenance_then_ok__retried_once(app, code):
     route = respx.post(URL).mock(
-        side_effect=[httpx.Response(400, json={'error': {'code': 131056, 'message': 'pair rate limit'}}), OK]
+        side_effect=[httpx.Response(400, json={'error': {'code': code, 'message': 'pair rate limit'}}), OK]
     )
     contact(app)
     async with httpx.AsyncClient() as http:
         await make_sender(app, http).send('wa:c1', Outgoing(text='x'))
-    assert route.call_count == 2
+    assert route.call_count == 2 and app.operator.texts == []
 
 
 @respx.mock
@@ -232,13 +233,87 @@ async def test__template_rejected__channel_failure_alerted_recovered_on_next_tem
 
 
 @respx.mock
-async def test__post__error_body_not_json__no_code_recipient_gone_no_token_alarm(app):
-    respx.post(URL).mock(return_value=httpx.Response(400, text='<html>'))
+async def test__post__4xx_body_not_from_graph__channel_failure_http_alarm_not_token_recovered(app):
+    # Прокси или фильтр исходящего трафика ничего не говорит о получателе: напоминание не теряется.
+    route = respx.post(URL).mock(side_effect=[httpx.Response(400, text='<html>'), httpx.Response(404, json={}), OK])
     contact(app)
     async with httpx.AsyncClient() as http:
-        with pytest.raises(RecipientGoneError, match=r'\(—\): HTTP 400'):
+        sender = make_sender(app, http)
+        for status in ('400', '404'):
+            with pytest.raises(DeliveryError, match=rf'{status} \(—\): HTTP {status}') as caught:
+                await sender.send('wa:c1', Outgoing(text='x'))
+            assert not isinstance(caught.value, RecipientGoneError)
+        await sender.send('wa:c1', Outgoing(text='x'))
+    assert route.call_count == 3  # без повтора внутри отправки: прокси за секунду не починится
+    [alarm, recovery] = app.operator.texts
+    assert 'HTTP 400 без ошибки Graph' in alarm and 'токен' not in alarm
+    assert recovery == '✅ Test Barbers / booking: WhatsApp API снова отвечает — сообщения уходят'
+
+
+def graph_error(status: int, code: int, message: str) -> httpx.Response:
+    return httpx.Response(status, json={'error': {'message': message, 'type': 'OAuthException', 'code': code}})
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ('status', 'code', 'hint'),
+    [
+        pytest.param(400, 131042, 'способ оплаты', id='payment'),
+        pytest.param(400, 131031, 'заблокирован', id='account-locked'),
+        pytest.param(400, 368, 'нарушение правил', id='policy-block'),
+        pytest.param(403, 368, 'нарушение правил', id='policy-block-403-not-token'),
+        pytest.param(400, 131048, 'спам', id='spam-rate-limit'),
+        pytest.param(400, 131037, 'имя номера', id='display-name'),
+        pytest.param(400, 131045, 'регистрации номера', id='certificate'),
+        pytest.param(400, 133010, 'не зарегистрирован', id='number-not-registered'),
+    ],
+)
+async def test__post__account_level_code__channel_failure_account_alarm_not_token(app, status, code, hint):
+    route = respx.post(URL).mock(return_value=graph_error(status, code, 'account cannot send'))
+    contact(app)
+    async with httpx.AsyncClient() as http:
+        sender = make_sender(app, http)
+        for _ in range(2):
+            with pytest.raises(DeliveryError, match=str(code)) as caught:
+                await sender.send('wa:c1', Outgoing(text='x'))
+            assert not isinstance(caught.value, RecipientGoneError)
+    assert route.call_count == 2  # повтором через секунду оплата и блокировка не чинятся
+    [alarm] = app.operator.texts  # один сигнал на переход, а не на каждое сообщение
+    assert f'WhatsApp не отправляет сообщения ({code}: account cannot send)' in alarm and hint in alarm
+    assert 'токен' not in alarm
+
+
+@respx.mock
+@pytest.mark.parametrize('code', [131026, 130497, 100])
+async def test__post__recipient_level_code__recipient_gone_no_alarm(app, code):
+    # Недоставимый номер, страна получателя, неверный параметр — повтор и оператор не помогут.
+    route = respx.post(URL).mock(return_value=graph_error(400, code, 'this recipient'))
+    contact(app)
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(RecipientGoneError, match=str(code)):
             await make_sender(app, http).send('wa:c1', Outgoing(text='x'))
-    assert app.operator.texts == []
+    assert route.call_count == 1 and app.operator.texts == []
+
+
+@respx.mock
+async def test__account_block_on_templates_only__service_success_keeps_alarm_template_success_clears(app):
+    # Блокировка за нарушения на 1–3 дня запрещает только шаблоны: ответы внутри окна идут.
+    route = respx.post(URL).mock(side_effect=[graph_error(400, 368, 'blocked'), OK, OK, OK])
+    contact(app, key='wa:old')
+    app.store.set_consent('wa:old', subscribed=True, now=app.clock())
+    app.clock.advance(dt.timedelta(hours=30))
+    contact(app, user_id='GE.2', phone='995599000222', key='wa:new')
+    async with httpx.AsyncClient() as http:
+        sender = make_sender(app, http)
+        with pytest.raises(DeliveryError):
+            await sender.send('wa:old', reminder())
+        await sender.send('wa:new', Outgoing(text='reply in window'))
+        assert len(app.operator.texts) == 1  # удача обычного сообщения блокировку шаблонов не снимает
+        await sender.send('wa:new', Outgoing(text='one more'))
+        await sender.send('wa:old', reminder())
+    assert [call['type'] for call in sent_json(route)] == ['template', 'text', 'text', 'template']
+    assert app.operator.texts[1] == '✅ Test Barbers / booking: WhatsApp снова отправляет сообщения'
+    assert len(app.operator.texts) == 2
 
 
 @respx.mock
@@ -280,6 +355,40 @@ async def test__reminder__token_revoked_then_fixed__released_and_delivered_next_
     assert await run_pass() == 1
     assert route.call_count == 2 and sent_json(route)[1]['type'] == 'template'
     assert len(app.events_of('booking.reminded')) == 1
+
+
+@respx.mock
+async def test__reminder__payment_lapsed_then_fixed__released_one_alarm_recovery_delivered_next_pass(app):
+    from autostudio.booking.reminders import send_due_reminders
+    from tests.booking.helpers import WED, local
+
+    lapsed = graph_error(400, 131042, 'Business eligibility payment issue')
+    route = respx.post(URL).mock(side_effect=[lapsed, lapsed, OK])
+    contact(app)
+    app.store.set_consent('wa:c1', subscribed=True, now=app.clock())
+    app.book_directly('wa:c1', 'haircut', 'giorgi', local(WED, 17))
+    app.clock.set(local(WED, 15, 1))  # вне 24-часового окна: напоминание уходит шаблоном
+
+    async with httpx.AsyncClient() as http:
+        sender = make_sender(app, http)
+
+        async def run_pass() -> int:
+            return await send_due_reminders(
+                app.store, sender, app.clock(), config=app.config, texts=app.texts, events=app.events
+            )
+
+        assert await run_pass() == 0  # карта клиента истекла: напоминание ждёт, а не пропадает
+        app.clock.advance(dt.timedelta(minutes=1))
+        assert await run_pass() == 0
+        app.clock.advance(dt.timedelta(minutes=1))  # клиент обновил карту в WhatsApp Manager
+        assert await run_pass() == 1
+        app.clock.advance(dt.timedelta(minutes=1))
+        assert await run_pass() == 0  # уже доставлено — второй раз не уходит
+    assert route.call_count == 3 and {call['type'] for call in sent_json(route)} == {'template'}
+    assert len(app.events_of('booking.reminded')) == 1
+    [alarm, recovery] = app.operator.texts
+    assert alarm.startswith('⚠️') and '131042' in alarm and 'способ оплаты' in alarm
+    assert recovery == '✅ Test Barbers / booking: WhatsApp снова отправляет сообщения'
 
 
 def long_list() -> Outgoing:
